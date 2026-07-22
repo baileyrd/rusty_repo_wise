@@ -6,6 +6,18 @@ repo routing work through PRs).
 
 ---
 
+## PR #4 — Update default-branch references now that main exists
+**2026-07-22** · [#4](https://github.com/baileyrd/rusty_repo_wise/pull/4)
+
+- **Changed:** the repo's default branch was renamed on GitHub from
+  `claude/repowise-rust-port-pcxhal` to `main`. Updated the two places that
+  hardcoded the old name: `CLAUDE.md`'s workflow description and
+  `ci-rust.yml`'s `push` trigger (previously pinned to the old branch name
+  with a comment to update it once `main` existed).
+- Earlier entries in this file that mention the old branch name describe
+  the state at the time those changes were made and are left as an
+  accurate historical record rather than rewritten.
+
 ## PR #1 — Add standard governance files (PR/issue templates, docs, CI)
 **2026-07-22** · [#1](https://github.com/baileyrd/rusty_repo_wise/pull/1)
 

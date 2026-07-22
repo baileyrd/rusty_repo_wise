@@ -99,7 +99,7 @@ impl HealthReport {
             counts.entry(f.kind.label()).or_insert((f.kind, 0)).1 += 1;
         }
         let mut out: Vec<(FindingKind, usize)> = counts.into_values().collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|b| std::cmp::Reverse(b.1));
         out
     }
 }

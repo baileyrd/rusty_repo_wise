@@ -273,20 +273,20 @@ impl RepoGraph {
             .map(|path| (path.clone(), self.dependents_of(path).len()))
             .filter(|(_, c)| *c > 0)
             .collect();
-        most_depended_on.sort_by(|a, b| b.1.cmp(&a.1));
+        most_depended_on.sort_by_key(|b| std::cmp::Reverse(b.1));
         most_depended_on.truncate(10);
 
         let mut by_language: Vec<(String, usize)> = by_language
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
-        by_language.sort_by(|a, b| b.1.cmp(&a.1));
+        by_language.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut symbol_counts: Vec<(String, usize)> = symbol_counts
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
-        symbol_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        symbol_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         Overview {
             file_count: index.files.len(),

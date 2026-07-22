@@ -1,0 +1,16 @@
+[package]
+name = "repowise-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "repowise"
+path = "src/main.rs"
+
+[dependencies]
+repowise-core = { path = "../repowise-core" }
+repowise-parser = { path = "../repowise-parser" }
+repowise-graph = { path = "../repowise-graph" }
+anyhow.workspace = true
+clap.workspace = true

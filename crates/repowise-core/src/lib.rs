@@ -78,6 +78,17 @@ pub struct Symbol {
     pub end_line: usize,
     /// For methods: the enclosing struct/class/impl type name, if any.
     pub parent: Option<String>,
+    /// McCabe cyclomatic complexity of the body (1 = no branching).
+    /// `0` for symbols with no body to analyze (e.g. trait method
+    /// signatures, structs/enums/traits/modules).
+    pub complexity: usize,
+    /// Number of declared parameters. `0` for symbols without a
+    /// parameter list.
+    pub param_count: usize,
+    /// A hash of the body's whitespace-normalized text, used for
+    /// best-effort duplicate-code detection. `None` when there's no body
+    /// or the body is too short to be a meaningful duplicate signal.
+    pub body_hash: Option<u64>,
 }
 
 impl Symbol {

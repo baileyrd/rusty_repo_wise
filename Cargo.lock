@@ -385,6 +385,7 @@ dependencies = [
  "clap",
  "repowise-core",
  "repowise-graph",
+ "repowise-health",
  "repowise-parser",
 ]
 
@@ -407,6 +408,14 @@ dependencies = [
  "repowise-core",
  "repowise-parser",
  "tempfile",
+]
+
+[[package]]
+name = "repowise-health"
+version = "0.1.0"
+dependencies = [
+ "repowise-core",
+ "repowise-graph",
 ]
 
 [[package]]

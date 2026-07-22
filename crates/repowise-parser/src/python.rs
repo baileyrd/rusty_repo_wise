@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::util::text;
 use repowise_core::{CallRef, FileRecord, ImportRef, Language, Symbol, SymbolKind};
 use std::path::Path;
@@ -68,6 +69,16 @@ impl<'a> Walker<'a> {
                     } else {
                         SymbolKind::Function
                     };
+                    let body = node.child_by_field_name("body");
+                    let complexity = body
+                        .map(|b| {
+                            metrics::cyclomatic_complexity(b, is_decision, |n| {
+                                n.kind() == "function_definition"
+                            })
+                        })
+                        .unwrap_or(0);
+                    let param_count = metrics::count_params(node.child_by_field_name("parameters"));
+                    let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
                         id: id.clone(),
                         name,
@@ -76,6 +87,9 @@ impl<'a> Walker<'a> {
                         start_line,
                         end_line,
                         parent,
+                        complexity,
+                        param_count,
+                        body_hash,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -96,6 +110,9 @@ impl<'a> Walker<'a> {
                         start_line,
                         end_line,
                         parent: None,
+                        complexity: 0,
+                        param_count: 0,
+                        body_hash: None,
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -200,6 +217,23 @@ fn call_target_name(node: Node, source: &str) -> String {
     }
 }
 
+/// Cyclomatic-complexity decision points for Python: branches (including
+/// `elif`), loops, exception handlers, ternaries, `match` cases, and
+/// short-circuiting boolean operators (`and` / `or`).
+fn is_decision(n: Node) -> bool {
+    matches!(
+        n.kind(),
+        "if_statement"
+            | "elif_clause"
+            | "for_statement"
+            | "while_statement"
+            | "except_clause"
+            | "conditional_expression"
+            | "case_clause"
+            | "boolean_operator"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +271,38 @@ mod tests {
         assert!(paths.contains(&"pkg.utils"));
         assert!(paths.contains(&"pkg.utils.helper"));
         assert!(paths.contains(&"pkg.utils.Widget"));
+    }
+
+    #[test]
+    fn computes_cyclomatic_complexity_and_param_count() {
+        let rec = extract_str(
+            "def straight_line(a, b):\n    return a + b\n\ndef branchy(x, y, z):\n    if x > 0 and y > 0:\n        return 1\n    elif z > 0:\n        return 2\n    for i in range(x):\n        if i == y:\n            return i\n    return 0\n",
+        );
+        let straight = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "straight_line")
+            .unwrap();
+        assert_eq!(straight.complexity, 1);
+        assert_eq!(straight.param_count, 2);
+
+        let branchy = rec.symbols.iter().find(|s| s.name == "branchy").unwrap();
+        // base(1) + if(1) + and(1) + elif(1) + for(1) + if(1) = 6
+        assert_eq!(branchy.complexity, 6);
+        assert_eq!(branchy.param_count, 3);
+    }
+
+    #[test]
+    fn hashes_duplicate_function_bodies_identically() {
+        let rec = extract_str(
+            "def one(n):\n    total = 0\n    for i in range(n):\n        total += i\n    return total\n\ndef two(n):\n    total = 0\n    for i in range(n):\n        total += i\n    return total\n\ndef short():\n    return 1\n",
+        );
+        let one = rec.symbols.iter().find(|s| s.name == "one").unwrap();
+        let two = rec.symbols.iter().find(|s| s.name == "two").unwrap();
+        let short = rec.symbols.iter().find(|s| s.name == "short").unwrap();
+
+        assert!(one.body_hash.is_some());
+        assert_eq!(one.body_hash, two.body_hash);
+        assert!(short.body_hash.is_none());
     }
 }

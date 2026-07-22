@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::util::text;
 use repowise_core::{CallRef, FileRecord, ImportRef, Language, Symbol, SymbolKind};
 use std::path::{Path, PathBuf};
@@ -70,6 +71,18 @@ impl<'a> Walker<'a> {
                     } else {
                         SymbolKind::Function
                     };
+                    let body = node.child_by_field_name("body");
+                    let complexity = body
+                        .map(|b| {
+                            metrics::cyclomatic_complexity(
+                                b,
+                                |n| is_decision(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or(0);
+                    let param_count = metrics::count_params(node.child_by_field_name("parameters"));
+                    let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
                         id: id.clone(),
                         name,
@@ -78,6 +91,9 @@ impl<'a> Walker<'a> {
                         start_line,
                         end_line,
                         parent,
+                        complexity,
+                        param_count,
+                        body_hash,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -103,6 +119,9 @@ impl<'a> Walker<'a> {
                         start_line,
                         end_line,
                         parent: None,
+                        complexity: 0,
+                        param_count: 0,
+                        body_hash: None,
                     });
                 }
             }
@@ -118,6 +137,9 @@ impl<'a> Walker<'a> {
                         start_line,
                         end_line: node.end_position().row + 1,
                         parent: None,
+                        complexity: 0,
+                        param_count: 0,
+                        body_hash: None,
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -200,6 +222,25 @@ fn call_target_name(node: Node, source: &str) -> String {
 
 fn last_path_segment(s: &str) -> String {
     s.rsplit("::").next().unwrap_or(s).to_string()
+}
+
+/// Cyclomatic-complexity decision points for Rust: branches, loops, match
+/// arms, and short-circuiting boolean operators (`&&` / `||`).
+fn is_decision(n: Node, source: &str) -> bool {
+    match n.kind() {
+        "if_expression"
+        | "if_let_expression"
+        | "match_arm"
+        | "while_expression"
+        | "while_let_expression"
+        | "loop_expression"
+        | "for_expression" => true,
+        "binary_expression" => n
+            .child_by_field_name("operator")
+            .map(|op| matches!(text(op, source), "&&" | "||"))
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Resolve `mod name;` to the file it declares, per Rust's file-layout
@@ -337,5 +378,75 @@ mod tests {
         let paths: Vec<_> = rec.imports.iter().map(|i| i.path.as_str()).collect();
         assert!(paths.contains(&"crate::graph::build_graph"));
         assert!(paths.contains(&"crate::graph::RepoGraph"));
+    }
+
+    #[test]
+    fn computes_cyclomatic_complexity_and_param_count() {
+        let rec = extract_str(
+            r#"
+            fn straight_line(a: i32, b: i32) -> i32 {
+                a + b
+            }
+
+            fn branchy(x: i32, y: i32, z: i32) -> i32 {
+                if x > 0 && y > 0 {
+                    return 1;
+                } else if z > 0 {
+                    return 2;
+                }
+                for i in 0..x {
+                    if i == y {
+                        return i;
+                    }
+                }
+                0
+            }
+            "#,
+        );
+        let straight = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "straight_line")
+            .unwrap();
+        assert_eq!(straight.complexity, 1);
+        assert_eq!(straight.param_count, 2);
+
+        let branchy = rec.symbols.iter().find(|s| s.name == "branchy").unwrap();
+        // base(1) + if(1) + &&(1) + if-let-else-if(1) + for(1) + if(1) = 6
+        assert_eq!(branchy.complexity, 6);
+        assert_eq!(branchy.param_count, 3);
+    }
+
+    #[test]
+    fn hashes_duplicate_function_bodies_identically() {
+        let rec = extract_str(
+            r#"
+            fn one(n: i32) -> i32 {
+                let mut total = 0;
+                for i in 0..n {
+                    total += i;
+                }
+                total
+            }
+
+            fn two(n: i32) -> i32 {
+                let mut total = 0;
+                for i in 0..n {
+                    total += i;
+                }
+                total
+            }
+
+            fn short() -> i32 { 1 }
+            "#,
+        );
+        let one = rec.symbols.iter().find(|s| s.name == "one").unwrap();
+        let two = rec.symbols.iter().find(|s| s.name == "two").unwrap();
+        let short = rec.symbols.iter().find(|s| s.name == "short").unwrap();
+
+        assert!(one.body_hash.is_some());
+        assert_eq!(one.body_hash, two.body_hash);
+        // Too short to be a meaningful duplicate signal.
+        assert!(short.body_hash.is_none());
     }
 }

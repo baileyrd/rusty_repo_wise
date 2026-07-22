@@ -180,6 +180,20 @@ impl RepoGraph {
         self.symbol_index.get(id).copied()
     }
 
+    /// Number of resolved call sites targeting this symbol. `0` is a
+    /// best-effort "possibly unused" signal, not a guarantee: it misses
+    /// calls this heuristic couldn't resolve (see `unresolved_calls`),
+    /// trait-dispatched calls, and external/reflective callers.
+    pub fn call_in_degree(&self, symbol_id: &str) -> usize {
+        let Some(idx) = self.symbol_node(symbol_id) else {
+            return 0;
+        };
+        self.graph
+            .edges_directed(idx, Direction::Incoming)
+            .filter(|e| *e.weight() == EdgeKind::Calls)
+            .count()
+    }
+
     /// Case-insensitive substring search over symbol names.
     pub fn search(&self, query: &str) -> Vec<&Symbol> {
         let q = query.to_lowercase();

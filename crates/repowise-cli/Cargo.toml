@@ -12,5 +12,6 @@ path = "src/main.rs"
 repowise-core = { path = "../repowise-core" }
 repowise-parser = { path = "../repowise-parser" }
 repowise-graph = { path = "../repowise-graph" }
+repowise-health = { path = "../repowise-health" }
 anyhow.workspace = true
 clap.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "repowise-health"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+repowise-core = { path = "../repowise-core" }
+repowise-graph = { path = "../repowise-graph" }

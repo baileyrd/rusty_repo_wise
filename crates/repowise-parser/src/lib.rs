@@ -5,6 +5,7 @@
 //! the same spirit as repowise's own tree-sitter-driven approach, but with
 //! none of the semantic-analysis machinery a real compiler front-end has.
 
+mod metrics;
 mod python;
 mod rust;
 

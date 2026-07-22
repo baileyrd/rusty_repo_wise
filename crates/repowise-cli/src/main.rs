@@ -6,11 +6,11 @@ use repowise_graph::RepoGraph;
 use std::path::{Path, PathBuf};
 
 /// A Rust-native, self-hosted codebase intelligence CLI, inspired by
-/// repowise (https://github.com/repowise-dev/repowise). This port focuses
-/// on the dependency-graph intelligence layer: parsing, symbol/import/call
-/// extraction, and graph queries. Other layers from the original project
-/// (git analytics, doc generation, ADR mining, health scoring, MCP server,
-/// dashboard) are out of scope for this phase.
+/// repowise (https://github.com/repowise-dev/repowise). Implemented so
+/// far: parsing, symbol/import/call extraction, dependency-graph queries,
+/// and deterministic code-health scoring. Other layers from the original
+/// project (git analytics, doc generation, ADR mining, MCP server,
+/// dashboard) are not yet implemented.
 #[derive(Parser)]
 #[command(name = "repowise", version, about)]
 struct Cli {
@@ -48,6 +48,14 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Show deterministic code-health KPIs and the lowest-scoring files.
+    Health {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many of the lowest-scoring files to list.
+        #[arg(long, default_value_t = 10)]
+        worst: usize,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -58,6 +66,7 @@ fn main() -> anyhow::Result<()> {
         Command::Overview { path } => cmd_overview(&path),
         Command::Search { query, path } => cmd_search(&query, &path),
         Command::Deps { file, path } => cmd_deps(&file, &path),
+        Command::Health { path, worst } => cmd_health(&path, worst),
     }
 }
 
@@ -179,6 +188,48 @@ fn cmd_deps(file: &Path, path: &Path) -> anyhow::Result<()> {
     println!("  depended on by ({}):", dependents.len());
     for d in &dependents {
         println!("    {}", display_path(d, &index.root));
+    }
+    Ok(())
+}
+
+fn cmd_health(path: &Path, worst: usize) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let graph = RepoGraph::build(&index);
+    let report = repowise_health::analyze(&index, &graph);
+
+    println!("Repowise code health for {}", index.root.display());
+    println!(
+        "  average score: {:.1}/10 across {} file(s), {} marker(s) triggered",
+        report.average_score,
+        report.file_scores.len(),
+        report.findings.len()
+    );
+
+    let by_kind = report.findings_by_kind();
+    if !by_kind.is_empty() {
+        println!("  markers by kind:");
+        for (kind, count) in &by_kind {
+            println!("    {:<20} {count}", kind.label());
+        }
+    }
+
+    let worst_files: Vec<_> = report
+        .file_scores
+        .iter()
+        .filter(|f| f.finding_count > 0)
+        .take(worst)
+        .collect();
+    if !worst_files.is_empty() {
+        println!("  lowest-scoring files:");
+        for f in &worst_files {
+            println!(
+                "    {:<5.1} ({} marker(s))  {}",
+                f.score,
+                f.finding_count,
+                display_path(&f.file, &index.root)
+            );
+        }
     }
     Ok(())
 }

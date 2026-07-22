@@ -3,8 +3,8 @@
 ## Git workflow
 
 Every change to this repo lands through a PR against the default branch
-(`claude/repowise-rust-port-pcxhal` until a conventional `main` exists),
-never a direct push — small docs-only changes included, not just code.
+(`main`), never a direct push — small docs-only changes included, not
+just code.
 
 On green CI, merge with **"Create a merge commit"** ("merge and sync") —
 never squash-merge or rebase-merge. Full commit history is preserved

@@ -6,9 +6,7 @@ name: CI
 on:
   pull_request:
   push:
-    # No `main` yet — this repo's only branch today. Update once a
-    # conventional default branch exists.
-    branches: [claude/repowise-rust-port-pcxhal]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}

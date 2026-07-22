@@ -1,10 +1,29 @@
 # Release Notes
 
 Notable changes to this repo, newest first. No tagged releases yet, so entries
-are keyed by commit (this repo hasn't routed changes through PRs until now —
-future entries will link PRs once that's the norm, per CONTRIBUTING.md).
+are keyed by PR (or by commit, for the two prior changes that predate this
+repo routing work through PRs).
 
 ---
+
+## PR #1 — Add standard governance files (PR/issue templates, docs, CI)
+**2026-07-22** · [#1](https://github.com/baileyrd/rusty_repo_wise/pull/1)
+
+- **Added:** the standard governance-file set — PR/issue templates,
+  CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, CHANGELOG, this file, ARCHITECTURE
+  (hand-adapted to this repo's actual crate layout), an ADR seed, and a Rust
+  CI workflow (fmt + clippy + test) gating merges going forward.
+- **Fixed:** three pre-existing `clippy::unnecessary_sort_by` lints (two in
+  `repowise-graph`, one in `repowise-health`) that the new CI caught — this
+  repo had never run clippy in CI before, so they'd gone unnoticed locally
+  under an older clippy version.
+- **Known limitation, stated plainly:** the repo's GitHub Actions "allowed
+  actions" policy initially blocked `actions/checkout`/`actions/cache`
+  entirely (first-party actions), which had to be fixed in repo settings
+  before CI could run at all — not something a workflow-file change alone
+  could fix. Also: `ci-rust.yml` triggers on pushes to
+  `claude/repowise-rust-port-pcxhal` specifically since there's no `main`
+  yet; update that trigger once a conventional default branch exists.
 
 ## 2026-07-22 — Add deterministic code-health scoring layer
 [`088dad1`](https://github.com/baileyrd/rusty_repo_wise/commit/088dad137b8cca871f1aeaf671a46e6776e81b35)

@@ -552,7 +552,7 @@ tool surface beyond what this port's other layers currently support.
 
 `repowise dashboard [PATH]` writes one self-contained static HTML page to
 `.repowise/dashboard/index.html` — open it directly in a browser, no
-server to run. Kept deliberately simple: a single page combining four
+server to run. Kept deliberately simple: a single page combining five
 sections, each degrading gracefully to an explicit "not available"
 placeholder (never a silently blank section) when its data doesn't exist:
 
@@ -563,9 +563,14 @@ placeholder (never a silently blank section) when its data doesn't exist:
   hotspots`), or a placeholder if `PATH` isn't a git repo.
 - **Architectural decisions** — mined ADRs/decision-commits (same data as
   `repowise decisions`), or a placeholder if none are found.
+- **Symbols** — every indexed symbol (name, kind, file, line), with a
+  small embedded-JS dropdown that filters the table by kind
+  (function/method/class/etc.) client-side. No external requests and no
+  build step: the whole table is embedded once in the page, and the
+  dropdown just toggles row visibility — the only JS in the dashboard.
 
-Every file path rendered in the overview/health/hotspots tables above is a
-**drill-down link** to that file's `repowise-docs` wiki page
+Every file path rendered in the overview/health/hotspots/symbols tables
+above is a **drill-down link** to that file's `repowise-docs` wiki page
 (`.repowise/wiki/<path>.md`) when one already exists on disk — `dashboard`
 checks for it directly rather than generating wiki pages itself (that
 would duplicate `repowise-docs`'s own freshness tracking and re-read every

@@ -175,6 +175,7 @@ repowise overview [PATH]           # summary stats: languages, symbols, edges
 repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
+                                    #   --weights <FILE> to override penalty weights (partial TOML)
 repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
@@ -212,6 +213,26 @@ to `[0, 10]`:
 another script, or a cron job, none of which this port's call graph can
 see, so the signal is too unreliable to report for that language. All
 other markers still apply to shell the same as everywhere else.
+
+**Penalty weights are pluggable** (`repowise_health::HealthWeights`),
+not hardcoded — the table above is this type's `Default`, and every
+caller (`repowise health`/`repowise docs`/`repowise dashboard`/the MCP
+server) still gets exactly those values unless it opts into something
+else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
+file of overrides — an omitted key keeps its documented default — e.g.:
+
+```toml
+# only overriding two of the twelve; everything else keeps its default
+high_complexity = 2.0
+god_class = 3.0
+```
+
+This is a precursor for the ML-calibrated weights repowise itself uses
+(see issue #62), not the calibration itself — a real calibrated weight
+set still needs a labeled defect corpus and a training pipeline this
+port doesn't have, and sourcing that data is still an open question.
+What this abstraction unblocks is having *somewhere* to plug calibrated
+numbers into once they exist, without touching any scoring logic.
 
 All of these come from data already computed by `repowise-parser`
 (per-symbol line span, complexity, param count, body hash) and

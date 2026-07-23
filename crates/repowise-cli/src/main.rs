@@ -56,6 +56,11 @@ enum Command {
         /// How many of the lowest-scoring files to list.
         #[arg(long, default_value_t = 10)]
         worst: usize,
+        /// A (possibly partial) TOML file of per-marker penalty
+        /// overrides -- an omitted key keeps its documented default.
+        /// See `repowise_health::HealthWeights` for the field names.
+        #[arg(long)]
+        weights: Option<PathBuf>,
     },
     /// Rank files by hotspot score (git churn × cyclomatic complexity).
     Hotspots {
@@ -125,7 +130,11 @@ fn main() -> anyhow::Result<()> {
         Command::Overview { path } => cmd_overview(&path),
         Command::Search { query, path } => cmd_search(&query, &path),
         Command::Deps { file, path } => cmd_deps(&file, &path),
-        Command::Health { path, worst } => cmd_health(&path, worst),
+        Command::Health {
+            path,
+            worst,
+            weights,
+        } => cmd_health(&path, worst, weights.as_deref()),
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
@@ -259,11 +268,19 @@ fn cmd_deps(file: &Path, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_health(path: &Path, worst: usize) -> anyhow::Result<()> {
+fn cmd_health(path: &Path, worst: usize, weights_path: Option<&Path>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let index = RepoIndex::load(&root)?;
     let graph = RepoGraph::build(&index);
-    let report = repowise_health::analyze(&index, &graph);
+    let weights = match weights_path {
+        Some(p) => {
+            let toml = std::fs::read_to_string(p)
+                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", p.display()))?;
+            repowise_health::HealthWeights::from_toml_str(&toml)?
+        }
+        None => repowise_health::HealthWeights::default(),
+    };
+    let report = repowise_health::analyze_with_weights(&index, &graph, &weights);
 
     println!("Repowise code health for {}", index.root.display());
     println!(

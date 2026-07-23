@@ -58,34 +58,147 @@ pub const BUMPY_ROAD_MIN_BUMPS: usize = 3;
 /// flagged.
 pub const PRIMITIVE_OBSESSION_MIN_COUNT: usize = 3;
 
-const PENALTY_LONG_FUNCTION: f64 = 0.5;
-const PENALTY_HIGH_COMPLEXITY: f64 = 1.0;
-const PENALTY_TOO_MANY_PARAMS: f64 = 0.3;
-const PENALTY_GOD_CLASS: f64 = 1.5;
-const PENALTY_DUPLICATE: f64 = 0.5;
-const PENALTY_DEAD_CODE: f64 = 0.2;
-const PENALTY_LOW_COHESION: f64 = 1.0;
+const MAX_SCORE: f64 = 10.0;
+
+fn default_long_function() -> f64 {
+    0.5
+}
+fn default_high_complexity() -> f64 {
+    1.0
+}
+fn default_too_many_params() -> f64 {
+    0.3
+}
+fn default_god_class() -> f64 {
+    1.5
+}
+fn default_duplicate_code() -> f64 {
+    0.5
+}
+fn default_dead_code() -> f64 {
+    0.2
+}
+fn default_low_cohesion() -> f64 {
+    1.0
+}
 // Weaker signal than an exact-hash `DuplicateCode` match (a heuristic
 // overlap ratio, not a byte-for-byte match), so it's penalized less.
-const PENALTY_NEAR_DUPLICATE: f64 = 0.3;
+fn default_near_duplicate() -> f64 {
+    0.3
+}
 // Same weight as `HighComplexity`: both are cheap AST-derived structural
 // signals of the same rough severity, just measuring different things
 // (branch count vs. nesting depth).
-const PENALTY_NESTED_COMPLEXITY: f64 = 1.0;
+fn default_nested_complexity() -> f64 {
+    1.0
+}
 // Lighter than `NestedComplexity`: a complementary signal on the same
 // underlying data (scattered nesting vs. a single deep point), not an
 // independent problem worth double-weighting.
-const PENALTY_BUMPY_ROAD: f64 = 0.5;
+fn default_bumpy_road() -> f64 {
+    0.5
+}
 // A function can rack up multiple flagged conditions at once; a
 // per-occurrence weight lighter than the whole-function markers above
 // avoids one messy function alone tanking its score.
-const PENALTY_COMPLEX_CONDITIONAL: f64 = 0.3;
+fn default_complex_conditional() -> f64 {
+    0.3
+}
 // Same weight as `TooManyParameters`/`ComplexConditional`: another
 // parameter-list-shaped structural-complexity signal, not a central-logic
 // problem worth a heavier penalty.
-const PENALTY_PRIMITIVE_OBSESSION: f64 = 0.3;
+fn default_primitive_obsession() -> f64 {
+    0.3
+}
 
-const MAX_SCORE: f64 = 10.0;
+/// Per-marker scoring weights — the abstraction layer this crate's
+/// penalties live behind. `Default` matches the hand-picked values this
+/// crate always used (nothing changes for a caller that doesn't build
+/// its own `HealthWeights`); a caller can instead load one from a
+/// partial TOML file (`from_toml_str`, one key per `FindingKind`'s
+/// snake_case field name — an omitted key keeps its documented default)
+/// and pass it to `analyze_with_weights`.
+///
+/// This is a precursor for issue #62 (ML-calibrated health-score
+/// weights), not the calibration itself: an actual calibrated weight
+/// set still needs a labeled defect corpus and a training pipeline this
+/// port doesn't have. What this type unblocks is having *somewhere* to
+/// plug calibrated numbers into once they exist, without touching any
+/// scoring logic — today every caller still gets the same fixed
+/// penalties as before, just no longer hardcoded as unreachable consts.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+pub struct HealthWeights {
+    #[serde(default = "default_long_function")]
+    pub long_function: f64,
+    #[serde(default = "default_high_complexity")]
+    pub high_complexity: f64,
+    #[serde(default = "default_too_many_params")]
+    pub too_many_params: f64,
+    #[serde(default = "default_god_class")]
+    pub god_class: f64,
+    #[serde(default = "default_duplicate_code")]
+    pub duplicate_code: f64,
+    #[serde(default = "default_near_duplicate")]
+    pub near_duplicate_code: f64,
+    #[serde(default = "default_dead_code")]
+    pub possibly_dead_code: f64,
+    #[serde(default = "default_low_cohesion")]
+    pub low_cohesion: f64,
+    #[serde(default = "default_nested_complexity")]
+    pub nested_complexity: f64,
+    #[serde(default = "default_bumpy_road")]
+    pub bumpy_road: f64,
+    #[serde(default = "default_complex_conditional")]
+    pub complex_conditional: f64,
+    #[serde(default = "default_primitive_obsession")]
+    pub primitive_obsession: f64,
+}
+
+impl Default for HealthWeights {
+    fn default() -> Self {
+        HealthWeights {
+            long_function: default_long_function(),
+            high_complexity: default_high_complexity(),
+            too_many_params: default_too_many_params(),
+            god_class: default_god_class(),
+            duplicate_code: default_duplicate_code(),
+            near_duplicate_code: default_near_duplicate(),
+            possibly_dead_code: default_dead_code(),
+            low_cohesion: default_low_cohesion(),
+            nested_complexity: default_nested_complexity(),
+            bumpy_road: default_bumpy_road(),
+            complex_conditional: default_complex_conditional(),
+            primitive_obsession: default_primitive_obsession(),
+        }
+    }
+}
+
+impl HealthWeights {
+    /// Parse a (possibly partial) TOML document into a `HealthWeights`,
+    /// falling back to this type's documented default for any key left
+    /// out — so a custom weights file only needs to name the penalties
+    /// it actually wants to change.
+    pub fn from_toml_str(s: &str) -> anyhow::Result<Self> {
+        Ok(toml::from_str(s)?)
+    }
+
+    fn penalty_for(&self, kind: FindingKind) -> f64 {
+        match kind {
+            FindingKind::LongFunction => self.long_function,
+            FindingKind::HighComplexity => self.high_complexity,
+            FindingKind::TooManyParameters => self.too_many_params,
+            FindingKind::GodClass => self.god_class,
+            FindingKind::DuplicateCode => self.duplicate_code,
+            FindingKind::NearDuplicateCode => self.near_duplicate_code,
+            FindingKind::PossiblyDeadCode => self.possibly_dead_code,
+            FindingKind::LowCohesion => self.low_cohesion,
+            FindingKind::NestedComplexity => self.nested_complexity,
+            FindingKind::BumpyRoad => self.bumpy_road,
+            FindingKind::ComplexConditional => self.complex_conditional,
+            FindingKind::PrimitiveObsession => self.primitive_obsession,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingKind {
@@ -118,23 +231,6 @@ impl FindingKind {
             FindingKind::BumpyRoad => "bumpy-road",
             FindingKind::ComplexConditional => "complex-conditional",
             FindingKind::PrimitiveObsession => "primitive-obsession",
-        }
-    }
-
-    fn penalty(&self) -> f64 {
-        match self {
-            FindingKind::LongFunction => PENALTY_LONG_FUNCTION,
-            FindingKind::HighComplexity => PENALTY_HIGH_COMPLEXITY,
-            FindingKind::TooManyParameters => PENALTY_TOO_MANY_PARAMS,
-            FindingKind::GodClass => PENALTY_GOD_CLASS,
-            FindingKind::DuplicateCode => PENALTY_DUPLICATE,
-            FindingKind::NearDuplicateCode => PENALTY_NEAR_DUPLICATE,
-            FindingKind::PossiblyDeadCode => PENALTY_DEAD_CODE,
-            FindingKind::LowCohesion => PENALTY_LOW_COHESION,
-            FindingKind::NestedComplexity => PENALTY_NESTED_COMPLEXITY,
-            FindingKind::BumpyRoad => PENALTY_BUMPY_ROAD,
-            FindingKind::ComplexConditional => PENALTY_COMPLEX_CONDITIONAL,
-            FindingKind::PrimitiveObsession => PENALTY_PRIMITIVE_OBSESSION,
         }
     }
 }
@@ -175,7 +271,17 @@ impl HealthReport {
     }
 }
 
+/// Score `index` using the default (fixed, hand-picked) `HealthWeights`
+/// — see `analyze_with_weights` to plug in a different weight set.
 pub fn analyze(index: &RepoIndex, graph: &RepoGraph) -> HealthReport {
+    analyze_with_weights(index, graph, &HealthWeights::default())
+}
+
+pub fn analyze_with_weights(
+    index: &RepoIndex,
+    graph: &RepoGraph,
+    weights: &HealthWeights,
+) -> HealthReport {
     let mut findings = Vec::new();
 
     for file in &index.files {
@@ -199,7 +305,7 @@ pub fn analyze(index: &RepoIndex, graph: &RepoGraph) -> HealthReport {
     check_near_duplicate_code(index, &mut findings);
     check_low_cohesion(index, &mut findings);
 
-    let file_scores = score_files(index, &findings);
+    let file_scores = score_files(index, &findings, weights);
     let average_score = if file_scores.is_empty() {
         MAX_SCORE
     } else {
@@ -414,7 +520,11 @@ fn check_low_cohesion(index: &RepoIndex, findings: &mut Vec<Finding>) {
     }
 }
 
-fn score_files(index: &RepoIndex, findings: &[Finding]) -> Vec<FileHealth> {
+fn score_files(
+    index: &RepoIndex,
+    findings: &[Finding],
+    weights: &HealthWeights,
+) -> Vec<FileHealth> {
     let mut scores: HashMap<PathBuf, f64> = index
         .files
         .iter()
@@ -425,7 +535,7 @@ fn score_files(index: &RepoIndex, findings: &[Finding]) -> Vec<FileHealth> {
 
     for finding in findings {
         if let Some(s) = scores.get_mut(&finding.file) {
-            *s -= finding.kind.penalty();
+            *s -= weights.penalty_for(finding.kind);
         }
         if let Some(c) = counts.get_mut(&finding.file) {
             *c += 1;

@@ -27,6 +27,7 @@ pub enum Language {
     Ruby,
     C,
     Swift,
+    Php,
     Other,
 }
 
@@ -51,6 +52,7 @@ impl Language {
             // documented) for C++'s own extension set.
             "c" => Language::C,
             "swift" => Language::Swift,
+            "php" => Language::Php,
             _ => Language::Other,
         }
     }
@@ -70,6 +72,7 @@ impl Language {
             Language::Ruby => "Ruby",
             Language::C => "C",
             Language::Swift => "Swift",
+            Language::Php => "PHP",
             Language::Other => "Other",
         }
     }
@@ -85,6 +88,11 @@ pub enum SymbolKind {
     Trait,
     Class,
     Module,
+    /// A mixin of concrete method implementations (PHP's `trait`) —
+    /// distinct from `Trait` (an interface-like contract), since PHP's
+    /// own `interface`/`trait` are two different constructs that this
+    /// port's acceptance criteria call out separately.
+    Mixin,
 }
 
 impl SymbolKind {
@@ -97,6 +105,7 @@ impl SymbolKind {
             SymbolKind::Trait => "trait",
             SymbolKind::Class => "class",
             SymbolKind::Module => "module",
+            SymbolKind::Mixin => "mixin",
         }
     }
 }

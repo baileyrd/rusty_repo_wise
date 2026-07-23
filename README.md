@@ -16,8 +16,8 @@ piece covering a subset of the original's scope within it (see below for
 specifics per layer), not full feature parity:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust, Python,
-  TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby, and
-  Swift files.
+  TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
+  Swift, and PHP files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
   definitions, imports, call expressions, and per-function metrics
   (cyclomatic complexity, parameter count, a duplicate-code body hash).
@@ -34,19 +34,25 @@ specifics per layer), not full feature parity:
   external references (npm packages/JVM classpath dependencies/Go modules
   outside the local `go.mod`/C and C++ angle-form `#include <system>`
   headers/C# namespaces that don't follow the folder convention/Ruby's
-  gem-based plain `require`, since there's no
+  gem-based plain `require`/PHP namespaces that don't follow the folder
+  convention, since there's no
   `node_modules`/classpath/Go-proxy/include-path-search/.NET-project/
-  `$LOAD_PATH` resolution) are left unresolved rather than guessed. `.h`
-  is deliberately not mapped to either C or C++ (ambiguous between the
-  two, and this port has no syntax-sniffing to disambiguate) — so a
-  conventional `#include "foo.h"` split resolves against the filesystem
-  at parse time but never becomes a graph edge, since the header itself
-  is never indexed; only unambiguous extensions (`.c`, and C++'s
-  `.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`/`.hxx`) are recognized. Swift's
-  `import` is module-level rather than file-level (no relative-import
-  syntax, and a module name has no file mapping without a full build
-  graph) — its imports are recorded for visibility but always left
-  unresolved, by design rather than as a gap.
+  `$LOAD_PATH`/Composer-autoload resolution) are left unresolved rather
+  than guessed. `.h` is deliberately not mapped to either C or C++
+  (ambiguous between the two, and this port has no syntax-sniffing to
+  disambiguate) — so a conventional `#include "foo.h"` split resolves
+  against the filesystem at parse time but never becomes a graph edge,
+  since the header itself is never indexed; only unambiguous extensions
+  (`.c`, and C++'s `.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`/`.hxx`) are
+  recognized. Swift's `import` is module-level rather than file-level (no
+  relative-import syntax, and a module name has no file mapping without a
+  full build graph) — its imports are recorded for visibility but always
+  left unresolved, by design rather than as a gap. PHP has two import
+  forms: `require`/`require_once`/`include`/`include_once` with a plain
+  string path (resolved directly against the filesystem, same as
+  C/C++/Ruby) and `use Namespace\Class;` (resolved via the same
+  folder-mirrors-namespace heuristic as C#'s, not aware of Composer's
+  real `composer.json` autoload mapping).
 - Score every file's health deterministically (0–10, no LLM/ML) from six
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, and possibly-dead code
@@ -70,7 +76,7 @@ specifics per layer), not full feature parity:
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
-Scala, Ruby, and Swift are parsed; repowise's other languages aren't
+Scala, Ruby, Swift, and PHP are parsed; repowise's other languages aren't
 implemented — see issue #11 for the tracking/discussion issue on extending
 language support. The health scorer covers 6 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (LCOM4 cohesion,
@@ -88,8 +94,9 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-core` — shared data model (`Symbol`, `FileRecord`, `RepoIndex`,
   etc.), `.gitignore`-aware file discovery, and JSON index persistence.
 - `repowise-parser` — tree-sitter-based extraction for Rust, Python,
-  TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby, and
-  Swift, including per-function complexity/param-count/body-hash metrics.
+  TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
+  Swift, and PHP, including per-function complexity/param-count/
+  body-hash metrics.
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of

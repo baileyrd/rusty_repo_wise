@@ -488,3 +488,50 @@ fn swift_module_imports_correctly_stay_unresolved() {
     let matches = graph.search("compute");
     assert_eq!(matches.len(), 1);
 }
+
+#[test]
+fn resolves_php_use_via_namespace_folder_heuristic_and_require_once_directly() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("App/Models")).unwrap();
+    fs::write(
+        root.join("App/Models/User.php"),
+        "<?php\nnamespace App\\Models;\n\nclass User {\n    public function name() {\n        return \"x\";\n    }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("helper.php"),
+        "<?php\nfunction helper($x) {\n    return $x + 1;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.php"),
+        "<?php\nrequire_once \"helper.php\";\nuse App\\Models\\User;\n\nfunction run() {\n    $u = new User();\n    return helper(1);\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_php = find_file(&index, "main.php").path.clone();
+    let helper_php = find_file(&index, "helper.php").path.clone();
+    let user_php = find_file(&index, "User.php").path.clone();
+
+    // `require_once "helper.php"` resolves directly against the
+    // filesystem, same as C/C++/Ruby's relative includes.
+    let deps = graph.dependencies_of(&main_php);
+    assert!(
+        deps.contains(&helper_php),
+        "expected main.php to depend on helper.php, got {deps:?}"
+    );
+    // `use App\Models\User;` resolves via the folder-mirrors-namespace
+    // heuristic (App/Models -> App\Models), same convention as C#.
+    assert!(
+        deps.contains(&user_php),
+        "expected main.php to depend on App/Models/User.php, got {deps:?}"
+    );
+
+    let matches = graph.search("helper");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_php);
+}

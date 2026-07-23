@@ -13,6 +13,7 @@ mod java;
 mod javascript;
 mod kotlin;
 mod metrics;
+mod php;
 mod python;
 mod ruby;
 mod rust;
@@ -43,6 +44,7 @@ pub fn parse_file(
         Language::Ruby => Ok(Some(ruby::extract(path, source)?)),
         Language::C => Ok(Some(c::extract(path, source)?)),
         Language::Swift => Ok(Some(swift::extract(path, source)?)),
+        Language::Php => Ok(Some(php::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

@@ -6,6 +6,51 @@ repo routing work through PRs).
 
 ---
 
+## PR #127 — Add complex_conditional boolean-operator-count health marker
+**2026-07-23** · [#127](https://github.com/baileyrd/rusty_repo_wise/pull/127) · closes [#55](https://github.com/baileyrd/rusty_repo_wise/issues/55)
+
+- **Added:** `complex_conditional`, flagging a single `if`/`while`/etc.
+  condition that chains 3+ boolean operators (`&&`/`||` in
+  Rust/JS/TS, `and`/`or` in Python) — unlike `nested_complexity` (#53)
+  and `bumpy_road` (#54), which are Symbol-level aggregate scalars, this
+  marker's whole value is pointing at the *specific* condition, so it
+  needed a different shape.
+- **`Symbol` gains `complex_conditionals: Vec<ComplexConditionalRef>`**
+  (each entry: `line`, `operator_count`), populated at parse time —
+  mirroring how `field_accesses` already works as a per-symbol Vec
+  collection, rather than one more `usize` scalar.
+- **New `repowise-parser::metrics::complex_conditionals`**, driven by
+  two per-language closures: `condition_of` extracts the `condition`
+  sub-expression from an `if`/`while`/etc. node (language-specific field
+  name), and `is_boolean_operator` — deliberately kept separate from
+  each language's existing `is_decision` classifier — counts chained
+  boolean operators within just that condition's own subtree, not the
+  whole function body. Threshold: `COMPLEX_CONDITIONAL_MIN_OPERATORS = 3`.
+- **Grammar verification:** before writing per-language `condition_of`
+  logic, the vendored `node-types.json` for the exact tree-sitter grammar
+  versions pinned in the workspace `Cargo.toml` (Rust 0.23.3, Python
+  0.23.6, JavaScript 0.23.1) was inspected to confirm `condition` field
+  names and boolean-operator node shapes, rather than guessing and
+  iterating on failures.
+- **Scope:** real extraction implemented for **Rust, Python, and
+  TypeScript/JavaScript only** — the same three languages LCOM4 (#51)
+  and near-duplicate detection (#52) needed new per-language grammar
+  logic for. The other 13 parsed languages get an empty `Vec` via the
+  same construction-site default already used for other per-symbol Vec
+  fields.
+- **New `FindingKind::ComplexConditional`** (penalty −0.3), emitting one
+  `Finding` per flagged condition using that condition's own `line` —
+  not the enclosing function's line — so downstream consumers
+  (dashboard, wiki, `get_why`) can jump straight to the offending
+  expression.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-docs`/`repowise-git`/`repowise-health` that
+  build `Symbol` directly.
+- Workspace test count: 200 → 203.
+
+---
+
 ## PR #125 — Add bumpy_road nesting-bumps health marker
 **2026-07-23** · [#125](https://github.com/baileyrd/rusty_repo_wise/pull/125) · closes [#54](https://github.com/baileyrd/rusty_repo_wise/issues/54)
 

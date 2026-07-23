@@ -62,7 +62,7 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from eleven
+- Score every file's health deterministically (0–10, no LLM/ML) from twelve
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
@@ -71,10 +71,13 @@ specifics per layer), not full feature parity:
   complexity (`nested_complexity` — maximum control-flow nesting depth,
   complementing cyclomatic complexity's flat branch count), a
   "bumpy road" (`bumpy_road` — count of distinct nested-block regions,
-  complementing nesting depth's single deepest-point view), and complex
+  complementing nesting depth's single deepest-point view), complex
   conditionals (`complex_conditional` — a single `if`/`while`/etc. condition
-  chaining 3+ boolean operators, Rust/Python/TS+JS only) — except for
-  shell scripts, which are deliberately exempt from the dead-code
+  chaining 3+ boolean operators, Rust/Python/TS+JS only), and primitive
+  obsession (`primitive_obsession` — a parameter list leaning on bare
+  primitives instead of domain types, Rust/TypeScript only since it needs
+  declared parameter types) — except for shell scripts, which are
+  deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
   graph can see, making the signal too unreliable to report for that
@@ -105,7 +108,7 @@ specifics per layer), not full feature parity:
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
 Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
 other languages aren't implemented — see issue #11 for the
-tracking/discussion issue on extending language support. The health scorer covers 11 of repowise's ~25 markers — see
+tracking/discussion issue on extending language support. The health scorer covers 12 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
@@ -125,8 +128,9 @@ dashboard is one static page with no per-file drill-down or live search
   Swift, PHP, Dart, and shell scripts, including per-function
   complexity/nesting-depth/bumpy-road/param-count/body-hash metrics, plus
   per-method `self`/`this` field-access tracking for Rust/Python/TS+JS
-  (feeds LCOM4) and per-condition boolean-operator-chain detection for
-  Rust/Python/TS+JS (feeds `complex_conditional`).
+  (feeds LCOM4), per-condition boolean-operator-chain detection for
+  Rust/Python/TS+JS (feeds `complex_conditional`), and declared-parameter-type
+  extraction for Rust/TypeScript (feeds `primitive_obsession`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -192,6 +196,7 @@ to `[0, 10]`:
 | Nested complexity (`nested_complexity`) | control flow nested > 4 levels deep | −1.0 |
 | Bumpy road (`bumpy_road`) | >= 3 separate nested-block regions | −0.5 |
 | Complex conditional (`complex_conditional`) | single condition chains >= 3 boolean operators | −0.3 |
+| Primitive obsession (`primitive_obsession`) | >= 3 bare-primitive-typed parameters | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -271,6 +276,28 @@ boolean operators within just that condition's own subtree, not the whole
 function body. The other 13 languages have no per-language
 `condition_of`/`is_boolean_operator` logic yet and so never produce any
 entries for this marker.
+
+**Primitive obsession (`primitive_obsession`)** flags a function/method
+whose declared parameters lean on bare primitives (`i32`/`bool`/`String`
+and language equivalents) rather than small domain-specific types — the
+classic "primitive obsession" smell, where a handful of loosely-related
+primitive values would read better bundled into their own type. This
+needs actual declared parameter *types*, which only exist for
+statically-typed languages in this port's model, so it's implemented for
+**Rust and TypeScript only** for this first pass (`Symbol` gains
+`primitive_param_count: usize`, counting declared parameters whose type
+resolves to a bare primitive). For Rust, a leading `&`/`&mut`/lifetime
+reference prefix is stripped before classifying (`&str` and `String`
+both count), and `String`/`str` are included alongside the scalar keyword
+types even though `String` isn't a `Copy` primitive in Rust's own type
+system — the smell targets overused strings/ints/bools, not Rust's
+`Copy` boundary. For TypeScript, only `string`/`number`/`boolean` count
+(not `any`/`unknown`/`void`/etc.). The other 14 parsed languages
+(including Python/JavaScript, which lack static type annotations in the
+common case and would need type inference this port doesn't have) get an
+empty parameter-type extraction and so never trigger this marker;
+extending it to the remaining statically-typed languages (Java, Kotlin,
+Go, C, C++, C#, Scala, Swift, Dart) is a natural follow-up, not done here.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

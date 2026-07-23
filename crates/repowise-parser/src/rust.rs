@@ -114,6 +114,11 @@ impl<'a> Walker<'a> {
                         })
                         .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
+                    let primitive_param_count = metrics::primitive_param_count(
+                        node.child_by_field_name("parameters"),
+                        |n| param_type(n, self.source),
+                        is_primitive_type,
+                    );
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
                         id: id.clone(),
@@ -128,6 +133,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps,
                         complex_conditionals,
                         param_count,
+                        primitive_param_count,
                         body_hash,
                     });
                     self.scope_stack.push(id);
@@ -159,6 +165,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps: 0,
                         complex_conditionals: Vec::new(),
                         param_count: 0,
+                        primitive_param_count: 0,
                         body_hash: None,
                     });
                 }
@@ -180,6 +187,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps: 0,
                         complex_conditionals: Vec::new(),
                         param_count: 0,
+                        primitive_param_count: 0,
                         body_hash: None,
                     });
                     // `mod foo;` (no inline body) declares that another
@@ -329,6 +337,62 @@ fn condition_of(n: Node) -> Option<Node> {
         "if_expression" | "while_expression" => n.child_by_field_name("condition"),
         _ => None,
     }
+}
+
+/// A parameter's declared type as source text, with a leading `&`/`&mut`/
+/// lifetime reference prefix stripped so `&str`/`&'a String` classify the
+/// same as their owned form. Only plain `parameter` nodes carry a `type`
+/// field — `self_parameter`/`variadic_parameter` don't, so `self` and `...`
+/// are naturally excluded rather than double-handled here.
+fn param_type(n: Node, source: &str) -> Option<String> {
+    if n.kind() != "parameter" {
+        return None;
+    }
+    let type_node = n.child_by_field_name("type")?;
+    Some(strip_reference(text(type_node, source)).to_string())
+}
+
+fn strip_reference(mut s: &str) -> &str {
+    s = s.trim();
+    while let Some(rest) = s.strip_prefix('&') {
+        s = rest.trim_start();
+        if s.starts_with('\'') {
+            if let Some(idx) = s.find(char::is_whitespace) {
+                s = s[idx..].trim_start();
+            }
+        }
+        if let Some(rest) = s.strip_prefix("mut ") {
+            s = rest.trim_start();
+        }
+    }
+    s
+}
+
+/// The bare scalar/string primitives "primitive obsession" flags — the
+/// classic smell targets overused strings/ints/bools, so `String`/`str`
+/// are included alongside the scalar keyword types even though `String`
+/// isn't a `Copy` primitive in Rust's own type system.
+fn is_primitive_type(t: &str) -> bool {
+    matches!(
+        t,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "char"
+            | "str"
+            | "String"
+    )
 }
 
 /// Resolve `mod name;` to the file it declares, per Rust's file-layout
@@ -651,6 +715,35 @@ mod tests {
         assert_eq!(tangled.complex_conditionals.len(), 1);
         assert_eq!(tangled.complex_conditionals[0].operator_count, 3);
         assert!(simple.complex_conditionals.is_empty());
+    }
+
+    #[test]
+    fn counts_bare_primitive_typed_parameters_but_not_domain_or_reference_types() {
+        let rec = extract_str(
+            r#"
+            struct UserId(u64);
+
+            fn obsessed(name: String, age: u32, active: bool, note: &str) -> bool {
+                active
+            }
+
+            fn domain_typed(id: UserId, name: &str) -> bool {
+                true
+            }
+            "#,
+        );
+        let obsessed = rec.symbols.iter().find(|s| s.name == "obsessed").unwrap();
+        // String, u32, bool, and &str (reference stripped) are all bare
+        // primitives -- all 4 declared parameters count.
+        assert_eq!(obsessed.primitive_param_count, 4);
+
+        let domain_typed = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "domain_typed")
+            .unwrap();
+        // UserId is a domain type, not a primitive -- only &str counts.
+        assert_eq!(domain_typed.primitive_param_count, 1);
     }
 
     #[test]

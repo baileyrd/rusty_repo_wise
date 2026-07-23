@@ -124,6 +124,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps: 0,
                         complex_conditionals: Vec::new(),
                         param_count: 0,
+                        primitive_param_count: 0,
                         body_hash: None,
                     });
                     self.class_stack.push(name);
@@ -151,6 +152,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps: 0,
                         complex_conditionals: Vec::new(),
                         param_count: 0,
+                        primitive_param_count: 0,
                         body_hash: None,
                     });
                 }
@@ -288,6 +290,11 @@ impl<'a> Walker<'a> {
             })
             .unwrap_or_default();
         let param_count = count_params(func_node);
+        let primitive_param_count = metrics::primitive_param_count(
+            func_node.child_by_field_name("parameters"),
+            |n| param_type(n, self.source),
+            is_primitive_type,
+        );
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -302,6 +309,7 @@ impl<'a> Walker<'a> {
             bumpy_road_bumps,
             complex_conditionals,
             param_count,
+            primitive_param_count,
             body_hash,
         });
         self.scope_stack.push(id);
@@ -408,6 +416,29 @@ fn condition_of(n: Node) -> Option<Node> {
         "if_statement" | "while_statement" => n.child_by_field_name("condition"),
         _ => None,
     }
+}
+
+/// A parameter's declared type annotation as source text. TypeScript-only:
+/// `required_parameter`/`optional_parameter` (and their `type_annotation`
+/// child) are TS grammar node kinds that plain JS trees never produce, so
+/// this naturally returns `None` for every parameter in a `.js` file,
+/// giving `primitive_param_count` the same "not implemented for this
+/// language" zero every other JS-only marker already defaults to.
+fn param_type(n: Node, source: &str) -> Option<String> {
+    if !matches!(n.kind(), "required_parameter" | "optional_parameter") {
+        return None;
+    }
+    let annotation = n.child_by_field_name("type")?;
+    let mut cursor = annotation.walk();
+    let type_node = annotation.named_children(&mut cursor).next()?;
+    Some(text(type_node, source).to_string())
+}
+
+/// The primitives "primitive obsession" flags in TypeScript: `string`,
+/// `number`, `boolean` — not `any`/`unknown`/`void`/etc., which aren't the
+/// classic smell target.
+fn is_primitive_type(t: &str) -> bool {
+    matches!(t, "string" | "number" | "boolean")
 }
 
 /// Only nested *named* function declarations get their own symbol (and
@@ -564,6 +595,30 @@ mod tests {
 
         let area = rec.symbols.iter().find(|s| s.name == "area").unwrap();
         assert_eq!(area.parent.as_deref(), Some("Circle"));
+    }
+
+    #[test]
+    fn counts_bare_primitive_typed_parameters_but_not_domain_or_untyped() {
+        let rec = extract_ts(
+            "interface UserId {}\n\nfunction obsessed(name: string, age: number, active: boolean): boolean {\n  return active;\n}\n\nfunction domainTyped(id: UserId, extra): boolean {\n  return true;\n}\n",
+        );
+        let obsessed = rec.symbols.iter().find(|s| s.name == "obsessed").unwrap();
+        assert_eq!(obsessed.primitive_param_count, 3);
+
+        let domain_typed = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "domainTyped")
+            .unwrap();
+        // UserId is a domain type and `extra` has no type annotation at
+        // all -- neither counts.
+        assert_eq!(domain_typed.primitive_param_count, 0);
+
+        // Plain JS has no type annotations at all -- always 0, same as
+        // every other language this marker isn't implemented for yet.
+        let js_rec = extract_js("function plain(name, age) {\n  return name;\n}\n");
+        let plain = js_rec.symbols.iter().find(|s| s.name == "plain").unwrap();
+        assert_eq!(plain.primitive_param_count, 0);
     }
 
     #[test]

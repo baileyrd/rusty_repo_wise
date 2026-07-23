@@ -114,6 +114,7 @@ impl<'a> Walker<'a> {
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.
                         param_count: 0,
+                        primitive_param_count: 0,
                         body_hash,
                     });
                     self.scope_stack.push(id);

@@ -9,7 +9,7 @@ use repowise_core::{
 use repowise_graph::RepoGraph;
 use repowise_health::{
     analyze, FindingKind, BUMPY_ROAD_MIN_BUMPS, GOD_CLASS_METHODS, HIGH_COMPLEXITY,
-    HIGH_NESTING_DEPTH, LONG_FUNCTION_LINES, TOO_MANY_PARAMS,
+    HIGH_NESTING_DEPTH, LONG_FUNCTION_LINES, PRIMITIVE_OBSESSION_MIN_COUNT, TOO_MANY_PARAMS,
 };
 use std::path::{Path, PathBuf};
 
@@ -39,6 +39,7 @@ fn symbol(
         bumpy_road_bumps: 0,
         complex_conditionals: Vec::new(),
         param_count,
+        primitive_param_count: 0,
         body_hash,
     }
 }
@@ -254,6 +255,48 @@ fn flags_one_finding_per_complex_conditional_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(3)));
     assert!(lines.contains(&Some(7)));
     assert!(findings_for(&report, "simple", FindingKind::ComplexConditional).is_empty());
+}
+
+#[test]
+fn flags_primitive_obsession_at_the_documented_threshold() {
+    let mut obsessed = symbol(
+        "obsessed.rs",
+        "obsessed",
+        SymbolKind::Function,
+        1,
+        5,
+        None,
+        1,
+        4,
+        None,
+    );
+    obsessed.primitive_param_count = PRIMITIVE_OBSESSION_MIN_COUNT;
+    let mut domain_typed = symbol(
+        "obsessed.rs",
+        "domain_typed",
+        SymbolKind::Function,
+        7,
+        11,
+        None,
+        1,
+        2,
+        None,
+    );
+    domain_typed.primitive_param_count = PRIMITIVE_OBSESSION_MIN_COUNT - 1;
+
+    let idx = index(vec![file_record(
+        "obsessed.rs",
+        vec![obsessed, domain_typed],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    assert_eq!(
+        findings_for(&report, "obsessed", FindingKind::PrimitiveObsession).len(),
+        1
+    );
+    assert!(findings_for(&report, "domain_typed", FindingKind::PrimitiveObsession).is_empty());
 }
 
 #[test]

@@ -226,6 +226,26 @@ pub fn count_params(params: Option<Node>) -> usize {
     params.map(|p| p.named_child_count()).unwrap_or(0)
 }
 
+/// Number of declared parameters whose type resolves to a bare primitive.
+/// `param_type` extracts a parameter node's declared type as source text
+/// (returning `None` for parameters this language/shape doesn't carry a
+/// type for, e.g. Rust's `self`); `is_primitive_type` classifies that text.
+pub fn primitive_param_count(
+    params: Option<Node>,
+    param_type: impl Fn(Node) -> Option<String>,
+    is_primitive_type: impl Fn(&str) -> bool,
+) -> usize {
+    let Some(params) = params else {
+        return 0;
+    };
+    let mut cursor = params.walk();
+    params
+        .named_children(&mut cursor)
+        .filter_map(param_type)
+        .filter(|t| is_primitive_type(t.as_str()))
+        .count()
+}
+
 /// Hash of the body's whitespace-normalized text, for best-effort
 /// duplicate-code detection. Returns `None` for bodies too short to be a
 /// meaningful signal (see `MIN_DUPLICATE_LINES`).

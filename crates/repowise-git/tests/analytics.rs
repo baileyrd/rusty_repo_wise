@@ -177,6 +177,7 @@ fn hotspot_score_multiplies_churn_by_complexity() {
         bumpy_road_bumps: 0,
         complex_conditionals: Vec::new(),
         param_count: 0,
+        primitive_param_count: 0,
         body_hash: None,
     };
     let index = RepoIndex {
@@ -242,6 +243,7 @@ fn decayed_score_ranks_recent_churn_above_equally_old_churn() {
         bumpy_road_bumps: 0,
         complex_conditionals: Vec::new(),
         param_count: 0,
+        primitive_param_count: 0,
         body_hash: None,
     };
     let index = RepoIndex {

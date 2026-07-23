@@ -23,6 +23,7 @@ fn symbol(file: &str, name: &str, kind: SymbolKind, start_line: usize, end_line:
         bumpy_road_bumps: 0,
         complex_conditionals: Vec::new(),
         param_count: 0,
+        primitive_param_count: 0,
         body_hash: None,
     }
 }

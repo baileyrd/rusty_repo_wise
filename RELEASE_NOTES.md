@@ -6,6 +6,43 @@ repo routing work through PRs).
 
 ---
 
+## PR #89 — Add C language support
+**2026-07-23** · [#89](https://github.com/baileyrd/rusty_repo_wise/pull/89) · closes [#36](https://github.com/baileyrd/rusty_repo_wise/issues/36)
+
+- **Added:** a `repowise-parser` extractor for C — functions and structs
+  (`SymbolKind::Function`/`Struct`). Simpler than C++'s: plain C has no
+  member functions at all, so there's no `class_stack` — struct fields
+  and function bodies never nest into each other. Quote-form
+  `#include "local.h"` is resolved directly against the filesystem at
+  parse time (mirroring C++'s own `resolve_include`); angle-form
+  `#include <system>` stays unresolved by design.
+- **Design decision, left open by #32:** the C/C++ `.h` ambiguity.
+  `.h` stays unmapped to either language (`Language::Other`) — the same
+  call already made for C++'s own extension set — rather than guessing
+  via syntax-sniffing. This has a **more significant practical
+  consequence for C than it did for C++**: C++ has alternate,
+  unambiguous header extensions (`.hpp`/`.hh`/`.hxx`) commonly used in
+  practice, but C conventionally uses `.h` for nearly all its headers
+  with no alternate in common use — so a conventional
+  `#include "foo.h"` split resolves against the filesystem fine at parse
+  time, but never becomes a real graph edge, since the header itself is
+  never indexed as a graph node. Demonstrated directly by this PR's own
+  graph resolution test (asserted, not just described in prose).
+- **Dependency note:** pins `tree-sitter-c = "0.21"` rather than the
+  newer 0.24.x release — 0.24.2's grammar targets ABI 15, incompatible
+  with this workspace's tree-sitter 0.24 core (ABI 13–14 only). 0.21
+  predates the `LanguageFn` API and is ABI-compatible, the same fix
+  already applied to `tree-sitter-c-sharp`.
+- 5 new tests (struct/function extraction, quote/angle include
+  handling, field/bare call tracking, cyclomatic complexity,
+  duplicate-body hashing) plus a `repowise-graph` end-to-end test
+  proving quote-form includes of recognized extensions resolve while
+  conventional `.h` headers stay unresolved; 94 tests passing
+  workspace-wide. Ninth language merged out of this session's
+  `parity-loop` gap-analysis pass (after TypeScript/JavaScript in #26,
+  Java in #75, Kotlin in #77, Go in #79, C++ in #81, C# in #83, Scala in
+  #85, and Ruby in #87) — next up per the loop is Swift (#37).
+
 ## PR #87 — Add Ruby language support
 **2026-07-23** · [#87](https://github.com/baileyrd/rusty_repo_wise/pull/87) · closes [#35](https://github.com/baileyrd/rusty_repo_wise/issues/35)
 

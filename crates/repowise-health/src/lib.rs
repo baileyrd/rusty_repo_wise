@@ -8,9 +8,11 @@
 //! possibly-dead code (zero resolved callers), low cohesion (LCOM4 —
 //! see the `lcom4` module doc comment for its Rust/Python/TS+JS-only
 //! scope), nested complexity (max control-flow nesting depth — see
-//! `repowise_core::Symbol::max_nesting_depth`), and a "bumpy road"
-//! (count of distinct nested-block regions — see
-//! `repowise_core::Symbol::bumpy_road_bumps`). Git-history-based
+//! `repowise_core::Symbol::max_nesting_depth`), a "bumpy road" (count of
+//! distinct nested-block regions — see
+//! `repowise_core::Symbol::bumpy_road_bumps`), and complex conditionals
+//! (per-condition boolean-operator chains, Rust/Python/TS+JS-only — see
+//! `repowise_core::Symbol::complex_conditionals`). Git-history-based
 //! markers (churn, hotspots, bug-fix history) aren't implemented yet —
 //! that needs the git-analytics layer, which is a separate phase.
 //!
@@ -67,6 +69,10 @@ const PENALTY_NESTED_COMPLEXITY: f64 = 1.0;
 // underlying data (scattered nesting vs. a single deep point), not an
 // independent problem worth double-weighting.
 const PENALTY_BUMPY_ROAD: f64 = 0.5;
+// A function can rack up multiple flagged conditions at once; a
+// per-occurrence weight lighter than the whole-function markers above
+// avoids one messy function alone tanking its score.
+const PENALTY_COMPLEX_CONDITIONAL: f64 = 0.3;
 
 const MAX_SCORE: f64 = 10.0;
 
@@ -82,6 +88,7 @@ pub enum FindingKind {
     LowCohesion,
     NestedComplexity,
     BumpyRoad,
+    ComplexConditional,
 }
 
 impl FindingKind {
@@ -97,6 +104,7 @@ impl FindingKind {
             FindingKind::LowCohesion => "low-cohesion",
             FindingKind::NestedComplexity => "nested-complexity",
             FindingKind::BumpyRoad => "bumpy-road",
+            FindingKind::ComplexConditional => "complex-conditional",
         }
     }
 
@@ -112,6 +120,7 @@ impl FindingKind {
             FindingKind::LowCohesion => PENALTY_LOW_COHESION,
             FindingKind::NestedComplexity => PENALTY_NESTED_COMPLEXITY,
             FindingKind::BumpyRoad => PENALTY_BUMPY_ROAD,
+            FindingKind::ComplexConditional => PENALTY_COMPLEX_CONDITIONAL,
         }
     }
 }
@@ -239,6 +248,21 @@ fn check_function_markers(
             detail: format!(
                 "{} separate nested-block regions (>= {BUMPY_ROAD_MIN_BUMPS})",
                 sym.bumpy_road_bumps
+            ),
+        });
+    }
+    // Threshold is already applied at extraction time (see
+    // `repowise_parser::metrics::complex_conditionals`); every entry
+    // here is already flagged, so no further filtering is needed.
+    for cc in &sym.complex_conditionals {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(cc.line),
+            kind: FindingKind::ComplexConditional,
+            detail: format!(
+                "condition chains {} boolean operators (>= 3)",
+                cc.operator_count
             ),
         });
     }

@@ -122,6 +122,7 @@ mod tests {
             complexity: 12,
             max_nesting_depth: 0,
             bumpy_road_bumps: 0,
+            complex_conditionals: Vec::new(),
             param_count: 1,
             body_hash: None,
         };

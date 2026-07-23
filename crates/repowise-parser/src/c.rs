@@ -77,6 +77,7 @@ impl<'a> Walker<'a> {
                         complexity: 0,
                         max_nesting_depth: 0,
                         bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
                         param_count: 0,
                         body_hash: None,
                     });
@@ -135,6 +136,7 @@ impl<'a> Walker<'a> {
                                 complexity,
                                 max_nesting_depth,
                                 bumpy_road_bumps,
+                                complex_conditionals: Vec::new(),
                                 param_count,
                                 body_hash,
                             });

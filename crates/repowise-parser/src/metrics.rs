@@ -1,8 +1,10 @@
 //! Language-agnostic per-symbol metrics computed directly from the AST:
 //! cyclomatic complexity, max nesting depth, a "bumpy road" nested-block
-//! count, parameter count, and a duplicate-code body hash. These feed
-//! `repowise-health`'s deterministic scoring.
+//! count, per-condition boolean-operator counting, parameter count, and
+//! a duplicate-code body hash. These feed `repowise-health`'s
+//! deterministic scoring.
 
+use repowise_core::ComplexConditionalRef;
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
 
@@ -136,6 +138,86 @@ pub fn bumpy_road_bumps(
     let mut bumps = 0;
     walk(body, 0, &is_decision, &is_nested_function, &mut bumps);
     bumps
+}
+
+/// A condition chaining at least this many boolean operators (`&&`/`||`
+/// and language equivalents) is flagged as a "complex conditional" —
+/// already-computed cyclomatic complexity counts each operator as +1
+/// toward the *function's* total, but doesn't flag the specific
+/// condition as locally hard to read.
+const COMPLEX_CONDITIONAL_MIN_OPERATORS: usize = 3;
+
+/// Every `if`/`while`/etc. condition within `body` chaining at least
+/// `COMPLEX_CONDITIONAL_MIN_OPERATORS` boolean operators, with the
+/// condition's own line and operator count — unlike `cyclomatic_complexity`
+/// (a single number for the whole function) or `max_nesting_depth`/
+/// `bumpy_road_bumps` (which describe nesting shape), this points at the
+/// *specific* expression that's locally hard to read.
+///
+/// `condition_of` extracts the condition sub-expression from a decision
+/// node (e.g. `if_expression` -> its `condition` field); nodes with no
+/// condition (a `for` loop's range, a `match` arm) return `None` and are
+/// skipped. `is_boolean_operator` classifies a node as a chaining
+/// operator (e.g. `binary_expression` with `&&`/`||`) — this is
+/// deliberately a *separate* closure from `is_decision`, even though
+/// both often check the same node kind, because here we're counting
+/// operators *within one condition's own subtree*, not decision points
+/// across the whole function body.
+pub fn complex_conditionals(
+    body: Node,
+    condition_of: impl Fn(Node) -> Option<Node>,
+    is_boolean_operator: impl Fn(Node) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<ComplexConditionalRef> {
+    fn count_operators(node: Node, is_boolean_operator: &dyn Fn(Node) -> bool) -> usize {
+        let mut count = usize::from(is_boolean_operator(node));
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            count += count_operators(child, is_boolean_operator);
+        }
+        count
+    }
+
+    fn walk(
+        node: Node,
+        condition_of: &dyn Fn(Node) -> Option<Node>,
+        is_boolean_operator: &dyn Fn(Node) -> bool,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<ComplexConditionalRef>,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            if let Some(condition) = condition_of(child) {
+                let operator_count = count_operators(condition, is_boolean_operator);
+                if operator_count >= COMPLEX_CONDITIONAL_MIN_OPERATORS {
+                    out.push(ComplexConditionalRef {
+                        line: condition.start_position().row + 1,
+                        operator_count,
+                    });
+                }
+            }
+            walk(
+                child,
+                condition_of,
+                is_boolean_operator,
+                is_nested_function,
+                out,
+            );
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(
+        body,
+        &condition_of,
+        &is_boolean_operator,
+        &is_nested_function,
+        &mut out,
+    );
+    out
 }
 
 /// Best-effort parameter count: the number of named children of a

@@ -103,6 +103,16 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or(0);
+                    let complex_conditionals = body
+                        .map(|b| {
+                            metrics::complex_conditionals(
+                                b,
+                                condition_of,
+                                |n| is_boolean_operator(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -116,6 +126,7 @@ impl<'a> Walker<'a> {
                         complexity,
                         max_nesting_depth,
                         bumpy_road_bumps,
+                        complex_conditionals,
                         param_count,
                         body_hash,
                     });
@@ -146,6 +157,7 @@ impl<'a> Walker<'a> {
                         complexity: 0,
                         max_nesting_depth: 0,
                         bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
                         param_count: 0,
                         body_hash: None,
                     });
@@ -166,6 +178,7 @@ impl<'a> Walker<'a> {
                         complexity: 0,
                         max_nesting_depth: 0,
                         bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
                         param_count: 0,
                         body_hash: None,
                     });
@@ -292,11 +305,29 @@ fn is_decision(n: Node, source: &str) -> bool {
         | "while_let_expression"
         | "loop_expression"
         | "for_expression" => true,
-        "binary_expression" => n
-            .child_by_field_name("operator")
-            .map(|op| matches!(text(op, source), "&&" | "||"))
-            .unwrap_or(false),
+        "binary_expression" => is_boolean_operator(n, source),
         _ => false,
+    }
+}
+
+/// A short-circuiting boolean operator (`&&` / `||`) -- a separate
+/// helper from `is_decision` since `complex_conditionals` counts these
+/// within one condition's own subtree, not decision points across the
+/// whole function body.
+fn is_boolean_operator(n: Node, source: &str) -> bool {
+    n.kind() == "binary_expression"
+        && n.child_by_field_name("operator")
+            .map(|op| matches!(text(op, source), "&&" | "||"))
+            .unwrap_or(false)
+}
+
+/// The condition sub-expression of an `if`/`while` (plain, not
+/// `if let`/`while let`, whose condition is a pattern-match rather than
+/// a boolean expression and isn't in scope for this marker).
+fn condition_of(n: Node) -> Option<Node> {
+    match n.kind() {
+        "if_expression" | "while_expression" => n.child_by_field_name("condition"),
+        _ => None,
     }
 }
 
@@ -593,6 +624,33 @@ mod tests {
         assert_eq!(scattered.max_nesting_depth, single_deep.max_nesting_depth);
         assert_eq!(scattered.bumpy_road_bumps, 3);
         assert_eq!(single_deep.bumpy_road_bumps, 1);
+    }
+
+    #[test]
+    fn flags_conditions_chaining_three_or_more_boolean_operators() {
+        let rec = extract_str(
+            r#"
+            fn tangled(a: bool, b: bool, c: bool, d: bool) -> i32 {
+                if a && b && c && d {
+                    return 1;
+                }
+                0
+            }
+
+            fn simple(a: bool, b: bool) -> i32 {
+                if a && b {
+                    return 1;
+                }
+                0
+            }
+            "#,
+        );
+        let tangled = rec.symbols.iter().find(|s| s.name == "tangled").unwrap();
+        let simple = rec.symbols.iter().find(|s| s.name == "simple").unwrap();
+
+        assert_eq!(tangled.complex_conditionals.len(), 1);
+        assert_eq!(tangled.complex_conditionals[0].operator_count, 3);
+        assert!(simple.complex_conditionals.is_empty());
     }
 
     #[test]

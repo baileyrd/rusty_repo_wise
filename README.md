@@ -62,16 +62,18 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from ten
+- Score every file's health deterministically (0–10, no LLM/ML) from eleven
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
   (LCOM4 — Rust/Python/TS+JS only, see "Health scoring" below), nested
   complexity (`nested_complexity` — maximum control-flow nesting depth,
-  complementing cyclomatic complexity's flat branch count), and a
+  complementing cyclomatic complexity's flat branch count), a
   "bumpy road" (`bumpy_road` — count of distinct nested-block regions,
-  complementing nesting depth's single deepest-point view) — except for
+  complementing nesting depth's single deepest-point view), and complex
+  conditionals (`complex_conditional` — a single `if`/`while`/etc. condition
+  chaining 3+ boolean operators, Rust/Python/TS+JS only) — except for
   shell scripts, which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -103,7 +105,7 @@ specifics per layer), not full feature parity:
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
 Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
 other languages aren't implemented — see issue #11 for the
-tracking/discussion issue on extending language support. The health scorer covers 10 of repowise's ~25 markers — see
+tracking/discussion issue on extending language support. The health scorer covers 11 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
@@ -123,7 +125,8 @@ dashboard is one static page with no per-file drill-down or live search
   Swift, PHP, Dart, and shell scripts, including per-function
   complexity/nesting-depth/bumpy-road/param-count/body-hash metrics, plus
   per-method `self`/`this` field-access tracking for Rust/Python/TS+JS
-  (feeds LCOM4).
+  (feeds LCOM4) and per-condition boolean-operator-chain detection for
+  Rust/Python/TS+JS (feeds `complex_conditional`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -188,6 +191,7 @@ to `[0, 10]`:
 | Low cohesion (LCOM4) | >= 2 disjoint field-access groups | −1.0 |
 | Nested complexity (`nested_complexity`) | control flow nested > 4 levels deep | −1.0 |
 | Bumpy road (`bumpy_road`) | >= 3 separate nested-block regions | −0.5 |
+| Complex conditional (`complex_conditional`) | single condition chains >= 3 boolean operators | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -248,6 +252,25 @@ leaf and counts as a single bump, not three, since it's one deep block
 rather than several scattered ones; three separate sibling `if`s each
 with one level of nesting inside have three leaves and count as three
 bumps. Flagged at 3+ bumps.
+
+**Complex conditional (`complex_conditional`)** flags a single `if`/
+`while`/etc. condition that chains 3+ boolean operators (`&&`/`||` in
+Rust/JS/TS, `and`/`or` in Python) — unlike `nested_complexity` and
+`bumpy_road`, which are Symbol-level aggregate scalars, this marker needs
+to point at the *specific condition*, not just the enclosing function, so
+each flagged condition is its own `Finding` with its own line number
+(`Symbol::complex_conditionals: Vec<ComplexConditionalRef>`, each entry
+carrying the condition's own `line` and its `operator_count`). Extraction
+is implemented for **Rust, Python, and TypeScript/JavaScript only** — the
+same three languages LCOM4 and near-duplicate detection require new
+per-language grammar logic for — via a `condition_of` closure per language
+that pulls the `condition` sub-expression out of an `if`/`while`/etc. node,
+and a separate `is_boolean_operator` closure (deliberately distinct from
+each language's existing `is_decision` classifier) that counts chained
+boolean operators within just that condition's own subtree, not the whole
+function body. The other 13 languages have no per-language
+`condition_of`/`is_boolean_operator` logic yet and so never produce any
+entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

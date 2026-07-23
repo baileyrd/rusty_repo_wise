@@ -290,6 +290,7 @@ mod tests {
             complexity: 1,
             max_nesting_depth: 0,
             bumpy_road_bumps: 0,
+            complex_conditionals: Vec::new(),
             param_count: 1,
             // Distinct per symbol (keyed off start_line) so two
             // different symbols never accidentally look like an

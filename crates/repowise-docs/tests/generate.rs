@@ -21,6 +21,7 @@ fn build_index(root: &std::path::Path) -> RepoIndex {
         complexity: 1,
         max_nesting_depth: 0,
         bumpy_road_bumps: 0,
+        complex_conditionals: Vec::new(),
         param_count: 0,
         body_hash: None,
     };

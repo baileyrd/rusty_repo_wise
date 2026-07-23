@@ -122,6 +122,7 @@ impl<'a> Walker<'a> {
                         complexity: 0,
                         max_nesting_depth: 0,
                         bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
                         param_count: 0,
                         body_hash: None,
                     });
@@ -148,6 +149,7 @@ impl<'a> Walker<'a> {
                         complexity: 0,
                         max_nesting_depth: 0,
                         bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
                         param_count: 0,
                         body_hash: None,
                     });
@@ -275,6 +277,16 @@ impl<'a> Walker<'a> {
                 metrics::bumpy_road_bumps(b, |n| is_decision(n, self.source), is_nested_function)
             })
             .unwrap_or(0);
+        let complex_conditionals = body
+            .map(|b| {
+                metrics::complex_conditionals(
+                    b,
+                    condition_of,
+                    |n| is_boolean_operator(n, self.source),
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let param_count = count_params(func_node);
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
@@ -288,6 +300,7 @@ impl<'a> Walker<'a> {
             complexity,
             max_nesting_depth,
             bumpy_road_bumps,
+            complex_conditionals,
             param_count,
             body_hash,
         });
@@ -373,11 +386,27 @@ fn is_decision(n: Node, source: &str) -> bool {
     match n.kind() {
         "if_statement" | "for_statement" | "for_in_statement" | "while_statement"
         | "do_statement" | "catch_clause" | "ternary_expression" | "switch_case" => true,
-        "binary_expression" => n
-            .child_by_field_name("operator")
-            .map(|op| matches!(text(op, source), "&&" | "||"))
-            .unwrap_or(false),
+        "binary_expression" => is_boolean_operator(n, source),
         _ => false,
+    }
+}
+
+/// A short-circuiting boolean operator (`&&` / `||`) -- a separate
+/// helper from `is_decision` since `complex_conditionals` counts these
+/// within one condition's own subtree, not decision points across the
+/// whole function body.
+fn is_boolean_operator(n: Node, source: &str) -> bool {
+    n.kind() == "binary_expression"
+        && n.child_by_field_name("operator")
+            .map(|op| matches!(text(op, source), "&&" | "||"))
+            .unwrap_or(false)
+}
+
+/// The condition sub-expression of an `if`/`while`.
+fn condition_of(n: Node) -> Option<Node> {
+    match n.kind() {
+        "if_statement" | "while_statement" => n.child_by_field_name("condition"),
+        _ => None,
     }
 }
 

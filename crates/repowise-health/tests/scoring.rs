@@ -3,7 +3,9 @@
 //! `Language::Other` to skip repowise-graph's Rust/Python module-path
 //! resolution, which isn't relevant here and would otherwise touch disk.
 
-use repowise_core::{CallRef, FileRecord, Language, RepoIndex, Symbol, SymbolKind};
+use repowise_core::{
+    CallRef, ComplexConditionalRef, FileRecord, Language, RepoIndex, Symbol, SymbolKind,
+};
 use repowise_graph::RepoGraph;
 use repowise_health::{
     analyze, FindingKind, BUMPY_ROAD_MIN_BUMPS, GOD_CLASS_METHODS, HIGH_COMPLEXITY,
@@ -35,6 +37,7 @@ fn symbol(
         complexity,
         max_nesting_depth: 0,
         bumpy_road_bumps: 0,
+        complex_conditionals: Vec::new(),
         param_count,
         body_hash,
     }
@@ -200,6 +203,57 @@ fn flags_bumpy_functions_but_not_ones_below_the_bump_threshold() {
         1
     );
     assert!(findings_for(&report, "smooth", FindingKind::BumpyRoad).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_complex_conditional_pointing_at_its_own_line() {
+    let mut tangled = symbol(
+        "tangled.rs",
+        "tangled",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        4,
+        4,
+        None,
+    );
+    tangled.complex_conditionals = vec![
+        ComplexConditionalRef {
+            line: 3,
+            operator_count: 3,
+        },
+        ComplexConditionalRef {
+            line: 7,
+            operator_count: 4,
+        },
+    ];
+    let simple = symbol(
+        "tangled.rs",
+        "simple",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "tangled.rs",
+        vec![tangled, simple],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "tangled", FindingKind::ComplexConditional);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(3)));
+    assert!(lines.contains(&Some(7)));
+    assert!(findings_for(&report, "simple", FindingKind::ComplexConditional).is_empty());
 }
 
 #[test]

@@ -28,6 +28,7 @@ pub enum Language {
     C,
     Swift,
     Php,
+    Dart,
     Other,
 }
 
@@ -53,6 +54,7 @@ impl Language {
             "c" => Language::C,
             "swift" => Language::Swift,
             "php" => Language::Php,
+            "dart" => Language::Dart,
             _ => Language::Other,
         }
     }
@@ -73,6 +75,7 @@ impl Language {
             Language::C => "C",
             Language::Swift => "Swift",
             Language::Php => "PHP",
+            Language::Dart => "Dart",
             Language::Other => "Other",
         }
     }

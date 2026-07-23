@@ -8,6 +8,7 @@
 mod c;
 mod cpp;
 mod csharp;
+mod dart;
 mod go;
 mod java;
 mod javascript;
@@ -45,6 +46,7 @@ pub fn parse_file(
         Language::C => Ok(Some(c::extract(path, source)?)),
         Language::Swift => Ok(Some(swift::extract(path, source)?)),
         Language::Php => Ok(Some(php::extract(path, source)?)),
+        Language::Dart => Ok(Some(dart::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

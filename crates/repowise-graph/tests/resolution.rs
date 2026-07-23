@@ -535,3 +535,41 @@ fn resolves_php_use_via_namespace_folder_heuristic_and_require_once_directly() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, helper_php);
 }
+
+#[test]
+fn resolves_dart_relative_import_but_not_a_package_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(
+        root.join("helper.dart"),
+        "int compute(int x) {\n  return x + 1;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.dart"),
+        "import 'helper.dart';\nimport 'package:foo/foo.dart';\n\nint run() {\n  return compute(1);\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_dart = find_file(&index, "main.dart").path.clone();
+    let helper_dart = find_file(&index, "helper.dart").path.clone();
+
+    // `import 'helper.dart'` resolves directly against the filesystem,
+    // same as C/C++/Ruby's relative includes.
+    let deps = graph.dependencies_of(&main_dart);
+    assert!(
+        deps.contains(&helper_dart),
+        "expected main.dart to depend on helper.dart, got {deps:?}"
+    );
+
+    // `package:foo/foo.dart` has no pub-package registry to resolve
+    // against, so it must count as unresolved.
+    assert!(graph.unresolved_imports >= 1);
+
+    let matches = graph.search("compute");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_dart);
+}

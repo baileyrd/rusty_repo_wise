@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 /// repowise (https://github.com/repowise-dev/repowise). Implemented so
 /// far: parsing, symbol/import/call extraction, dependency-graph queries,
 /// deterministic code-health scoring, git-history analytics (churn,
-/// hotspots, ownership, co-change coupling), and auto-generated per-file
-/// documentation. Other layers from the original project (ADR mining,
-/// MCP server, dashboard) are not yet implemented.
+/// hotspots, ownership, co-change coupling), auto-generated per-file
+/// documentation, and architectural-decision mining. Other layers from
+/// the original project (MCP server, dashboard) are not yet implemented.
 #[derive(Parser)]
 #[command(name = "repowise", version, about)]
 struct Cli {
@@ -86,6 +86,15 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List mined architectural decisions (from docs/adr/*.md and
+    /// decision-like commit messages), and which files they're linked to.
+    Decisions {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Only show decisions linked to this file.
+        #[arg(long)]
+        for_file: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -101,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Docs { path } => cmd_docs(&path),
+        Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
     }
 }
 
@@ -364,6 +374,56 @@ fn cmd_docs(path: &Path) -> anyhow::Result<()> {
         index.root.display()
     );
     println!("  {new} new, {changed} changed, {unchanged} unchanged (by source content hash)");
+    Ok(())
+}
+
+fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let mut decisions = repowise_adr::mine(&index)?;
+
+    if let Some(f) = for_file {
+        let target = if f.is_absolute() {
+            f.to_path_buf()
+        } else {
+            root.join(f)
+        };
+        let target = target.canonicalize().unwrap_or(target);
+        decisions.retain(|d| d.linked_files.contains(&target));
+    }
+
+    println!(
+        "Repowise decisions for {} ({} found)",
+        index.root.display(),
+        decisions.len()
+    );
+    if decisions.is_empty() {
+        println!("  No decisions found (docs/adr/*.md and decision-like commit messages).");
+        return Ok(());
+    }
+
+    for d in &decisions {
+        let source_label = match &d.source {
+            repowise_adr::DecisionSource::Adr { file } => {
+                format!("ADR ({})", display_path(file, &index.root))
+            }
+            repowise_adr::DecisionSource::CommitMessage { hash, author } => {
+                format!("commit {} by {author}", &hash[..hash.len().min(7)])
+            }
+        };
+        let status = d.status.as_deref().unwrap_or("-");
+        println!("  {:<10} {:<10} {}", d.id, status, d.title);
+        println!("    source: {source_label}");
+        if let Some(target) = &d.superseded_by {
+            println!("    superseded by: {target}");
+        }
+        if !d.linked_files.is_empty() {
+            println!("    linked files:");
+            for f in &d.linked_files {
+                println!("      {}", display_path(f, &index.root));
+            }
+        }
+    }
     Ok(())
 }
 

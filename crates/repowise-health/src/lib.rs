@@ -12,7 +12,10 @@
 //! distinct nested-block regions — see
 //! `repowise_core::Symbol::bumpy_road_bumps`), and complex conditionals
 //! (per-condition boolean-operator chains, Rust/Python/TS+JS-only — see
-//! `repowise_core::Symbol::complex_conditionals`). Git-history-based
+//! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
+//! (parameter lists leaning on bare primitives instead of domain types,
+//! Rust/TypeScript-only since it needs declared parameter types — see
+//! `repowise_core::Symbol::primitive_param_count`). Git-history-based
 //! markers (churn, hotspots, bug-fix history) aren't implemented yet —
 //! that needs the git-analytics layer, which is a separate phase.
 //!
@@ -50,6 +53,10 @@ pub const HIGH_NESTING_DEPTH: usize = 4;
 /// A function/method with at least this many "bumpy road" nested-block
 /// regions (see `repowise_core::Symbol::bumpy_road_bumps`) is flagged.
 pub const BUMPY_ROAD_MIN_BUMPS: usize = 3;
+/// A function/method with at least this many bare-primitive-typed
+/// parameters (see `repowise_core::Symbol::primitive_param_count`) is
+/// flagged.
+pub const PRIMITIVE_OBSESSION_MIN_COUNT: usize = 3;
 
 const PENALTY_LONG_FUNCTION: f64 = 0.5;
 const PENALTY_HIGH_COMPLEXITY: f64 = 1.0;
@@ -73,6 +80,10 @@ const PENALTY_BUMPY_ROAD: f64 = 0.5;
 // per-occurrence weight lighter than the whole-function markers above
 // avoids one messy function alone tanking its score.
 const PENALTY_COMPLEX_CONDITIONAL: f64 = 0.3;
+// Same weight as `TooManyParameters`/`ComplexConditional`: another
+// parameter-list-shaped structural-complexity signal, not a central-logic
+// problem worth a heavier penalty.
+const PENALTY_PRIMITIVE_OBSESSION: f64 = 0.3;
 
 const MAX_SCORE: f64 = 10.0;
 
@@ -89,6 +100,7 @@ pub enum FindingKind {
     NestedComplexity,
     BumpyRoad,
     ComplexConditional,
+    PrimitiveObsession,
 }
 
 impl FindingKind {
@@ -105,6 +117,7 @@ impl FindingKind {
             FindingKind::NestedComplexity => "nested-complexity",
             FindingKind::BumpyRoad => "bumpy-road",
             FindingKind::ComplexConditional => "complex-conditional",
+            FindingKind::PrimitiveObsession => "primitive-obsession",
         }
     }
 
@@ -121,6 +134,7 @@ impl FindingKind {
             FindingKind::NestedComplexity => PENALTY_NESTED_COMPLEXITY,
             FindingKind::BumpyRoad => PENALTY_BUMPY_ROAD,
             FindingKind::ComplexConditional => PENALTY_COMPLEX_CONDITIONAL,
+            FindingKind::PrimitiveObsession => PENALTY_PRIMITIVE_OBSESSION,
         }
     }
 }
@@ -273,6 +287,18 @@ fn check_function_markers(
             line: Some(sym.start_line),
             kind: FindingKind::TooManyParameters,
             detail: format!("{} parameters (> {TOO_MANY_PARAMS})", sym.param_count),
+        });
+    }
+    if sym.primitive_param_count >= PRIMITIVE_OBSESSION_MIN_COUNT {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(sym.start_line),
+            kind: FindingKind::PrimitiveObsession,
+            detail: format!(
+                "{} bare-primitive-typed parameters (>= {PRIMITIVE_OBSESSION_MIN_COUNT})",
+                sym.primitive_param_count
+            ),
         });
     }
     if !skip_dead_code && graph.call_in_degree(&sym.id) == 0 {

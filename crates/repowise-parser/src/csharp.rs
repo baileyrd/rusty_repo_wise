@@ -85,6 +85,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps: 0,
                         complex_conditionals: Vec::new(),
                         param_count: 0,
+                        primitive_param_count: 0,
                         body_hash: None,
                     });
                     self.class_stack.push(name);
@@ -147,6 +148,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps,
                         complex_conditionals: Vec::new(),
                         param_count,
+                        primitive_param_count: 0,
                         body_hash,
                     });
                     self.scope_stack.push(id);

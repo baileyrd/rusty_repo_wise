@@ -292,6 +292,7 @@ mod tests {
             bumpy_road_bumps: 0,
             complex_conditionals: Vec::new(),
             param_count: 1,
+            primitive_param_count: 0,
             // Distinct per symbol (keyed off start_line) so two
             // different symbols never accidentally look like an
             // exact-duplicate pair here -- only the "is this long

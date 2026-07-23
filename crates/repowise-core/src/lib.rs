@@ -152,6 +152,13 @@ pub struct Symbol {
     /// Number of declared parameters. `0` for symbols without a
     /// parameter list.
     pub param_count: usize,
+    /// Number of declared parameters whose type is a bare primitive
+    /// (`i32`/`bool`/`String` and language equivalents) rather than a
+    /// domain-specific type. `0` for languages without declared
+    /// parameter types (dynamically-typed languages, or statically-typed
+    /// ones this extraction isn't implemented for yet — see each
+    /// language's own extraction logic in `repowise-parser`).
+    pub primitive_param_count: usize,
     /// A hash of the body's whitespace-normalized text, used for
     /// best-effort duplicate-code detection. `None` when there's no body
     /// or the body is too short to be a meaningful duplicate signal.

@@ -196,6 +196,42 @@ fn resolves_java_package_imports_via_maven_source_root() {
 }
 
 #[test]
+fn resolves_go_imports_via_go_mod_anchored_module_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(root.join("go.mod"), "module example.com/mymod\n\ngo 1.22\n").unwrap();
+    fs::create_dir_all(root.join("util")).unwrap();
+    fs::write(
+        root.join("util/helper.go"),
+        "package util\n\nfunc Compute(x int) int {\n\treturn x + 1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.go"),
+        "package main\n\nimport \"example.com/mymod/util\"\n\nfunc run() int {\n\treturn util.Compute(1)\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_go = find_file(&index, "main.go").path.clone();
+    let helper_go = find_file(&index, "util/helper.go").path.clone();
+
+    // Resolved via the `go.mod`-anchored module path
+    // (`example.com/mymod/util`), not a repo-root-relative one.
+    let deps = graph.dependencies_of(&main_go);
+    assert!(
+        deps.contains(&helper_go),
+        "expected main.go to depend on util/helper.go, got {deps:?}"
+    );
+
+    let matches = graph.search("Compute");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_go);
+}
+
+#[test]
 fn resolves_kotlin_imports_including_across_a_mixed_java_kotlin_project() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();

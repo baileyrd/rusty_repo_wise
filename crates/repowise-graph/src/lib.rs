@@ -49,6 +49,7 @@ impl RepoGraph {
         // package-path convention, and a mixed-language project can
         // reasonably import one from the other.
         let mut jvm_modules = HashMap::new();
+        let mut go_modules = HashMap::new();
 
         for file in &index.files {
             let fnode = graph.add_node(Node::File(file.path.clone()));
@@ -78,11 +79,16 @@ impl RepoGraph {
                         jvm_modules.insert(mp, file.path.clone());
                     }
                 }
+                Language::Go => {
+                    if let Some(mp) = modpath::go_module_path(&file.path) {
+                        go_modules.insert(mp, file.path.clone());
+                    }
+                }
                 // TypeScript/JavaScript relative imports are resolved
                 // directly at parse time (see `resolve_relative_import` in
                 // `repowise-parser`), so there's no module-path index to
-                // build here, unlike Rust/Python/Java/Kotlin's dotted/`::`
-                // paths.
+                // build here, unlike Rust/Python/Java/Kotlin/Go's
+                // dotted/`::`/`/`-separated paths.
                 Language::TypeScript | Language::JavaScript | Language::Other => {}
             }
         }
@@ -97,6 +103,7 @@ impl RepoGraph {
                 Language::Rust => ("::", &rust_modules),
                 Language::Python => (".", &python_modules),
                 Language::Java | Language::Kotlin => (".", &jvm_modules),
+                Language::Go => ("/", &go_modules),
                 Language::TypeScript | Language::JavaScript => ("", &no_modules),
                 Language::Other => continue,
             };

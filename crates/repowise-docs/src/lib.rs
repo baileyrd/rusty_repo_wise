@@ -21,10 +21,22 @@ use repowise_graph::RepoGraph;
 use repowise_health::HealthReport;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const WIKI_DIR: &str = "wiki";
 const HASH_MARKER: &str = "<!-- content-hash: ";
+
+/// A file's wiki page path under `root`, whether or not it's actually
+/// been generated yet -- exposed so other crates that augment (rather
+/// than replace) this crate's deterministic pages, e.g. `repowise-llm`,
+/// can locate them without duplicating the `.repowise/wiki/<rel>.md`
+/// convention.
+pub fn wiki_page_path(root: &Path, file: &Path) -> PathBuf {
+    let rel = file.strip_prefix(root).unwrap_or(file);
+    root.join(RepoIndex::INDEX_DIR)
+        .join(WIKI_DIR)
+        .join(format!("{}.md", rel.display()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageStatus {
@@ -94,8 +106,7 @@ pub fn generate(
         let findings = findings_by_file.get(&file.path).unwrap_or(&no_findings);
         let page_content = render::render_page(file, content_hash, graph, &index.root, findings);
 
-        let rel = file.path.strip_prefix(&index.root).unwrap_or(&file.path);
-        let wiki_path = wiki_root.join(format!("{}.md", rel.display()));
+        let wiki_path = wiki_page_path(&index.root, &file.path);
         if let Some(parent) = wiki_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

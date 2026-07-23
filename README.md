@@ -110,10 +110,13 @@ Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
 other languages aren't implemented — see issue #11 for the
 tracking/discussion issue on extending language support. The health scorer covers 12 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
-ML-calibrated organizational-signal markers) are deferred. LLM-written prose on
-top of the wiki (`repowise generate` in the original) is also deferred —
-this port's `docs` layer is deliberately deterministic-only, as is ADR
-mining (only 6 of the original's 8 decision sources are implemented —
+ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
+per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
+crate can layer an LLM-written summary on top of each one (`repowise
+generate`, see "LLM-assisted wiki summaries" below) — a first, narrow slice
+of what was previously a fully-deferred LLM tier; RAG chat and refactor-plan
+codegen remain deferred. ADR mining is also not fully ported (only 6 of the
+original's 8 decision sources are implemented —
 see "Architectural decision mining" below). The MCP server covers 8 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
@@ -154,6 +157,11 @@ dashboard is one static page with no per-file drill-down or live search
   dead-code candidates, as agent-facing tools over stdio.
 - `repowise-dashboard` — a static-site dashboard rendered from the
   overview/health/hotspot/decision data the other layers compute.
+- `repowise-llm` — the one crate that talks to an LLM: an opt-in,
+  OpenAI-compatible chat-completions client (works against a self-hosted
+  [`rusty_provider`](https://github.com/baileyrd/rusty_provider) instance
+  or any other OpenAI-compatible endpoint) that layers a written summary
+  on top of each `repowise-docs` wiki page.
 - `repowise-cli` — the `repowise` binary tying it together.
 
 ## Usage
@@ -175,6 +183,7 @@ repowise decisions [PATH]          # mined ADRs + decision-like commits, with li
                                     #   --for-file <FILE> to filter to one file
 repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
+repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
 ```
 
 ## Health scoring
@@ -383,8 +392,49 @@ changed was cross-file data (a new caller elsewhere, a health finding
 driven by another file) rather than this file's own source — pages are
 always rewritten with current data regardless of the reported status, so
 content is never stale, only the *status label* can undersell how much
-changed. Not implemented from the original: LLM-written prose on top of
-these pages (`repowise generate`), and the dashboard's doc browser.
+changed. Not implemented from the original: the dashboard's doc browser.
+LLM-written prose on top of these pages does now exist (`repowise
+generate` — see the next section), but as a separate opt-in crate rather
+than a `repowise-docs` feature, keeping this crate itself LLM-free.
+
+## LLM-assisted wiki summaries
+
+`repowise generate [PATH]` is opt-in and needs `repowise docs` to have
+already been run: it reads each file's existing wiki page under
+`.repowise/wiki/`, asks an LLM to write a 2-3 sentence plain-English
+summary of that page's already-deterministic content (symbol list,
+dependencies, health findings), and inserts it as a "## Summary" section
+right after the page's title. Re-running replaces a previous summary
+rather than stacking a second one.
+
+This is the first, narrow slice of what was previously a fully-deferred
+LLM tier — see `repowise-llm`'s module doc comment for the other three
+LLM-dependent features (RAG chat, refactor-plan codegen, doc-gen-as-
+decision-source) still deferred as separate follow-ups, since each needs
+its own retrieval/context design.
+
+Configuration is three environment variables, all read only at the
+`repowise generate` call site (never baked into the index):
+
+- `REPOWISE_LLM_BASE_URL` — the on/off switch. Unset and `repowise
+  generate` exits with a message pointing here rather than silently doing
+  nothing. Point it at any OpenAI-compatible `/v1/chat/completions`
+  endpoint — including a self-hosted
+  [`rusty_provider`](https://github.com/baileyrd/rusty_provider) instance
+  (a Rust router fronting OpenAI/Anthropic/Gemini/Groq/Together/Fireworks
+  behind one URL with config-driven fallback chains).
+- `REPOWISE_LLM_MODEL` — a direct `"provider/model"` string or a route
+  alias (e.g. `rusty_provider`'s `"smart"`), defaulting to `"smart"`.
+- `REPOWISE_LLM_API_KEY` — optional; omit it for an endpoint that doesn't
+  require one.
+
+One file's failure (no wiki page yet, a failed LLM call) doesn't stop the
+rest — `repowise generate`'s summary line reports written/skipped/failed
+counts, and every other file's page is still attempted. `repowise-llm`
+uses `ureq` (synchronous), the same HTTP-client choice `repowise-adr`/
+`repowise-git`'s own opt-in network calls already made, so this command
+doesn't need to pull an async runtime into an otherwise-synchronous CLI
+the way `repowise serve` does.
 
 ## Architectural decision mining
 

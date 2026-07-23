@@ -102,6 +102,16 @@ independent path `decisions` already uses, then filters the result by
 whether each decision's `linked_files` intersects the requested targets'
 resolved files — no new mining logic, purely a filter over existing
 output.
+`get_dead_code` calls a new `repowise_health::find_dead_code`, a richer
+sibling to `analyze`'s `possibly-dead-code` marker: both start from the
+same `graph.call_in_degree(...) == 0` signal, but `find_dead_code` tiers
+each candidate by two extra risk factors — an ambiguous same-named
+symbol elsewhere in the index, and an unresolved import whose last path
+segment matches the candidate's file stem. The second factor is why
+`RepoGraph` now tracks `unresolved_import_stems` (populated during
+`build()` alongside the existing `unresolved_imports` counter) — the one
+piece of raw resolution data neither `RepoIndex` nor the existing
+`Overview` aggregate exposed.
 `dashboard` composes all of the above into one static page: `repowise-dashboard`
 calls the same `overview`/`analyze` functions, tries `repowise-git::GitAnalytics::collect`
 and `repowise-adr::mine` (both degrading to `None`/empty on failure rather

@@ -11,10 +11,21 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use repowise_core::{Language, RepoIndex, Symbol};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const MAX_CALL_FANOUT: usize = 6;
+
+/// The part of an import path after its final `.`/`::`/`/`/`\` separator
+/// (whichever appears last), lowercased. Language-naive on purpose —
+/// used only as a coarse "might this unresolved import have meant this
+/// file" signal, not for actual resolution.
+fn last_path_segment(path: &str) -> String {
+    path.rsplit(['.', ':', '/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_lowercase()
+}
 
 #[derive(Debug, Clone)]
 pub enum Node {
@@ -35,6 +46,15 @@ pub struct RepoGraph {
     symbol_index: HashMap<String, NodeIndex>,
     pub unresolved_imports: usize,
     pub unresolved_calls: usize,
+    /// Distinct last path segments (the part after the final `.`/`::`/
+    /// `/`/`\`) among imports that failed to resolve to any indexed file.
+    /// Used by `repowise-health`'s dead-code confidence tiering: an
+    /// unresolved import whose last segment matches a file's stem is a
+    /// plausible (if coarse, language-naive) sign that something meant
+    /// to import that file, but this port's directory-layout heuristics
+    /// couldn't confirm it — so a "zero callers" reading for a symbol in
+    /// that file is less trustworthy than it looks.
+    pub unresolved_import_stems: HashSet<String>,
 }
 
 impl RepoGraph {
@@ -137,6 +157,7 @@ impl RepoGraph {
 
         let mut unresolved_imports = 0usize;
         let mut unresolved_calls = 0usize;
+        let mut unresolved_import_stems: HashSet<String> = HashSet::new();
         let no_modules = HashMap::new();
 
         for file in &index.files {
@@ -169,10 +190,14 @@ impl RepoGraph {
                             graph.add_edge(from, to, EdgeKind::Imports);
                         } else {
                             unresolved_imports += 1;
+                            unresolved_import_stems.insert(last_path_segment(&imp.path));
                         }
                     }
                     Some(_) => {} // self-import (e.g. re-export within same file); ignore
-                    None => unresolved_imports += 1,
+                    None => {
+                        unresolved_imports += 1;
+                        unresolved_import_stems.insert(last_path_segment(&imp.path));
+                    }
                 }
             }
         }
@@ -244,6 +269,7 @@ impl RepoGraph {
             symbol_index,
             unresolved_imports,
             unresolved_calls,
+            unresolved_import_stems,
         }
     }
 

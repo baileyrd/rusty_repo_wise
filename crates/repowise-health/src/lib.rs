@@ -11,6 +11,10 @@
 //! Every marker here is a plain threshold over data `repowise-parser`/
 //! `repowise-graph` already computed; nothing is inferred or guessed.
 
+mod dead_code;
+
+pub use dead_code::{find_dead_code, DeadCodeCandidate, DeadCodeConfidence};
+
 use repowise_core::{Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
 use std::collections::HashMap;

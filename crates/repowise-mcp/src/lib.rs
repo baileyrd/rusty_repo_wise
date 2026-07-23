@@ -2,11 +2,11 @@
 //! dependency graph, and health scoring as agent-facing tools over
 //! stdio, using the official `rmcp` SDK.
 //!
-//! Implements 7 of the original repowise's ~10 MCP tools —
+//! Implements 8 of the original repowise's ~10 MCP tools —
 //! `get_overview`, `search_codebase`, `get_context`, `get_risk`,
-//! `get_change_risk`, `get_symbol`, `get_why` — the ones whose backing
-//! data (the index, the resolved dependency graph, health findings,
-//! `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
+//! `get_change_risk`, `get_symbol`, `get_why`, `get_dead_code` — the ones
+//! whose backing data (the index, the resolved dependency graph, health
+//! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
 //! exists in this port. `get_change_risk`'s score is a documented
 //! fixed-weight heuristic over diff-shape metrics (files/lines touched,
@@ -14,7 +14,11 @@
 //! original feeds the same kind of metrics into a pre-trained ML model,
 //! which this port has no labeled corpus or training pipeline to
 //! reproduce (see issue #42 and the category-A "ML-calibrated scoring"
-//! issue).
+//! issue). `get_dead_code`'s confidence tiers are likewise a documented
+//! approximation of the original's model (which also folds in a
+//! runtime-load risk factor — reflection, dynamic dispatch, entry
+//! points — this port has no way to assess); see
+//! `repowise_health::find_dead_code` for the exact tiering logic.
 //!
 //! Every tool call re-loads `.repowise/index.json` and rebuilds the
 //! dependency graph fresh — no in-memory caching across calls. Simple
@@ -139,6 +143,40 @@ struct WhyParams {
     /// target's file. Omit or leave empty to return every mined decision.
     #[serde(default)]
     targets: Vec<String>,
+}
+
+fn default_dead_code_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DeadCodeParams {
+    /// Minimum confidence tier to include: `"low"`, `"medium"`, or
+    /// `"high"` (case-insensitive). Defaults to `"low"` (everything).
+    /// Ignored when `safe_only` is set.
+    #[serde(default)]
+    min_confidence: Option<String>,
+    /// When `true`, return only the `"high"` confidence tier — the
+    /// closest this tool gets to the reference's "safe to delete"
+    /// designation. Even so, this is a claim about this port's own
+    /// resolution heuristics finding no in-repo reference, NOT a
+    /// guarantee of runtime safety: reflection, dynamic dispatch, and
+    /// entry points are all invisible to this port's static call graph.
+    #[serde(default)]
+    safe_only: bool,
+    /// Maximum number of candidates to return. Defaults to 50.
+    #[serde(default = "default_dead_code_limit")]
+    limit: usize,
+}
+
+impl Default for DeadCodeParams {
+    fn default() -> Self {
+        DeadCodeParams {
+            min_confidence: None,
+            safe_only: false,
+            limit: default_dead_code_limit(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
@@ -291,6 +329,29 @@ struct DecisionOutput {
 #[derive(Serialize, schemars::JsonSchema)]
 struct WhyOutput {
     decisions: Vec<DecisionOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct DeadCodeCandidateOutput {
+    file: String,
+    symbol: String,
+    line: usize,
+    /// `"low"`, `"medium"`, or `"high"` — see the tool description and
+    /// `repowise_health::find_dead_code` for the exact tiering logic.
+    /// Not a runtime-safety guarantee at any tier.
+    confidence: String,
+    /// Why this candidate isn't `"high"` confidence (empty for `"high"`).
+    risk_factors: Vec<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct DeadCodeOutput {
+    candidates: Vec<DeadCodeCandidateOutput>,
+    /// Total candidates matching the requested `min_confidence`/
+    /// `safe_only` filter, before `limit` truncated the list — lets a
+    /// caller tell "there were only 3" from "there were 300 and you're
+    /// seeing the first 50".
+    total_matching: usize,
 }
 
 fn display_rel(path: &Path, root: &Path) -> String {
@@ -609,6 +670,68 @@ impl RepowiseServer {
             .collect();
 
         Ok(Json(WhyOutput { decisions }))
+    }
+
+    #[tool(
+        name = "get_dead_code",
+        description = "Confidence-tiered dead-code candidates: functions/methods with zero resolved in-repo callers, tiered `low`/`medium`/`high` by how much two cheap risk factors (an ambiguous same-named symbol elsewhere, or an unresolved import that might have targeted this file) undercut that signal — see repowise_health::find_dead_code for the exact logic. `min_confidence` filters to that tier and above; `safe_only` narrows to `high` only, the closest this tool gets to the reference's 'safe to delete' designation. Even `high` confidence is a claim about this port's own static call graph, NOT a runtime-safety guarantee: reflection, dynamic dispatch, and entry points are invisible to it. `limit` caps the returned list (default 50); `total_matching` in the response reports how many matched before truncation."
+    )]
+    fn get_dead_code(
+        &self,
+        Parameters(DeadCodeParams {
+            min_confidence,
+            safe_only,
+            limit,
+        }): Parameters<DeadCodeParams>,
+    ) -> Result<Json<DeadCodeOutput>, ErrorData> {
+        let (index, graph) = self.load()?;
+        let candidates = repowise_health::find_dead_code(&index, &graph);
+
+        let threshold = if safe_only {
+            repowise_health::DeadCodeConfidence::High
+        } else {
+            match min_confidence.as_deref() {
+                None => repowise_health::DeadCodeConfidence::Low,
+                Some(s) if s.eq_ignore_ascii_case("low") => {
+                    repowise_health::DeadCodeConfidence::Low
+                }
+                Some(s) if s.eq_ignore_ascii_case("medium") => {
+                    repowise_health::DeadCodeConfidence::Medium
+                }
+                Some(s) if s.eq_ignore_ascii_case("high") => {
+                    repowise_health::DeadCodeConfidence::High
+                }
+                Some(other) => {
+                    return Err(ErrorData::invalid_params(
+                        format!("min_confidence must be low/medium/high, got {other:?}"),
+                        None,
+                    ));
+                }
+            }
+        };
+
+        let matching: Vec<_> = candidates
+            .into_iter()
+            .filter(|c| c.confidence >= threshold)
+            .collect();
+        let total_matching = matching.len();
+
+        let candidates = matching
+            .into_iter()
+            .take(limit)
+            .map(|c| DeadCodeCandidateOutput {
+                file: display_rel(&c.file, &index.root),
+                symbol: c.symbol,
+                line: c.line,
+                confidence: c.confidence.label().to_string(),
+                risk_factors: c.risk_factors,
+            })
+            .collect();
+
+        Ok(Json(DeadCodeOutput {
+            candidates,
+            total_matching,
+        }))
     }
 }
 
@@ -1160,5 +1283,90 @@ mod tests {
             .unwrap();
 
         assert_eq!(why.decisions.len(), 0);
+    }
+
+    #[test]
+    fn get_dead_code_reports_high_confidence_for_an_uncalled_unambiguous_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("solo.rs"), "fn solo() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root };
+        let Json(dead) = server
+            .get_dead_code(Parameters(DeadCodeParams::default()))
+            .unwrap();
+
+        assert_eq!(dead.total_matching, 1);
+        assert_eq!(dead.candidates.len(), 1);
+        assert_eq!(dead.candidates[0].symbol, "solo");
+        assert_eq!(dead.candidates[0].confidence, "high");
+        assert!(dead.candidates[0].risk_factors.is_empty());
+    }
+
+    #[test]
+    fn get_dead_code_safe_only_excludes_ambiguous_name_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("solo.rs"), "fn solo() {}\n").unwrap();
+        std::fs::write(root.join("a.rs"), "fn dup() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "fn dup() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(all) = server
+            .get_dead_code(Parameters(DeadCodeParams::default()))
+            .unwrap();
+        assert_eq!(all.total_matching, 3);
+
+        let Json(safe) = server
+            .get_dead_code(Parameters(DeadCodeParams {
+                min_confidence: None,
+                safe_only: true,
+                limit: 50,
+            }))
+            .unwrap();
+        assert_eq!(safe.total_matching, 1);
+        assert_eq!(safe.candidates[0].symbol, "solo");
+        assert_eq!(safe.candidates[0].confidence, "high");
+    }
+
+    #[test]
+    fn get_dead_code_limit_truncates_but_total_matching_reports_the_full_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "fn dup() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "fn dup() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root };
+        let Json(dead) = server
+            .get_dead_code(Parameters(DeadCodeParams {
+                min_confidence: None,
+                safe_only: false,
+                limit: 1,
+            }))
+            .unwrap();
+
+        assert_eq!(dead.candidates.len(), 1);
+        assert_eq!(dead.total_matching, 2);
+    }
+
+    #[test]
+    fn get_dead_code_rejects_an_invalid_min_confidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root };
+        let result = server.get_dead_code(Parameters(DeadCodeParams {
+            min_confidence: Some("extreme".to_string()),
+            safe_only: false,
+            limit: 50,
+        }));
+        let Err(err) = result else {
+            panic!("expected an error for an invalid min_confidence");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
 }

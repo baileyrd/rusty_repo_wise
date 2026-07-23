@@ -81,12 +81,13 @@ specifics per layer), not full feature parity:
   commit messages, link each to the files/symbols it mentions, and track
   supersession via an ADR's `Status: Superseded by ADR-XXXX` line.
 - Expose `get_overview`/`search_codebase`/`get_context`/`get_risk`/
-  `get_change_risk`/`get_symbol`/`get_why` as MCP tools over stdio (the
-  official `rmcp` SDK), so an agent can pull complete context (including
-  git-history risk data, a deterministic per-commit risk score, a
-  symbol's raw source, and the architectural decisions behind a file) for
-  a file, a change, a single symbol, or "why was this built this way" in
-  one round-trip instead of piecing it together itself.
+  `get_change_risk`/`get_symbol`/`get_why`/`get_dead_code` as MCP tools
+  over stdio (the official `rmcp` SDK), so an agent can pull complete
+  context (including git-history risk data, a deterministic per-commit
+  risk score, a symbol's raw source, the architectural decisions behind a
+  file, and confidence-tiered dead-code candidates) for a file, a change,
+  a single symbol, "why was this built this way", or "what looks unused"
+  in one round-trip instead of piecing it together itself.
 - Generate a static-site dashboard (one self-contained HTML page, no
   server, no JS build step) covering overview stats, code health,
   hotspots, and mined decisions — regenerate by re-running the command.
@@ -101,7 +102,7 @@ Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
 mining (only 2 of the original's 8 decision sources are implemented —
-see "Architectural decision mining" below). The MCP server covers 7 of
+see "Architectural decision mining" below). The MCP server covers 8 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
 — see "Dashboard" below for what a richer version would need.
@@ -128,8 +129,8 @@ dashboard is one static page with no per-file drill-down or live search
   decision-like commit messages, linked to the files/symbols they mention.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
   the index/graph/health/git-analytics/mined-decisions data, plus a
-  deterministic per-commit change-risk score, as agent-facing tools over
-  stdio.
+  deterministic per-commit change-risk score and confidence-tiered
+  dead-code candidates, as agent-facing tools over stdio.
 - `repowise-dashboard` — a static-site dashboard rendered from the
   overview/health/hotspot/decision data the other layers compute.
 - `repowise-cli` — the `repowise` binary tying it together.
@@ -151,7 +152,7 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 ```
 
@@ -278,7 +279,7 @@ also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Seven tools are implemented:
+a prior `repowise init`/`update`. Eight tools are implemented:
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
@@ -330,6 +331,26 @@ a prior `repowise init`/`update`. Seven tools are implemented:
   mined decision. A thin wrapper with no new mining logic of its own —
   the same "reuse an existing library call" shape as `get_overview`/
   `search_codebase`.
+- **`get_dead_code(min_confidence?, safe_only?, limit?)`** — functions/
+  methods with zero resolved in-repo callers (the same base signal as the
+  `possibly-dead-code` health marker), tiered `low`/`medium`/`high` by two
+  cheap risk factors: an ambiguous same-named symbol elsewhere in the
+  repo (a call meant for this one could have resolved to that one
+  instead), and an unresolved import elsewhere whose last path segment
+  matches this file's stem (something may have meant to import this file
+  but this port's heuristics couldn't confirm it). Zero risk factors ->
+  `high`; one -> `medium`; both -> `low`. `min_confidence` filters to
+  that tier and above; `safe_only` narrows to `high` only — the closest
+  this tool gets to the original's "safe to delete" designation, though
+  it explicitly is **not** a runtime-safety guarantee at any tier:
+  reflection, dynamic dispatch, and entry points are all invisible to
+  this port's static call graph, the same caveat the `possibly-dead-code`
+  marker already carries. `limit` (default 50) caps the returned list;
+  the response's `total_matching` reports how many candidates matched
+  before truncation. This is a documented approximation of the
+  original's dead-code model (4 finding kinds, 3 confidence tiers, and a
+  runtime-load risk factor this port has no way to assess) — see
+  `repowise_health::find_dead_code` for the exact tiering logic.
 
 Every call re-loads `.repowise/index.json` and rebuilds the dependency
 graph fresh — no caching across calls, consistent with how `hotspots`/

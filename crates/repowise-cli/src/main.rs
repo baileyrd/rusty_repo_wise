@@ -439,6 +439,9 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
                     display_path(file, &index.root)
                 )
             }
+            repowise_adr::DecisionSource::Changelog { file, section } => {
+                format!("{section} (changelog: {})", display_path(file, &index.root))
+            }
         };
         let status = d.status.as_deref().unwrap_or("-");
         println!("  {:<10} {:<10} {}", d.id, status, d.title);

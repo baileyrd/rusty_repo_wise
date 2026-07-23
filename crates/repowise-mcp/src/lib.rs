@@ -661,6 +661,9 @@ impl RepowiseServer {
                     repowise_adr::DecisionSource::InlineMarker { file, line, marker } => {
                         format!("marker:{marker}:{}:{line}", display_rel(file, &index.root))
                     }
+                    repowise_adr::DecisionSource::Changelog { file, section } => {
+                        format!("changelog:{section}:{}", display_rel(file, &index.root))
+                    }
                 };
                 DecisionOutput {
                     id: d.id,

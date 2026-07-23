@@ -105,11 +105,18 @@ directly above this specific symbol", while `inline_markers::comment_lines`
 answers "every comment line in the file, wherever it sits" — forcing the
 inline-marker source through the former would mean calling it once per
 symbol and still needing a separate whole-file scan for markers that
-aren't adjacent to a declaration at all. ADR-file and commit-message
-decisions get linked to files/symbols in the same `RepoIndex` the other
-commands use; PR, code-comment, and inline-marker decisions skip that
-step, already linked to the files the GitHub API reports that PR
-touched, or the file the comment/marker sits in, respectively.
+aren't adjacent to a declaration at all. `repowise-adr` also reads
+whichever `CHANGELOG.md`/`HISTORY.md`/`NEWS.md`/`CHANGES.md` it finds
+first at the repo root (`changelog.rs`) for keep-a-changelog-style
+`### Changed`/`### Removed`/`### Deprecated`/`### Security` sections.
+ADR-file, commit-message, and changelog decisions get linked to
+files/symbols in the same `RepoIndex` the other commands use (a
+changelog entry isn't "about" the changelog file itself the way a PR's
+diff or a comment's enclosing file is, so it gets this text-matched
+treatment rather than an authoritative self-link); PR, code-comment, and
+inline-marker decisions skip that step, already linked to the files the
+GitHub API reports that PR touched, or the file the comment/marker sits
+in, respectively.
 `serve` is a thin wrapper over the same `overview`/`search`/`deps`/`health`
 data paths, re-exposed as MCP tools: `repowise-mcp` loads `RepoIndex`,
 builds a `RepoGraph`, and (for `get_context`/`get_risk`) runs

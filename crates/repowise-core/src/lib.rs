@@ -24,6 +24,7 @@ pub enum Language {
     Cpp,
     CSharp,
     Scala,
+    Ruby,
     Other,
 }
 
@@ -40,6 +41,7 @@ impl Language {
             "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Language::Cpp,
             "cs" => Language::CSharp,
             "scala" | "sc" => Language::Scala,
+            "rb" => Language::Ruby,
             _ => Language::Other,
         }
     }
@@ -56,6 +58,7 @@ impl Language {
             Language::Cpp => "C++",
             Language::CSharp => "C#",
             Language::Scala => "Scala",
+            Language::Ruby => "Ruby",
             Language::Other => "Other",
         }
     }

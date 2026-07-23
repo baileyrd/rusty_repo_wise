@@ -6,6 +6,53 @@ repo routing work through PRs).
 
 ---
 
+## PR #119 — Add LCOM4 low_cohesion health marker (Rust/Python/TS+JS)
+**2026-07-23** · [#119](https://github.com/baileyrd/rusty_repo_wise/pull/119) · closes [#51](https://github.com/baileyrd/rusty_repo_wise/issues/51)
+
+- **Added:** `low_cohesion` (LCOM4), a structural-complexity health
+  marker documented as a known deferred item since PR #12 ("needs
+  field-level access tracking per method"). `repowise-parser` now tracks
+  per-method `self`/`this` field reads/writes — `field_expression`
+  (Rust), `attribute` (Python), `member_expression` (TypeScript/
+  JavaScript) — into a new `FieldAccessRef` record on `FileRecord`. A
+  new `is_call_target` check per language excludes `self.method()`/
+  `this.method()` call targets from the signal, so method names don't
+  pollute the field-cohesion data.
+- **Scope decision:** field-access extraction covers **Rust, Python, and
+  TypeScript/JavaScript only** — the three languages issue #51's own
+  acceptance criteria named explicitly, out of the 16 languages this
+  port parses. Sized this up before implementing: `Symbol.parent`
+  already tracks class/impl ownership, and the extraction pattern is a
+  direct copy-adapt of the existing call-target extraction (same AST
+  node kinds, same walker structure), which made this a single-PR-scale
+  effort rather than a multi-day one — so all three named languages
+  landed together here rather than splitting by language. The other 13
+  languages have an empty `field_accesses` list per file and are
+  silently skipped for this one marker (not enough data, not
+  "cohesive"), not flagged either way.
+- **New `repowise-health::lcom4` module:** per class, builds a graph
+  where methods are nodes and an edge connects two methods sharing at
+  least one field, then counts connected components via a small
+  hand-rolled union-find (not a new graph-library dependency — per-class
+  method counts are small enough that this is simpler than pulling in
+  one). A class whose field-touching methods split into 2+ disjoint
+  components is flagged as `FindingKind::LowCohesion` (penalty −1.0).
+- **Methods with zero recorded field access are excluded from the graph
+  entirely**, not counted as their own singleton component — otherwise
+  almost any real-world class would trip this marker the moment it
+  contains one delegator/pure-helper method that never touches a field
+  directly. A class needs at least 2 field-touching methods before "do
+  they share fields" is even a meaningful question.
+- 8 new tests (3 parser field-access extraction — one per language,
+  each confirming reads/writes are recorded and same-receiver method
+  calls are not — and 5 `lcom4` tests: a genuinely low-cohesion class,
+  a cohesive class, a class with an excluded zero-access delegator, a
+  class below the tracked-method threshold, and a language with no
+  field-access extraction skipped rather than flagged), 189 tests
+  passing workspace-wide (up from 181). Next up per the loop is issue
+  #52 (`dry_violation` — Rabin-Karp near-duplicate detection), the
+  second of six filed health-marker issues.
+
 ## PR #117 — Expand commit-message decision-keyword list
 **2026-07-23** · [#117](https://github.com/baileyrd/rusty_repo_wise/pull/117) · closes [#50](https://github.com/baileyrd/rusty_repo_wise/issues/50)
 

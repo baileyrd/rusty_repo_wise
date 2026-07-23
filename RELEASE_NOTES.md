@@ -6,6 +6,55 @@ repo routing work through PRs).
 
 ---
 
+## PR #129 — Add primitive_obsession param-type health marker
+**2026-07-23** · [#129](https://github.com/baileyrd/rusty_repo_wise/pull/129) · closes [#56](https://github.com/baileyrd/rusty_repo_wise/issues/56)
+
+- **Added:** `primitive_obsession`, flagging a function/method whose
+  declared parameters lean on bare primitives (`i32`/`bool`/`String` and
+  language equivalents) instead of small domain-specific types — the
+  classic "primitive obsession" smell. Unlike every other health marker
+  so far, this one needs actual declared parameter *types*, a signal
+  that only exists for statically-typed languages in this port's model.
+- **`Symbol` gains `primitive_param_count: usize`**, populated at parse
+  time.
+- **New `repowise-parser::metrics::primitive_param_count`**, driven by
+  two per-language closures: `param_type` extracts a parameter's
+  declared type as source text, and `is_primitive_type` classifies it.
+  - **Rust:** strips a leading `&`/`&mut`/lifetime reference prefix
+    before classifying (so `&str`/`&'a String` count the same as their
+    owned form), and treats `String`/`str` as primitives alongside the
+    scalar keyword types (`i32`, `bool`, `usize`, etc.) — the smell
+    targets overused strings/ints/bools, not Rust's `Copy` boundary.
+  - **TypeScript:** reads the `type_annotation` node on
+    `required_parameter`/`optional_parameter`; only
+    `string`/`number`/`boolean` count (not `any`/`unknown`/`void`/etc.).
+- **Scope:** implemented for **Rust and TypeScript only** for this first
+  pass — the issue's own acceptance criteria required at least Rust,
+  with TypeScript conditional on existing typed-parameter infra (which
+  already existed via `repowise-parser::javascript`'s TypeScript
+  grammar support). The other 14 parsed languages, including
+  Python/JavaScript (which lack static type annotations in the common
+  case and would need type inference this port doesn't have), get an
+  empty parameter-type extraction and never trigger this marker.
+  Extending to the remaining statically-typed languages (Java, Kotlin,
+  Go, C, C++, C#, Scala, Swift, Dart) is a natural follow-up, not done
+  here — same "scope to what the issue named, document the rest as a
+  follow-up" pattern already used for LCOM4 (#51) and
+  `complex_conditional` (#55).
+- **New `FindingKind::PrimitiveObsession`** (penalty −0.3, same weight
+  as `TooManyParameters`/`ComplexConditional`), flagged at
+  `PRIMITIVE_OBSESSION_MIN_COUNT = 3` primitive-typed parameters.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-docs`/`repowise-git`/`repowise-health` that
+  build `Symbol` directly.
+- Workspace test count: 203 → 206.
+- This closes out the last of the six health-marker parity-gap issues
+  filed against `repowise-dev/repowise`'s documented health scorer
+  (#51-#56).
+
+---
+
 ## PR #127 — Add complex_conditional boolean-operator-count health marker
 **2026-07-23** · [#127](https://github.com/baileyrd/rusty_repo_wise/pull/127) · closes [#55](https://github.com/baileyrd/rusty_repo_wise/issues/55)
 

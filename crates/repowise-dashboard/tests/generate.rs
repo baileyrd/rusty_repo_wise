@@ -46,3 +46,36 @@ fn writes_a_dashboard_covering_overview_and_health() {
     assert!(html.contains("No git history found"));
     assert!(html.contains("No decisions found"));
 }
+
+#[test]
+fn links_files_to_their_wiki_page_only_once_docs_has_been_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // `foo.rs` needs a dependent to show up in the overview's
+    // "Most depended-on files" table at all -- `mod foo;` gives it one,
+    // same fixture shape used in repowise-graph's own resolution tests.
+    std::fs::write(
+        root.join("lib.rs"),
+        "mod foo;\n\nfn top() -> i32 {\n    foo::bar()\n}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("foo.rs"), "pub fn bar() -> i32 { 42 }\n").unwrap();
+    build_and_save_index(&root);
+
+    // No wiki page yet -- the file's mention must render as plain text,
+    // not a broken link.
+    let path = repowise_dashboard::generate(&root).unwrap();
+    let html = std::fs::read_to_string(&path).unwrap();
+    assert!(html.contains(">foo.rs<"));
+    assert!(!html.contains("<a href"));
+
+    // `repowise docs` (simulated here directly) writes a wiki page for
+    // this file -- regenerating the dashboard should now link to it.
+    let wiki_dir = root.join(".repowise").join("wiki");
+    std::fs::create_dir_all(&wiki_dir).unwrap();
+    std::fs::write(wiki_dir.join("foo.rs.md"), "# foo.rs\n").unwrap();
+
+    let path = repowise_dashboard::generate(&root).unwrap();
+    let html = std::fs::read_to_string(&path).unwrap();
+    assert!(html.contains("<a href=\"../wiki/foo.rs.md\">foo.rs</a>"));
+}

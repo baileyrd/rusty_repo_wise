@@ -45,7 +45,10 @@ impl RepoGraph {
         let mut name_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut rust_modules = HashMap::new();
         let mut python_modules = HashMap::new();
-        let mut java_modules = HashMap::new();
+        // Shared between Java and Kotlin: both use the same JVM
+        // package-path convention, and a mixed-language project can
+        // reasonably import one from the other.
+        let mut jvm_modules = HashMap::new();
 
         for file in &index.files {
             let fnode = graph.add_node(Node::File(file.path.clone()));
@@ -70,15 +73,16 @@ impl RepoGraph {
                         python_modules.insert(mp, file.path.clone());
                     }
                 }
-                Language::Java => {
-                    if let Some(mp) = modpath::java_module_path(&file.path, &index.root) {
-                        java_modules.insert(mp, file.path.clone());
+                Language::Java | Language::Kotlin => {
+                    if let Some(mp) = modpath::jvm_module_path(&file.path, &index.root) {
+                        jvm_modules.insert(mp, file.path.clone());
                     }
                 }
                 // TypeScript/JavaScript relative imports are resolved
                 // directly at parse time (see `resolve_relative_import` in
                 // `repowise-parser`), so there's no module-path index to
-                // build here, unlike Rust/Python/Java's dotted/`::` paths.
+                // build here, unlike Rust/Python/Java/Kotlin's dotted/`::`
+                // paths.
                 Language::TypeScript | Language::JavaScript | Language::Other => {}
             }
         }
@@ -92,7 +96,7 @@ impl RepoGraph {
             let (sep, map): (&str, &HashMap<String, PathBuf>) = match file.language {
                 Language::Rust => ("::", &rust_modules),
                 Language::Python => (".", &python_modules),
-                Language::Java => (".", &java_modules),
+                Language::Java | Language::Kotlin => (".", &jvm_modules),
                 Language::TypeScript | Language::JavaScript => ("", &no_modules),
                 Language::Other => continue,
             };

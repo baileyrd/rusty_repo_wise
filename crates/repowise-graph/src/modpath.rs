@@ -89,16 +89,25 @@ pub fn python_module_path(file: &Path, root: &Path) -> Option<String> {
     }
 }
 
-/// Conventional Maven/Gradle source-root directory names: everything
-/// under one of these is package-path-relative to it, not to the repo root.
-const JAVA_SOURCE_ROOTS: &[[&str; 3]] = &[["src", "main", "java"], ["src", "test", "java"]];
+/// Conventional Maven/Gradle source-root directory names for JVM
+/// languages: everything under one of these is package-path-relative to
+/// it, not to the repo root. Kotlin/Gradle projects conventionally use
+/// `.../kotlin` instead of `.../java`, but the package-path convention
+/// itself (dotted path mirrors folder structure) is identical.
+const JVM_SOURCE_ROOTS: &[[&str; 3]] = &[
+    ["src", "main", "java"],
+    ["src", "test", "java"],
+    ["src", "main", "kotlin"],
+    ["src", "test", "kotlin"],
+];
 
-/// Find the nearest `src/main/java` or `src/test/java` ancestor of `file`
-/// and return the directory it points to (i.e. the package-path base).
-fn find_java_source_root(file: &Path) -> Option<PathBuf> {
+/// Find the nearest JVM source-root ancestor of `file` (see
+/// `JVM_SOURCE_ROOTS`) and return the directory it points to (i.e. the
+/// package-path base).
+fn find_jvm_source_root(file: &Path) -> Option<PathBuf> {
     let components: Vec<_> = file.components().collect();
     for i in 0..components.len() {
-        for pattern in JAVA_SOURCE_ROOTS {
+        for pattern in JVM_SOURCE_ROOTS {
             let matches = pattern.iter().enumerate().all(|(j, seg)| {
                 components
                     .get(i + j)
@@ -117,14 +126,15 @@ fn find_java_source_root(file: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Module path for a Java source file, e.g. `com.example.app.Foo`. Uses
-/// the conventional Maven/Gradle `src/main/java`/`src/test/java` source
-/// root as the package-path base when present; otherwise falls back to
-/// treating the file's path relative to the indexed root as the package
-/// path, same convention as `python_module_path`. Not classpath-aware —
-/// a project with a nonstandard layout won't resolve correctly.
-pub fn java_module_path(file: &Path, root: &Path) -> Option<String> {
-    let base = find_java_source_root(file).unwrap_or_else(|| root.to_path_buf());
+/// Module (package) path for a JVM-language source file (Java or
+/// Kotlin), e.g. `com.example.app.Foo`. Uses the conventional
+/// Maven/Gradle source root as the package-path base when present;
+/// otherwise falls back to treating the file's path relative to the
+/// indexed root as the package path, same convention as
+/// `python_module_path`. Not classpath-aware — a project with a
+/// nonstandard layout won't resolve correctly.
+pub fn jvm_module_path(file: &Path, root: &Path) -> Option<String> {
+    let base = find_jvm_source_root(file).unwrap_or_else(|| root.to_path_buf());
     let rel = file.strip_prefix(&base).unwrap_or(file);
     let segments: Vec<String> = rel
         .with_extension("")

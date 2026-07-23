@@ -120,6 +120,21 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Run a live dashboard server (JSON API + static frontend), the
+    /// long-running replacement for the static `repowise dashboard`
+    /// page. Phase 0: only `GET /api/overview` exists so far -- see
+    /// `repowise-server`'s module doc comment.
+    ServeDashboard {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        addr: std::net::SocketAddr,
+        /// Directory of the built `repowise-web` frontend (e.g.
+        /// `crates/repowise-web/dist` after `trunk build`). Omit to
+        /// run the JSON API alone, with no static frontend served.
+        #[arg(long)]
+        static_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -143,6 +158,11 @@ fn main() -> anyhow::Result<()> {
         Command::Serve { path } => cmd_serve(&path),
         Command::Dashboard { path } => cmd_dashboard(&path),
         Command::Generate { path } => cmd_generate(&path),
+        Command::ServeDashboard {
+            path,
+            addr,
+            static_dir,
+        } => cmd_serve_dashboard(&path, addr, static_dir),
     }
 }
 
@@ -491,6 +511,24 @@ fn cmd_serve(path: &Path) -> anyhow::Result<()> {
     // async runtime, so build one here rather than making `main` async.
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(repowise_mcp::run(root))
+}
+
+fn cmd_serve_dashboard(
+    path: &Path,
+    addr: std::net::SocketAddr,
+    static_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    if static_dir.is_none() {
+        println!(
+            "No --static-dir given: serving the JSON API only (no frontend). \
+             Build one with `cd crates/repowise-web && trunk build` and pass \
+             --static-dir crates/repowise-web/dist."
+        );
+    }
+    println!("Dashboard server listening on http://{addr}");
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(repowise_server::serve(root, addr, static_dir))
 }
 
 fn cmd_dashboard(path: &Path) -> anyhow::Result<()> {

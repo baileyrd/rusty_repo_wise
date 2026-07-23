@@ -1,0 +1,20 @@
+[package]
+name = "repowise-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+repowise-core = { path = "../repowise-core" }
+repowise-graph = { path = "../repowise-graph" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"

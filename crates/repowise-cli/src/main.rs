@@ -107,6 +107,14 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Add an LLM-written summary to each existing wiki page under
+    /// `.repowise/wiki/` (requires a prior `repowise docs`). Opt-in:
+    /// needs `REPOWISE_LLM_BASE_URL` set to an OpenAI-compatible
+    /// endpoint (e.g. a self-hosted rusty_provider instance).
+    Generate {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -125,6 +133,7 @@ fn main() -> anyhow::Result<()> {
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
         Command::Serve { path } => cmd_serve(&path),
         Command::Dashboard { path } => cmd_dashboard(&path),
+        Command::Generate { path } => cmd_generate(&path),
     }
 }
 
@@ -471,6 +480,44 @@ fn cmd_dashboard(path: &Path) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let written = repowise_dashboard::generate(&root)?;
     println!("Dashboard written to {}", written.display());
+    Ok(())
+}
+
+fn cmd_generate(path: &Path) -> anyhow::Result<()> {
+    let Some(config) = repowise_llm::LlmConfig::from_env() else {
+        anyhow::bail!(
+            "LLM-assisted generation is opt-in and REPOWISE_LLM_BASE_URL isn't set. \
+             Point it at an OpenAI-compatible endpoint (e.g. a self-hosted rusty_provider \
+             instance) to enable it -- see README.md."
+        );
+    };
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+
+    let results = repowise_llm::generate_wiki_summaries(&index, &config);
+    let written = results
+        .iter()
+        .filter(|r| r.status == repowise_llm::SummaryStatus::Written)
+        .count();
+    let missing = results
+        .iter()
+        .filter(|r| r.status == repowise_llm::SummaryStatus::NoWikiPage)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.status == repowise_llm::SummaryStatus::Failed)
+        .count();
+
+    println!(
+        "Added LLM summaries to {written} wiki page(s) under {}/.repowise/wiki",
+        index.root.display()
+    );
+    if missing > 0 {
+        println!("  {missing} file(s) skipped: no wiki page yet -- run `repowise docs` first");
+    }
+    if failed > 0 {
+        println!("  {failed} file(s) failed (LLM call or write error)");
+    }
     Ok(())
 }
 

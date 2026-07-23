@@ -12,8 +12,8 @@ license with the original (AGPL-3.0) repowise.
 
 repowise is a large product with five "intelligence layers," an MCP
 server, and a web dashboard. So far this port builds the **core CLI, the
-dependency-graph layer, the code-health-scoring layer, and the
-git-analytics layer**, end to end:
+dependency-graph layer, the code-health-scoring layer, the git-analytics
+layer, and the auto-generated-documentation layer**, end to end:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust and Python files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
@@ -32,13 +32,18 @@ git-analytics layer**, end to end:
   bug-fix commit frequency, co-change coupling, and per-author line
   ownership — by shelling out to `git log`/`git blame`, joined against the
   index for complexity data.
+- Generate a deterministic, template-based markdown "wiki" page per file
+  under `.repowise/wiki/` — symbol list, resolved dependencies/dependents,
+  and health findings — with per-file freshness tracking (no LLM prose).
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
-Not yet built: doc generation, ADR mining, the MCP server, and the web
-dashboard. Only Rust and Python are parsed; repowise's other 14 languages
-aren't implemented. The health scorer covers 6 of repowise's ~25 markers
-— see "Health scoring" below for which ones and why the rest (LCOM4
-cohesion, Rabin-Karp substring clone detection) are deferred.
+Not yet built: ADR mining, the MCP server, and the web dashboard. Only
+Rust and Python are parsed; repowise's other 14 languages aren't
+implemented. The health scorer covers 6 of repowise's ~25 markers — see
+"Health scoring" below for which ones and why the rest (LCOM4 cohesion,
+Rabin-Karp substring clone detection) are deferred. LLM-written prose on
+top of the wiki (`repowise generate` in the original) is also deferred —
+this port's `docs` layer is deliberately deterministic-only.
 
 ## Crates
 
@@ -53,6 +58,9 @@ cohesion, Rabin-Karp substring clone detection) are deferred.
 - `repowise-git` — git-history analytics (churn, hotspots, bug-fix
   frequency, co-change coupling, ownership), computed fresh from `git
   log`/`git blame` each time it's queried rather than cached in the index.
+- `repowise-docs` — deterministic per-file markdown documentation pages
+  rendered from the index/graph/health data, with content-hash-based
+  freshness tracking.
 - `repowise-cli` — the `repowise` binary tying it together.
 
 ## Usage
@@ -69,6 +77,7 @@ repowise health [PATH]             # code-health KPIs and lowest-scoring files
 repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
+repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 ```
 
 ## Health scoring
@@ -129,6 +138,29 @@ Not implemented from the original's git-analytics scope: recency-weighted
 or decayed hotspot scoring, and a bug-fix heuristic based on linked-issue
 references rather than just message keywords.
 
+## Documentation generation
+
+`repowise docs` renders one markdown page per indexed file under
+`.repowise/wiki/<relative-path>.md` (e.g. `crates/foo/src/lib.rs` →
+`.repowise/wiki/crates/foo/src/lib.rs.md`), each containing:
+
+- Its symbol list (function/method/class/struct, with parent and line number)
+- Resolved dependencies and dependents (from `repowise-graph`)
+- Its health findings (from `repowise-health`), or "No findings."
+
+No LLM is involved — every page is rendered from data the other layers
+already computed. Freshness is tracked via a hash of the file's own raw
+source, embedded as the page's first line and compared against the
+previous run's page (if any) to report each page as new/changed/
+unchanged. This is a **per-file, own-source-only** signal: a page can be
+reported "unchanged" while its actual rendered content differs, if what
+changed was cross-file data (a new caller elsewhere, a health finding
+driven by another file) rather than this file's own source — pages are
+always rewritten with current data regardless of the reported status, so
+content is never stale, only the *status label* can undersell how much
+changed. Not implemented from the original: LLM-written prose on top of
+these pages (`repowise generate`), and the dashboard's doc browser.
+
 ## Testing
 
 ```sh
@@ -141,7 +173,9 @@ integration tests that write real fixture files to a temp directory to
 exercise Rust's `mod`/crate-root resolution and Python's package-relative
 import resolution end to end, health-scoring tests that build
 `RepoIndex` fixtures directly to exercise each marker (and the resulting
-score) in isolation, and git-analytics tests that build real disposable
-git repos (via the `git` CLI) to exercise churn/bug-fix/co-change/
-ownership/hotspot computation against actual `git log`/`git blame`
-output rather than a mock of it.
+score) in isolation, git-analytics tests that build real disposable git
+repos (via the `git` CLI) to exercise churn/bug-fix/co-change/ownership/
+hotspot computation against actual `git log`/`git blame` output rather
+than a mock of it, and docs-generation tests covering page rendering
+content and the New/Changed/Unchanged freshness transitions on a real
+temp directory.

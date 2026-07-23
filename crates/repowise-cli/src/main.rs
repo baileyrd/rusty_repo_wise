@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 /// A Rust-native, self-hosted codebase intelligence CLI, inspired by
 /// repowise (https://github.com/repowise-dev/repowise). Implemented so
 /// far: parsing, symbol/import/call extraction, dependency-graph queries,
-/// deterministic code-health scoring, and git-history analytics (churn,
-/// hotspots, ownership, co-change coupling). Other layers from the
-/// original project (doc generation, ADR mining, MCP server, dashboard)
-/// are not yet implemented.
+/// deterministic code-health scoring, git-history analytics (churn,
+/// hotspots, ownership, co-change coupling), and auto-generated per-file
+/// documentation. Other layers from the original project (ADR mining,
+/// MCP server, dashboard) are not yet implemented.
 #[derive(Parser)]
 #[command(name = "repowise", version, about)]
 struct Cli {
@@ -80,6 +80,12 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         top: usize,
     },
+    /// Generate deterministic per-file documentation pages under
+    /// `.repowise/wiki/`.
+    Docs {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -94,6 +100,7 @@ fn main() -> anyhow::Result<()> {
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
+        Command::Docs { path } => cmd_docs(&path),
     }
 }
 
@@ -340,6 +347,23 @@ fn cmd_coupled(file: &Path, path: &Path, top: usize) -> anyhow::Result<()> {
     for (f, count) in &coupled {
         println!("    {:<4} {}", count, display_path(f, &root));
     }
+    Ok(())
+}
+
+fn cmd_docs(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let graph = RepoGraph::build(&index);
+    let health = repowise_health::analyze(&index, &graph);
+    let summary = repowise_docs::generate(&index, &graph, &health)?;
+
+    let (new, changed, unchanged) = summary.counts();
+    println!(
+        "Generated {} wiki page(s) under {}/.repowise/wiki",
+        summary.pages.len(),
+        index.root.display()
+    );
+    println!("  {new} new, {changed} changed, {unchanged} unchanged (by source content hash)");
     Ok(())
 }
 

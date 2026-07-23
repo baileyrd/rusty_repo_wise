@@ -6,6 +6,42 @@ repo routing work through PRs).
 
 ---
 
+## PR #101 — Add get_change_risk MCP tool
+**2026-07-23** · [#101](https://github.com/baileyrd/rusty_repo_wise/pull/101) · closes [#42](https://github.com/baileyrd/rusty_repo_wise/issues/42)
+
+- **Added:** a fifth MCP tool, `get_change_risk(revspec?)`, computing a
+  deterministic 0-10 diff-shape risk score for a single commit or a
+  `base..head` range (defaulting to `HEAD`). A new `repowise-git::change_risk`
+  function shells out to `git diff`/`git show --numstat --no-renames` and
+  `git rev-list --count --author` to extract five metrics: lines added/
+  deleted, files touched, subsystems touched (distinct top-level path
+  components among the touched files), change concentration (Shannon
+  entropy of each touched file's share of total lines changed, normalized
+  by the maximum entropy for that file count so it's comparable across
+  diffs of different sizes), and the head commit author's prior-commit
+  count as an experience proxy. These combine via a fixed, documented
+  weighting (0.25 lines, 0.20 each for files/subsystems/author-experience,
+  0.15 concentration), each component saturating at a round, legible
+  threshold rather than growing unbounded.
+- **Deliberately not the reference's tool.** Per this issue's own scope
+  note, the original repowise feeds the same kind of diff-shape metrics
+  into a pre-trained L2-logistic-regression model. This port has no
+  labeled defect corpus or model-training pipeline to reproduce that (see
+  the category-A "ML-calibrated scoring" issue), so `get_change_risk`'s
+  score is a simple, transparent heuristic instead — its tool description
+  says so explicitly, so a caller can't mistake the number for a
+  calibrated probability. The `--author` value passed to `git rev-list`
+  is regex-escaped before use, since it's built from a git-reported email
+  address that could otherwise contain regex metacharacters.
+- Unlike `get_risk`, this tool never touches `RepoIndex`/`RepoGraph` at
+  all — it's pure `git` plumbing, so it errors (rather than degrading to
+  zero) when the indexed root isn't a git repository, since there's no
+  diff to compute at all.
+- 8 new tests (5 in `repowise-git`'s own `change_risk` module covering
+  the metric extraction and scoring formula directly, 3 in
+  `repowise-mcp` wiring/degradation), 137 tests passing workspace-wide
+  (up from 129). Next up per the loop is issue #43, `get_symbol`.
+
 ## PR #99 — Add get_risk MCP tool
 **2026-07-23** · [#99](https://github.com/baileyrd/rusty_repo_wise/pull/99) · closes [#41](https://github.com/baileyrd/rusty_repo_wise/issues/41)
 

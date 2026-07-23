@@ -80,9 +80,10 @@ specifics per layer), not full feature parity:
 - Mine architectural decisions from `docs/adr/*.md` files and decision-like
   commit messages, link each to the files/symbols it mentions, and track
   supersession via an ADR's `Status: Superseded by ADR-XXXX` line.
-- Expose `get_overview`/`search_codebase`/`get_context`/`get_risk` as MCP
-  tools over stdio (the official `rmcp` SDK), so an agent can pull
-  complete context (including git-history risk data) for a file in one
+- Expose `get_overview`/`search_codebase`/`get_context`/`get_risk`/
+  `get_change_risk` as MCP tools over stdio (the official `rmcp` SDK), so
+  an agent can pull complete context (including git-history risk data and
+  a deterministic per-commit risk score) for a file or a change in one
   round-trip instead of piecing it together itself.
 - Generate a static-site dashboard (one self-contained HTML page, no
   server, no JS build step) covering overview stats, code health,
@@ -98,7 +99,7 @@ Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
 mining (only 2 of the original's 8 decision sources are implemented —
-see "Architectural decision mining" below). The MCP server covers 4 of
+see "Architectural decision mining" below). The MCP server covers 5 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
 — see "Dashboard" below for what a richer version would need.
@@ -124,8 +125,8 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-adr` — architectural-decision mining from ADR files and
   decision-like commit messages, linked to the files/symbols they mention.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
-  the index/graph/health/git-analytics data as agent-facing tools over
-  stdio.
+  the index/graph/health/git-analytics data, plus a deterministic
+  per-commit change-risk score, as agent-facing tools over stdio.
 - `repowise-dashboard` — a static-site dashboard rendered from the
   overview/health/hotspot/decision data the other layers compute.
 - `repowise-cli` — the `repowise` binary tying it together.
@@ -147,7 +148,7 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 ```
 
@@ -274,7 +275,7 @@ also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Four tools are implemented:
+a prior `repowise init`/`update`. Five tools are implemented:
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
@@ -291,14 +292,30 @@ a prior `repowise init`/`update`. Four tools are implemented:
   by (recency-weighted) hotspot score. Degrades to zero/empty git data
   (rather than erroring) when the indexed root isn't a git repository —
   same tradeoff `repowise-dashboard`'s hotspots section already makes.
+- **`get_change_risk(revspec?)`** — a deterministic 0-10 risk score for a
+  single commit or a `base..head` range (defaulting to `HEAD`), computed
+  from diff-shape metrics via `git diff`/`git show`/`git rev-list`: lines
+  added/deleted, files touched, subsystems (top-level directories)
+  touched, change concentration (a normalized Shannon entropy of how
+  evenly the diff is spread across files), and the head commit author's
+  prior-commit count as an experience proxy. These combine via a fixed,
+  documented weighting (0.25 lines, 0.20 each for files/subsystems/
+  author, 0.15 concentration) into the final score. **This is not the
+  original's tool** — the original feeds the same kind of diff-shape
+  metrics into a pre-trained L2-logistic-regression model; this port has
+  no labeled defect corpus or training pipeline to reproduce that (see
+  issue #42 and the category-A "ML-calibrated scoring" issue), so this is
+  a deliberately simple heuristic approximation, not a calibrated
+  probability. Errors (rather than degrading to zero) when the indexed
+  root isn't a git repository, since there's no diff to compute at all.
 
 Every call re-loads `.repowise/index.json` and rebuilds the dependency
 graph fresh — no caching across calls, consistent with how `hotspots`/
 `ownership`/`coupled`/`decisions` already work in this port.
+(`get_change_risk` doesn't touch the index at all — it's pure `git`
+plumbing, same as `repowise-git`'s other functions.)
 
-Not implemented from the original's ~10 tools: `get_change_risk` (the
-original feeds diff-shape metrics into a pre-trained ML model this port
-has no equivalent for — see issue #42) and the rest of the original's
+Not implemented from the original's ~10 tools: the rest of the original's
 tool surface beyond what this port's other layers currently support.
 
 ## Dashboard

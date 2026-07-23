@@ -7,8 +7,10 @@
 //! dependency of any repo this tool indexes (it's how the repo got here).
 
 mod blame;
+mod change_risk;
 mod log;
 
+pub use change_risk::{change_risk, ChangeRisk};
 pub use log::CommitInfo;
 
 use repowise_core::RepoIndex;

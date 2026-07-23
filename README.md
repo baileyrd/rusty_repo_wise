@@ -17,7 +17,7 @@ specifics per layer), not full feature parity:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
-  Swift, and PHP files.
+  Swift, PHP, and Dart files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
   definitions, imports, call expressions, and per-function metrics
   (cyclomatic complexity, parameter count, a duplicate-code body hash).
@@ -52,7 +52,11 @@ specifics per layer), not full feature parity:
   string path (resolved directly against the filesystem, same as
   C/C++/Ruby) and `use Namespace\Class;` (resolved via the same
   folder-mirrors-namespace heuristic as C#'s, not aware of Composer's
-  real `composer.json` autoload mapping).
+  real `composer.json` autoload mapping). Dart's relative
+  `import 'local.dart'` is resolved directly against the filesystem the
+  same way; `import 'package:x/y.dart'` (a pub package) has no package
+  registry here to resolve against and is left unresolved, same
+  tradeoff as bare npm specifiers.
 - Score every file's health deterministically (0–10, no LLM/ML) from six
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, and possibly-dead code
@@ -76,9 +80,9 @@ specifics per layer), not full feature parity:
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
-Scala, Ruby, Swift, and PHP are parsed; repowise's other languages aren't
-implemented — see issue #11 for the tracking/discussion issue on extending
-language support. The health scorer covers 6 of repowise's ~25 markers — see
+Scala, Ruby, Swift, PHP, and Dart are parsed; repowise's other languages
+aren't implemented — see issue #11 for the tracking/discussion issue on
+extending language support. The health scorer covers 6 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (LCOM4 cohesion,
 Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
@@ -95,7 +99,7 @@ dashboard is one static page with no per-file drill-down or live search
   etc.), `.gitignore`-aware file discovery, and JSON index persistence.
 - `repowise-parser` — tree-sitter-based extraction for Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
-  Swift, and PHP, including per-function complexity/param-count/
+  Swift, PHP, and Dart, including per-function complexity/param-count/
   body-hash metrics.
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.

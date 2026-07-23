@@ -111,12 +111,19 @@ impl RepoGraph {
                 // `import` has no per-file mapping at all (no build graph
                 // to resolve against), so its imports are always left
                 // unresolved by design, same "no index needed" bucket.
+                // Dart's relative `import 'local.dart'` is likewise
+                // resolved directly at parse time (see
+                // `resolve_relative_import` in `repowise-parser`);
+                // `package:x/y.dart` imports have no pub-package registry
+                // here to resolve against and are always left unresolved,
+                // the same "no index needed" bucket as Swift's imports.
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C
                 | Language::Cpp
                 | Language::Ruby
                 | Language::Swift
+                | Language::Dart
                 | Language::Other => {}
             }
         }
@@ -139,7 +146,8 @@ impl RepoGraph {
                 | Language::C
                 | Language::Cpp
                 | Language::Ruby
-                | Language::Swift => ("", &no_modules),
+                | Language::Swift
+                | Language::Dart => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

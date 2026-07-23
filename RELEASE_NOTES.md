@@ -6,6 +6,34 @@ repo routing work through PRs).
 
 ---
 
+## PR #131 — Add dashboard per-file drill-down links to wiki pages
+**2026-07-23** · [#131](https://github.com/baileyrd/rusty_repo_wise/pull/131) · closes [#57](https://github.com/baileyrd/rusty_repo_wise/issues/57)
+
+- **Added:** every file path rendered in the dashboard's overview/health/
+  hotspots tables (Most depended-on files, Lowest-scoring files,
+  Hotspots) now links to that file's `repowise-docs` wiki page
+  (`.repowise/wiki/<path>.md`) when one already exists on disk.
+- **Scope decision:** the issue left open whether `dashboard` should
+  require `docs` to have been run first and link if present, or
+  generate wiki-page-equivalents itself. Went with **"check disk, link
+  if present"** — `repowise-dashboard` doesn't gain a `repowise-docs`
+  dependency, doesn't duplicate its freshness-tracking logic, and
+  doesn't re-read every file from disk on every dashboard build.
+  Drill-down links only appear after `repowise docs` has been run at
+  least once; missing wiki pages degrade to plain (still-escaped) text,
+  never a broken link.
+- `generate()` computes a `HashSet<PathBuf>` of files with an existing
+  wiki page on disk and passes it to `render()`, which stays pure (no
+  filesystem access of its own). New `file_cell()` helper renders a
+  link or plain text depending on set membership.
+- The Architectural decisions table is unaffected — its rows are
+  decisions, not files.
+- Tests: a render-level unit test covering both branches (linked vs.
+  plain text), and an end-to-end `generate()` test that regenerates the
+  dashboard before and after a wiki page appears on disk.
+
+---
+
 ## PR #129 — Add primitive_obsession param-type health marker
 **2026-07-23** · [#129](https://github.com/baileyrd/rusty_repo_wise/pull/129) · closes [#56](https://github.com/baileyrd/rusty_repo_wise/issues/56)
 

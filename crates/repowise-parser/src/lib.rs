@@ -5,6 +5,7 @@
 //! the same spirit as repowise's own tree-sitter-driven approach, but with
 //! none of the semantic-analysis machinery a real compiler front-end has.
 
+mod c;
 mod cpp;
 mod csharp;
 mod go;
@@ -39,6 +40,7 @@ pub fn parse_file(
         Language::CSharp => Ok(Some(csharp::extract(path, source)?)),
         Language::Scala => Ok(Some(scala::extract(path, source)?)),
         Language::Ruby => Ok(Some(ruby::extract(path, source)?)),
+        Language::C => Ok(Some(c::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

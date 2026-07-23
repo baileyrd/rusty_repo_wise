@@ -25,6 +25,7 @@ pub enum Language {
     CSharp,
     Scala,
     Ruby,
+    C,
     Other,
 }
 
@@ -42,6 +43,12 @@ impl Language {
             "cs" => Language::CSharp,
             "scala" | "sc" => Language::Scala,
             "rb" => Language::Ruby,
+            // `.h` is deliberately NOT mapped here: it's ambiguous
+            // between C and C++ headers, and this port has no
+            // C++-only-syntax sniffing to disambiguate — kept as
+            // `Other` rather than guessed, same call already made (and
+            // documented) for C++'s own extension set.
+            "c" => Language::C,
             _ => Language::Other,
         }
     }
@@ -59,6 +66,7 @@ impl Language {
             Language::CSharp => "C#",
             Language::Scala => "Scala",
             Language::Ruby => "Ruby",
+            Language::C => "C",
             Language::Other => "Other",
         }
     }

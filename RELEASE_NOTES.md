@@ -6,6 +6,34 @@ repo routing work through PRs).
 
 ---
 
+## PR #79 — Add Go language support
+**2026-07-23** · [#79](https://github.com/baileyrd/rusty_repo_wise/pull/79) · closes [#31](https://github.com/baileyrd/rusty_repo_wise/issues/31)
+
+- **Added:** a `repowise-parser` extractor for Go — structs, interfaces
+  (mapped to `Trait`), functions, and methods. Go has no nested class
+  scoping (methods are top-level declarations carrying a receiver
+  clause, never nested inside the struct itself), so unlike every other
+  language done so far, a method's `parent` is read directly from its
+  receiver's type name rather than tracked via a scope stack. Import
+  paths are resolved via a new `go_module_path` convention anchored on
+  the nearest `go.mod`'s `module` declaration, mirroring Rust's
+  `Cargo.toml`-anchoring.
+- **Known limitation, stated plainly:** Go packages are directories
+  (every file in one shares an import path), but the module-path index
+  is one-file-per-path — a multi-file package only keeps the
+  last-processed file as its resolved import target. Import edges still
+  land in the right package, just not necessarily the exact file a
+  symbol is defined in.
+- 6 new tests (struct/interface/method extraction with receiver-based
+  parent resolution, plain/aliased imports, selector/bare call tracking,
+  cyclomatic complexity, duplicate-body hashing, interface-method-
+  signature handling) plus a `repowise-graph` end-to-end test proving
+  cross-package resolution via a real `go.mod`; 65 tests passing
+  workspace-wide. Fourth language merged out of this session's
+  `parity-loop` gap-analysis pass (after TypeScript/JavaScript in #26,
+  Java in #75, and Kotlin in #77) — next up per the loop is whichever
+  `parity-gap` issue is oldest and unblocked (C++, per the filing order).
+
 ## PR #77 — Add Kotlin language support
 **2026-07-23** · [#77](https://github.com/baileyrd/rusty_repo_wise/pull/77) · closes [#30](https://github.com/baileyrd/rusty_repo_wise/issues/30)
 

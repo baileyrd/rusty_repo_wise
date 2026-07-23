@@ -89,16 +89,19 @@ pub fn python_module_path(file: &Path, root: &Path) -> Option<String> {
     }
 }
 
-/// Conventional Maven/Gradle source-root directory names for JVM
+/// Conventional Maven/Gradle/sbt source-root directory names for JVM
 /// languages: everything under one of these is package-path-relative to
-/// it, not to the repo root. Kotlin/Gradle projects conventionally use
-/// `.../kotlin` instead of `.../java`, but the package-path convention
-/// itself (dotted path mirrors folder structure) is identical.
+/// it, not to the repo root. Kotlin/sbt projects conventionally use
+/// `.../kotlin` or `.../scala` instead of `.../java`, but the
+/// package-path convention itself (dotted path mirrors folder structure)
+/// is identical.
 const JVM_SOURCE_ROOTS: &[[&str; 3]] = &[
     ["src", "main", "java"],
     ["src", "test", "java"],
     ["src", "main", "kotlin"],
     ["src", "test", "kotlin"],
+    ["src", "main", "scala"],
+    ["src", "test", "scala"],
 ];
 
 /// Find the nearest JVM source-root ancestor of `file` (see
@@ -126,9 +129,9 @@ fn find_jvm_source_root(file: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Module (package) path for a JVM-language source file (Java or
-/// Kotlin), e.g. `com.example.app.Foo`. Uses the conventional
-/// Maven/Gradle source root as the package-path base when present;
+/// Module (package) path for a JVM-language source file (Java, Kotlin,
+/// or Scala), e.g. `com.example.app.Foo`. Uses the conventional
+/// Maven/Gradle/sbt source root as the package-path base when present;
 /// otherwise falls back to treating the file's path relative to the
 /// indexed root as the package path, same convention as
 /// `python_module_path`. Not classpath-aware — a project with a

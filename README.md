@@ -162,6 +162,12 @@ dashboard is one static page with no per-file drill-down or live search
   [`rusty_provider`](https://github.com/baileyrd/rusty_provider) instance
   or any other OpenAI-compatible endpoint) that layers a written summary
   on top of each `repowise-docs` wiki page.
+- `repowise-server` — a live axum HTTP server (JSON API + static-asset
+  serving) for the dashboard's Phase 0 live-server pivot — see "Live
+  dashboard server" below. `repowise-web` (its Leptos/WASM frontend
+  companion) lives alongside it in `crates/` but is deliberately **not**
+  a member of this repo's Cargo workspace, since it only builds for
+  `wasm32-unknown-unknown`.
 - `repowise-cli` — the `repowise` binary tying it together.
 
 ## Usage
@@ -185,6 +191,8 @@ repowise decisions [PATH]          # mined ADRs + decision-like commits, with li
 repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
+repowise serve-dashboard [PATH]      # run a live dashboard server (Phase 0: JSON API + optional static frontend)
+                                     #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
 ```
 
 ## Health scoring
@@ -655,12 +663,58 @@ links; without it, file paths render as plain text rather than a broken
 link. The Architectural decisions table isn't linked this way since its
 rows are decisions, not files (its "Linked files" column is just a count).
 
-Regenerating means re-running the command — there's no live server and no
-auto-refresh, and no live search either. A richer version would need at
-minimum a small local HTTP server (the `tokio` dependency already exists
-from the MCP server) for live queries instead of a static snapshot.
-Deliberately left out of this first pass to keep the dashboard to what
-"generate a static site from data we already compute" actually requires.
+Regenerating means re-running the command — there's no auto-refresh, and
+this static page has no live search either. A genuinely live version is
+now underway (`repowise serve-dashboard`, see the next section); this
+static page isn't going away in the meantime, since it needs nothing
+beyond the CLI to generate and view.
+
+## Live dashboard server (Phase 0)
+
+`repowise serve-dashboard [PATH]` starts a real, long-running server —
+`repowise-server` (axum) — rather than writing a static file: the first
+phase of pivoting the dashboard to genuine parity with repowise's own
+Next.js-frontend/FastAPI-backend architecture, minus the Node.js
+dependency. This phase only proves the architecture end to end; it isn't
+a replacement for the static dashboard yet:
+
+- **`GET /api/overview`** is the only JSON endpoint so far, returning the
+  same data `repowise overview`/the static dashboard's Overview section
+  already compute. Porting health/hotspots/decisions/symbols onto this
+  same JSON-API shape is the next phase, not done here.
+- **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate
+  fetching `/api/overview` and rendering it — proving a real client-side
+  app can talk to the server, not full UI parity yet. It's deliberately
+  **not** a member of the root Cargo workspace (its own `Cargo.toml` has
+  an empty `[workspace]` table): it only ever targets
+  `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev), and
+  pulling a WASM-only crate into the main workspace would break plain
+  `cargo build/test/clippy --workspace` for every other crate (which
+  target the host). Build it with:
+  ```sh
+  rustup target add wasm32-unknown-unknown   # once
+  cargo install trunk                        # once
+  cd crates/repowise-web && trunk build
+  ```
+  then point the server at the built assets:
+  ```sh
+  repowise serve-dashboard [PATH] --static-dir crates/repowise-web/dist
+  ```
+  Omit `--static-dir` to run the JSON API alone, with no frontend served
+  — useful for exercising the API directly (`curl
+  http://127.0.0.1:8080/api/overview`) without building anything.
+- Chosen deliberately over a real Next.js/React frontend to keep the
+  whole project buildable with just `cargo` (no npm/Node dependency for
+  contributors or CI) while still getting a live server, a real
+  client-side app, and (in later phases) instant search and a
+  dependency-graph view — repowise's own D3.js graph can still be
+  embedded via plain JS interop without pulling in a JS build toolchain
+  for everything else.
+
+Later phases (not done here): porting every existing static-dashboard
+view onto the live JSON API, instant/Cmd+K search, a dependency-graph
+view, and eventually ownership/dead-code/decision-tracker views and chat
+(tying into the LLM-dependent-features follow-ups from issue #61).
 
 ## Testing
 

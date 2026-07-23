@@ -19,6 +19,7 @@ repowise-adr = { path = "../repowise-adr" }
 repowise-mcp = { path = "../repowise-mcp" }
 repowise-dashboard = { path = "../repowise-dashboard" }
 repowise-llm = { path = "../repowise-llm" }
+repowise-server = { path = "../repowise-server" }
 anyhow.workspace = true
 clap.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }

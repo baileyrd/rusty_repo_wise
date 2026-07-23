@@ -1,0 +1,26 @@
+# Deliberately its own standalone Cargo workspace (the empty [workspace]
+# table below), NOT a member of the root rusty_repo_wise workspace: this
+# crate only ever builds for wasm32-unknown-unknown via `trunk build`,
+# and pulling a WASM-only crate into the main workspace would break
+# plain `cargo build/test/clippy --workspace` for every other crate
+# (which target the host, not wasm32). Build this one with:
+#   cd crates/repowise-web && trunk build
+# (requires `rustup target add wasm32-unknown-unknown` and `cargo
+# install trunk` once -- both plain Rust tooling, no Node/npm).
+[workspace]
+
+[package]
+name = "repowise-web"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+leptos = { version = "0.7", features = ["csr"] }
+gloo-net = "0.6"
+serde = { version = "1", features = ["derive"] }
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = "s"

@@ -1,0 +1,15 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+watch = ["src", "index.html"]
+
+[serve]
+# Proxies API calls to a `repowise serve-dashboard` instance running
+# separately during development, so `trunk serve` can hot-reload the
+# frontend without also restarting the Rust backend.
+address = "127.0.0.1"
+port = 8081
+proxy_backend = "http://127.0.0.1:8080/api/"
+proxy_rewrite = "/api/"

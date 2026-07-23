@@ -9,9 +9,18 @@
 mod blame;
 mod log;
 
+pub use log::CommitInfo;
+
 use repowise_core::RepoIndex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Walk the full commit history of the repo containing `root`, exposed
+/// for consumers (e.g. `repowise-adr`'s commit-message decision mining)
+/// that need raw commit data rather than `GitAnalytics`'s aggregates.
+pub fn collect_commits(root: &Path) -> anyhow::Result<Vec<CommitInfo>> {
+    log::collect_history(root)
+}
 
 /// Commit messages containing one of these (case-insensitive) are
 /// treated as bug fixes. A heuristic, not ground truth: fixes described

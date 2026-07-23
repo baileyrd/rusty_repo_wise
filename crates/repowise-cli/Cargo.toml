@@ -15,5 +15,6 @@ repowise-graph = { path = "../repowise-graph" }
 repowise-health = { path = "../repowise-health" }
 repowise-git = { path = "../repowise-git" }
 repowise-docs = { path = "../repowise-docs" }
+repowise-adr = { path = "../repowise-adr" }
 anyhow.workspace = true
 clap.workspace = true

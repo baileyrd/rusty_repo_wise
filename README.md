@@ -11,9 +11,10 @@ license with the original (AGPL-3.0) repowise.
 ## Scope so far
 
 repowise is a large product with five "intelligence layers," an MCP
-server, and a web dashboard. So far this port builds the **core CLI, the
-dependency-graph layer, the code-health-scoring layer, the git-analytics
-layer, and the auto-generated-documentation layer**, end to end:
+server, and a web dashboard. So far this port builds all five layers'
+CLI-facing functionality — the **dependency graph, code-health scoring,
+git analytics, auto-generated documentation, and ADR mining** — end to
+end:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust and Python files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
@@ -35,15 +36,20 @@ layer, and the auto-generated-documentation layer**, end to end:
 - Generate a deterministic, template-based markdown "wiki" page per file
   under `.repowise/wiki/` — symbol list, resolved dependencies/dependents,
   and health findings — with per-file freshness tracking (no LLM prose).
+- Mine architectural decisions from `docs/adr/*.md` files and decision-like
+  commit messages, link each to the files/symbols it mentions, and track
+  supersession via an ADR's `Status: Superseded by ADR-XXXX` line.
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
-Not yet built: ADR mining, the MCP server, and the web dashboard. Only
-Rust and Python are parsed; repowise's other 14 languages aren't
-implemented. The health scorer covers 6 of repowise's ~25 markers — see
-"Health scoring" below for which ones and why the rest (LCOM4 cohesion,
-Rabin-Karp substring clone detection) are deferred. LLM-written prose on
-top of the wiki (`repowise generate` in the original) is also deferred —
-this port's `docs` layer is deliberately deterministic-only.
+Not yet built: the MCP server and the web dashboard. Only Rust and Python
+are parsed; repowise's other 14 languages aren't implemented. The health
+scorer covers 6 of repowise's ~25 markers — see "Health scoring" below
+for which ones and why the rest (LCOM4 cohesion, Rabin-Karp substring
+clone detection) are deferred. LLM-written prose on top of the wiki
+(`repowise generate` in the original) is also deferred — this port's
+`docs` layer is deliberately deterministic-only, as is ADR mining (only
+2 of the original's 8 decision sources are implemented — see
+"Architectural decision mining" below).
 
 ## Crates
 
@@ -61,6 +67,8 @@ this port's `docs` layer is deliberately deterministic-only.
 - `repowise-docs` — deterministic per-file markdown documentation pages
   rendered from the index/graph/health data, with content-hash-based
   freshness tracking.
+- `repowise-adr` — architectural-decision mining from ADR files and
+  decision-like commit messages, linked to the files/symbols they mention.
 - `repowise-cli` — the `repowise` binary tying it together.
 
 ## Usage
@@ -78,6 +86,8 @@ repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
+repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
+                                    #   --for-file <FILE> to filter to one file
 ```
 
 ## Health scoring
@@ -161,6 +171,34 @@ content is never stale, only the *status label* can undersell how much
 changed. Not implemented from the original: LLM-written prose on top of
 these pages (`repowise generate`), and the dashboard's doc browser.
 
+## Architectural decision mining
+
+`repowise decisions` mines two of the original's eight decision sources:
+
+- **`docs/adr/*.md` files**, parsed against this repo's own ADR template
+  (`# ADR-XXXX: Title`, then `Status:`/`Date:` lines). An unfilled
+  template (title still literally `<Title>`) is skipped rather than mined
+  as a real decision.
+- **Decision-like commit messages** — a message containing one of a small
+  keyword set (`decide`, `decision`, `chose`, `chosen`, `switch to`,
+  `adopt`, `instead of`). A heuristic, not ground truth, same framing as
+  the bug-fix-commit detection in git analytics.
+
+Each decision is linked to the indexed files it mentions: either the
+file's own relative path appearing verbatim in the decision's body text,
+or one of its non-module symbol names (4+ characters, to cut down on
+false positives from short identifiers) appearing as a whole word.
+Matching text, not meaning — a decision that only refers to a file
+descriptively ("the queue module") won't be linked. Supersession is read
+directly from an ADR's `Status: Superseded by ADR-XXXX` line — no new
+front-matter convention was needed since the existing template already
+has one.
+
+Not implemented from the original's eight sources: PR descriptions, code
+comments, Slack, issue trackers, and three others this repo doesn't have
+integrations for anyway. Recency/confidence scoring on mined decisions is
+also not implemented.
+
 ## Testing
 
 ```sh
@@ -176,6 +214,8 @@ import resolution end to end, health-scoring tests that build
 score) in isolation, git-analytics tests that build real disposable git
 repos (via the `git` CLI) to exercise churn/bug-fix/co-change/ownership/
 hotspot computation against actual `git log`/`git blame` output rather
-than a mock of it, and docs-generation tests covering page rendering
-content and the New/Changed/Unchanged freshness transitions on a real
-temp directory.
+than a mock of it, docs-generation tests covering page rendering content
+and the New/Changed/Unchanged freshness transitions on a real temp
+directory, and ADR-mining tests (ADR parsing, the unfilled-template skip,
+decision-commit detection, file/symbol linking, and an end-to-end test on
+a real git repo covering supersession and linking together).

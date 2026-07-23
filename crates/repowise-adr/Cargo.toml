@@ -1,0 +1,13 @@
+[package]
+name = "repowise-adr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+repowise-core = { path = "../repowise-core" }
+repowise-git = { path = "../repowise-git" }
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

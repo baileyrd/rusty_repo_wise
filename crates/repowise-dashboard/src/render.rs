@@ -2,7 +2,8 @@ use repowise_adr::DecisionRecord;
 use repowise_git::Hotspot;
 use repowise_graph::Overview;
 use repowise_health::HealthReport;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 const STYLE: &str = r#"
 :root { color-scheme: light dark; }
@@ -33,12 +34,18 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 
 /// Render the whole dashboard as one static HTML page from already-computed
 /// data — no rendering logic reaches back out to disk or git itself.
+/// `wiki_pages` says which indexed files already have a `repowise-docs`
+/// wiki page on disk (computed by the caller, which does own the
+/// filesystem check) — every file path rendered below links to its wiki
+/// page when present in this set, or renders as plain (still-escaped)
+/// text otherwise.
 pub fn render(
     root: &Path,
     overview: &Overview,
     health: &HealthReport,
     hotspots: Option<&[Hotspot]>,
     decisions: &[DecisionRecord],
+    wiki_pages: &HashSet<PathBuf>,
 ) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
@@ -49,9 +56,9 @@ pub fn render(
          {}\n{}\n{}\n{}\n\
          </body>\n</html>\n",
         escape(&root.display().to_string()),
-        overview_section(overview, root),
-        health_section(health, root),
-        hotspots_section(hotspots, root),
+        overview_section(overview, root, wiki_pages),
+        health_section(health, root, wiki_pages),
+        hotspots_section(hotspots, root, wiki_pages),
         decisions_section(decisions),
     )
 }
@@ -63,7 +70,24 @@ fn display_rel(path: &Path, root: &Path) -> String {
         .to_string()
 }
 
-fn overview_section(overview: &Overview, root: &Path) -> String {
+/// A file path cell: a link to its wiki page (relative from
+/// `.repowise/dashboard/index.html` to `.repowise/wiki/...`, the two
+/// fixed sibling directories under `.repowise/`) when `wiki_pages`
+/// contains it, plain escaped text otherwise — never a broken link.
+fn file_cell(path: &Path, root: &Path, wiki_pages: &HashSet<PathBuf>) -> String {
+    let rel = display_rel(path, root);
+    if wiki_pages.contains(path) {
+        format!(
+            "<a href=\"../wiki/{}.md\">{}</a>",
+            escape(&rel),
+            escape(&rel)
+        )
+    } else {
+        escape(&rel)
+    }
+}
+
+fn overview_section(overview: &Overview, root: &Path, wiki_pages: &HashSet<PathBuf>) -> String {
     let mut out = String::from("<h2>Overview</h2>\n");
     out.push_str(&format!(
         "<p>{} indexed file(s), {} other file(s), {} total lines.</p>\n",
@@ -103,7 +127,7 @@ fn overview_section(overview: &Overview, root: &Path) -> String {
         for (file, count) in &overview.most_depended_on {
             out.push_str(&format!(
                 "<tr><td class=\"mono\">{}</td><td class=\"num\">{count}</td></tr>\n",
-                escape(&display_rel(file, root))
+                file_cell(file, root, wiki_pages)
             ));
         }
         out.push_str("</table>\n");
@@ -111,7 +135,7 @@ fn overview_section(overview: &Overview, root: &Path) -> String {
     out
 }
 
-fn health_section(health: &HealthReport, root: &Path) -> String {
+fn health_section(health: &HealthReport, root: &Path, wiki_pages: &HashSet<PathBuf>) -> String {
     let mut out = String::from("<h2>Code health</h2>\n");
     out.push_str(&format!(
         "<p>Average score: <strong>{:.1}/10</strong> across {} file(s), {} marker(s) triggered.</p>\n",
@@ -148,7 +172,7 @@ fn health_section(health: &HealthReport, root: &Path) -> String {
         for f in worst {
             out.push_str(&format!(
                 "<tr><td class=\"mono\">{}</td><td class=\"num\">{:.1}</td><td class=\"num\">{}</td></tr>\n",
-                escape(&display_rel(&f.file, root)),
+                file_cell(&f.file, root, wiki_pages),
                 f.score,
                 f.finding_count
             ));
@@ -158,7 +182,11 @@ fn health_section(health: &HealthReport, root: &Path) -> String {
     out
 }
 
-fn hotspots_section(hotspots: Option<&[Hotspot]>, root: &Path) -> String {
+fn hotspots_section(
+    hotspots: Option<&[Hotspot]>,
+    root: &Path,
+    wiki_pages: &HashSet<PathBuf>,
+) -> String {
     let mut out = String::from("<h2>Hotspots</h2>\n");
     let Some(hotspots) = hotspots else {
         out.push_str("<p class=\"empty\">No git history found under this root.</p>\n");
@@ -178,7 +206,7 @@ fn hotspots_section(hotspots: Option<&[Hotspot]>, root: &Path) -> String {
             "<tr><td class=\"mono\">{}</td><td class=\"num\">{:.1}</td>\
              <td class=\"num\">{}</td><td class=\"num\">{}</td>\
              <td class=\"num\">{}</td><td class=\"num\">{}</td></tr>\n",
-            escape(&display_rel(&h.file, root)),
+            file_cell(&h.file, root, wiki_pages),
             h.decayed_score,
             h.score,
             h.churn,
@@ -272,12 +300,14 @@ mod tests {
             average_score: 6.5,
         };
 
-        let html = render(&root, &overview, &health, None, &[]);
+        let html = render(&root, &overview, &health, None, &[], &HashSet::new());
 
         // Relative paths, not absolute.
         assert!(html.contains(">core.rs<"));
         assert!(html.contains(">messy.rs<"));
         assert!(!html.contains("/repo/core.rs"));
+        // No wiki pages exist (empty set) -- plain text, no dangling link.
+        assert!(!html.contains("<a href"));
         // User-controlled text (e.g. a language label) is escaped.
         assert!(html.contains("&lt;Weird&gt;"));
         // No git history / no decisions render as explicit placeholders,
@@ -328,10 +358,48 @@ mod tests {
             linked_files: vec![root.join("hot.rs")],
         }];
 
-        let html = render(&root, &overview, &health, Some(&hotspots), &decisions);
+        let html = render(
+            &root,
+            &overview,
+            &health,
+            Some(&hotspots),
+            &decisions,
+            &HashSet::new(),
+        );
 
         assert!(html.contains(">hot.rs<"));
         assert!(html.contains("ADR-0001"));
         assert!(html.contains("superseded by ADR-0002"));
+    }
+
+    #[test]
+    fn links_file_paths_to_their_wiki_page_only_when_one_exists() {
+        let root = PathBuf::from("/repo");
+        let overview = Overview {
+            file_count: 2,
+            other_file_count: 0,
+            by_language: vec![],
+            symbol_counts: vec![],
+            total_lines: 10,
+            import_edges: 0,
+            call_edges: 0,
+            unresolved_imports: 0,
+            unresolved_calls: 0,
+            most_depended_on: vec![(root.join("has_wiki.rs"), 1), (root.join("no_wiki.rs"), 1)],
+        };
+        let health = repowise_health::HealthReport {
+            file_scores: vec![],
+            findings: vec![],
+            average_score: 10.0,
+        };
+        let mut wiki_pages = HashSet::new();
+        wiki_pages.insert(root.join("has_wiki.rs"));
+
+        let html = render(&root, &overview, &health, None, &[], &wiki_pages);
+
+        assert!(html.contains("<a href=\"../wiki/has_wiki.rs.md\">has_wiki.rs</a>"));
+        // No wiki page for this one -- plain text, not a broken link.
+        assert!(html.contains(">no_wiki.rs<"));
+        assert!(!html.contains("../wiki/no_wiki.rs"));
     }
 }

@@ -564,14 +564,23 @@ placeholder (never a silently blank section) when its data doesn't exist:
 - **Architectural decisions** — mined ADRs/decision-commits (same data as
   `repowise decisions`), or a placeholder if none are found.
 
-Regenerating means re-running the command — there's no live server, no
-auto-refresh, and no per-file drill-down (e.g. clicking a file to see its
-`repowise-docs` wiki page). A richer version would need at minimum: a
-small local HTTP server (the `tokio` dependency already exists from the
-MCP server) for live queries instead of a static snapshot, and linking
-each file mentioned to its rendered wiki page. Deliberately left out of
-this first pass to keep the dashboard to what "generate a static site
-from data we already compute" actually requires.
+Every file path rendered in the overview/health/hotspots tables above is a
+**drill-down link** to that file's `repowise-docs` wiki page
+(`.repowise/wiki/<path>.md`) when one already exists on disk — `dashboard`
+checks for it directly rather than generating wiki pages itself (that
+would duplicate `repowise-docs`'s own freshness tracking and re-read every
+file from disk on every dashboard build, even when nothing changed). Run
+`repowise docs` before `repowise dashboard` to get working drill-down
+links; without it, file paths render as plain text rather than a broken
+link. The Architectural decisions table isn't linked this way since its
+rows are decisions, not files (its "Linked files" column is just a count).
+
+Regenerating means re-running the command — there's no live server and no
+auto-refresh, and no live search either. A richer version would need at
+minimum a small local HTTP server (the `tokio` dependency already exists
+from the MCP server) for live queries instead of a static snapshot.
+Deliberately left out of this first pass to keep the dashboard to what
+"generate a static site from data we already compute" actually requires.
 
 ## Testing
 

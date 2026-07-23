@@ -6,6 +6,56 @@ repo routing work through PRs).
 
 ---
 
+## PR #113 — Add inline decision marker mining to repowise-adr
+**2026-07-23** · [#113](https://github.com/baileyrd/rusty_repo_wise/pull/113) · closes [#48](https://github.com/baileyrd/rusty_repo_wise/issues/48)
+
+- **Added:** a fifth architectural-decision source — inline decision
+  markers. A new `DecisionSource::InlineMarker { file, line, marker }`
+  variant, and a new `repowise-adr::inline_markers` module recognizing a
+  small, explicit tag vocabulary (`WHY:`, `DECISION:`, `TRADEOFF:`,
+  `ADR:`, `RATIONALE:`, `REJECTED:`) as a prefix inside any comment
+  syntax (`#`, `//`, `/* */`), wherever it appears in a file — not tied
+  to sitting above a symbol's declaration the way the code-comment
+  source is. Much lower false-positive risk than that freeform source:
+  this is an explicit opt-in convention, not a keyword guess, so every
+  match is deliberate.
+- **A plain text scan, not language-specific parsing** — `comment_lines`
+  tracks `/* ... */` block state line-by-line across the whole file;
+  `//`/`#` line comments are recognized only when they start a line
+  (a trailing `code(); // WHY: ...` is out of scope for this simple
+  scan, a documented limitation).
+- **Deliberately doesn't reuse `code_comments::comment_block_above`** —
+  evaluated it first (per issue #47's own note to check before
+  duplicating logic) and decided against it. That helper answers "what's
+  the comment block directly above *this specific symbol*"; inline
+  markers need "every comment line in the file, wherever it sits" (a
+  marker doesn't have to sit above a declaration at all). Reusing it
+  would have meant calling it once per symbol and *still* needing a
+  separate whole-file scan for markers not adjacent to any declaration —
+  more complexity than scanning the file once directly. Reasoning
+  recorded in the module's own doc comment.
+- **Linked to the file the marker sits in** — the same "authoritative,
+  not text-matched" treatment PR and code-comment decisions already get
+  in `mine()`'s linking pass.
+- **A noted (not a bug) overlap with the code-comment source**: a line
+  like `# DECISION: adopt sled` will independently match both this
+  source (the `DECISION:` tag) and the freeform code-comment heuristic
+  if it happens to sit directly above a symbol (since "DECISION:"
+  contains "decision"), producing two separate `DecisionRecord`s for the
+  same line. Consistent with how every decision source in this crate is
+  already independent and undeduplicated against the others — not
+  something this PR changes.
+- `DecisionSource` gaining a variant is a breaking change for any
+  exhaustive match over it, same as the two decision-source PRs before
+  this one — updated `repowise-cli::cmd_decisions` and
+  `repowise-mcp::get_why` accordingly, verified via a full workspace
+  build.
+- 6 new tests (every marker tag recognized in `#` syntax, `//` syntax, a
+  `/* */` block, correct file-linking, a plain comment with no tag
+  ignored, a look-alike word like "ADRENALINE:" correctly not matched),
+  174 tests passing workspace-wide (up from 168). Next up per the loop
+  is issue #49, CHANGELOG-based decision mining.
+
 ## PR #111 — Add code-comment decision source to repowise-adr
 **2026-07-23** · [#111](https://github.com/baileyrd/rusty_repo_wise/pull/111) · closes [#47](https://github.com/baileyrd/rusty_repo_wise/issues/47)
 

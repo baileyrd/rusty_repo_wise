@@ -6,6 +6,50 @@ repo routing work through PRs).
 
 ---
 
+## PR #93 — Add PHP language support
+**2026-07-23** · [#93](https://github.com/baileyrd/rusty_repo_wise/pull/93) · closes [#38](https://github.com/baileyrd/rusty_repo_wise/issues/38)
+
+- **Added:** a `repowise-parser` extractor for PHP — classes/interfaces/
+  traits map to `Class`/`Trait`/`Mixin`, methods/functions nest via a
+  `class_stack` the same way Java/Kotlin/Scala do.
+- **New `SymbolKind::Mixin` variant:** PHP's own acceptance criteria
+  list interfaces and traits as distinct concepts (a contract vs. a
+  mixin of concrete implementations), and this port's existing `Trait`
+  kind is already used consistently across languages for the
+  interface-like concept, so conflating PHP's actual `trait` keyword
+  into it would be more confusing than adding one narrowly-scoped
+  variant. Blast radius was minimal: only one exhaustive `match` over
+  `SymbolKind` existed (`label()`).
+- **Two import mechanisms, both implemented:** `require`/`require_once`/
+  `include`/`include_once` (four distinct grammar nodes, all wrapping a
+  single expression) with a plain string literal argument resolve
+  directly against the filesystem, same as C/C++/Ruby — concatenated
+  forms like `require __DIR__ . "/other.php"` are recorded with no path
+  at all, rather than guessed. `use Namespace\Class;` resolves via a new
+  `php_namespace_path` heuristic (folder-mirrors-namespace, same
+  convention as C#'s), reusing the existing `resolve_import` machinery
+  with `sep = "\\"` — not aware of Composer's real `composer.json`
+  autoload mapping.
+- **Notable grammar quirk, caught by its own test:** PHP's `elseif`
+  parses as a distinct `else_if_clause` node, not a nested `if_statement`
+  — missing from `is_decision`'s initial pass caused the
+  cyclomatic-complexity test to fail (expected 6, got 5) before it
+  shipped.
+- **Dependency note:** pins `tree-sitter-php = "0.23"` rather than the
+  newer 0.24.x release — 0.24.2's grammar targets ABI 15, incompatible
+  with this workspace's tree-sitter 0.24 core (ABI 13–14 only). 0.23.11
+  is ABI-compatible, the same fix already applied to
+  `tree-sitter-c-sharp`/`tree-sitter-c`/`tree-sitter-swift`.
+- 6 new tests (class/interface/trait/method extraction, `use`-statement
+  handling, `require_once`-vs-concatenated-include resolution,
+  object-creation calls, cyclomatic complexity, duplicate-body hashing)
+  plus a `repowise-graph` end-to-end test proving both import
+  mechanisms resolve; 106 tests passing workspace-wide. Eleventh
+  language merged out of this session's `parity-loop` gap-analysis pass
+  (after TypeScript/JavaScript in #26, Java in #75, Kotlin in #77, Go in
+  #79, C++ in #81, C# in #83, Scala in #85, Ruby in #87, C in #89, and
+  Swift in #91) — next up per the loop is Dart (#39).
+
 ## PR #91 — Add Swift language support
 **2026-07-23** · [#91](https://github.com/baileyrd/rusty_repo_wise/pull/91) · closes [#37](https://github.com/baileyrd/rusty_repo_wise/issues/37)
 

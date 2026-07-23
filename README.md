@@ -345,19 +345,23 @@ time against the repo's real history:
   The raw (non-decayed) score is still reported alongside it for
   transparency.
 - **Bug-fix commits**: commits whose message contains a fix-like keyword
-  (`fix`, `bug`, `hotfix`, `patch`) touching the file. A heuristic, not
-  ground truth — a fix described without one of these words won't be
-  counted, and an unrelated commit that happens to mention one will be.
+  (`fix`, `bug`, `hotfix`, `patch`) touching the file, **or** whose message
+  references a GitHub issue (`#123`) that's closed with a bug-like label —
+  a commit counts if either heuristic matches (a union, not a replacement).
+  The keyword check is always on; the linked-issue check is a stronger,
+  complementary signal but needs the GitHub API, so it's opt-in behind a
+  `REPOWISE_GITHUB_TOKEN` environment variable (mirroring `repowise-adr`'s
+  PR-body decision source) and degrades to keyword-only detection when
+  there's no token, no GitHub-hosted `origin` remote, or a lookup fails.
+  Both heuristics remain heuristics, not ground truth: a fix described
+  without a keyword or a linked issue won't be counted, and an unrelated
+  commit that happens to mention one will be.
 - **Co-change coupling**: files that appear together in the same commit,
   counted per pair. Commits touching more than 50 files are skipped when
   building this (a rename sweep or vendor bump would otherwise flood
   every touched file's coupling list with noise).
 - **Ownership**: per-author share of a file's lines from `git blame
   --line-porcelain`.
-
-Not implemented from the original's git-analytics scope: a bug-fix
-heuristic based on linked-issue references rather than just message
-keywords.
 
 ## Documentation generation
 

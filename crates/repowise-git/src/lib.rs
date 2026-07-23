@@ -8,13 +8,14 @@
 
 mod blame;
 mod change_risk;
+mod issue_refs;
 mod log;
 
 pub use change_risk::{change_risk, ChangeRisk};
 pub use log::CommitInfo;
 
 use repowise_core::RepoIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Walk the full commit history of the repo containing `root`, exposed
@@ -28,6 +29,8 @@ pub fn collect_commits(root: &Path) -> anyhow::Result<Vec<CommitInfo>> {
 /// treated as bug fixes. A heuristic, not ground truth: fixes described
 /// without any of these words won't be counted, and any commit that
 /// happens to mention one (e.g. "add typo-fixing script") will be.
+/// Complemented (not replaced) by a stronger, GitHub-issue-reference-based
+/// signal -- see `issue_refs` and `linked_bugfix_issue_numbers`.
 const BUGFIX_KEYWORDS: &[&str] = &["fix", "bug", "hotfix", "patch"];
 
 /// Skip commits touching more than this many files when building
@@ -64,6 +67,10 @@ impl GitAnalytics {
     /// Walk the full commit history of the repo containing `root`.
     pub fn collect(root: &Path) -> anyhow::Result<Self> {
         let commits = log::collect_history(root)?;
+        let token = std::env::var("REPOWISE_GITHUB_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        let linked_bugfix_issues = linked_bugfix_issue_numbers(root, &commits, token.as_deref());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -76,7 +83,10 @@ impl GitAnalytics {
         let mut last_touch: HashMap<PathBuf, (String, String)> = HashMap::new();
 
         for commit in &commits {
-            let is_bugfix = is_bugfix_message(&commit.message);
+            let is_bugfix = is_bugfix_message(&commit.message)
+                || issue_refs::parse_issue_refs(&commit.message)
+                    .iter()
+                    .any(|n| linked_bugfix_issues.contains(n));
             let age_days = (now - commit.timestamp).max(0) as f64 / SECONDS_PER_DAY;
             let weight = (-age_days / HOTSPOT_HALF_LIFE_DAYS).exp();
             for file in &commit.files {
@@ -168,6 +178,67 @@ fn is_bugfix_message(message: &str) -> bool {
     BUGFIX_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
+/// Cross-references every `#N` issue reference across `commits`'
+/// messages against the GitHub API, returning the subset confirmed
+/// closed with a bug-like label. Degrades to an empty set (keyword-only
+/// bug-fix detection) when there's no token, no GitHub-hosted `origin`
+/// remote, or a lookup fails -- the same "optional data source"
+/// tradeoff `repowise-adr`'s PR-body decision mining already makes, kept
+/// as a pure function of its inputs (rather than reading the env var
+/// itself) so it stays a plain, testable unit.
+fn linked_bugfix_issue_numbers(
+    root: &Path,
+    commits: &[CommitInfo],
+    token: Option<&str>,
+) -> HashSet<u64> {
+    let Some(token) = token else {
+        return HashSet::new();
+    };
+    let Some(remote_url) = git_remote_url(root) else {
+        return HashSet::new();
+    };
+    let Some((owner, repo)) = issue_refs::parse_github_owner_repo(&remote_url) else {
+        return HashSet::new();
+    };
+
+    let mut referenced: HashSet<u64> = HashSet::new();
+    for commit in commits {
+        referenced.extend(issue_refs::parse_issue_refs(&commit.message));
+    }
+
+    referenced
+        .into_iter()
+        .filter(|&n| {
+            issue_refs::is_closed_bug_issue(issue_refs::GITHUB_API_BASE, &owner, &repo, n, token)
+                == Some(true)
+        })
+        .collect()
+}
+
+/// The `origin` remote's configured URL, read via `git config --get`
+/// rather than `git remote get-url` for the same reason
+/// `repowise-adr`'s copy of this helper does: the latter applies any
+/// configured `url.<base>.insteadOf` rewrite, which is the wrong thing
+/// here -- this needs the actual GitHub host, not wherever `insteadOf`
+/// happens to redirect fetches/pushes to.
+fn git_remote_url(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 fn short_hash(hash: &str) -> String {
     hash.chars().take(7).collect()
 }
@@ -237,4 +308,102 @@ pub fn hotspots(index: &RepoIndex, analytics: &GitAnalytics) -> Vec<Hotspot> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn linked_bugfix_issue_numbers_is_empty_with_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        );
+
+        // No token given -> no network call is even attempted.
+        let numbers = linked_bugfix_issue_numbers(&root, &[], None);
+        assert!(numbers.is_empty());
+    }
+
+    #[test]
+    fn linked_bugfix_issue_numbers_is_empty_with_no_git_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+
+        let numbers = linked_bugfix_issue_numbers(&root, &[], Some("fake-token"));
+        assert!(numbers.is_empty());
+    }
+
+    #[test]
+    fn linked_bugfix_issue_numbers_is_empty_with_a_non_github_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://gitlab.com/owner/repo.git",
+            ],
+        );
+
+        let numbers = linked_bugfix_issue_numbers(&root, &[], Some("fake-token"));
+        assert!(numbers.is_empty());
+    }
+
+    #[test]
+    fn git_remote_url_reports_none_without_a_configured_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+
+        assert_eq!(git_remote_url(&root), None);
+    }
+
+    #[test]
+    fn git_remote_url_reports_the_configured_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        );
+
+        assert_eq!(
+            git_remote_url(&root),
+            Some("https://github.com/owner/repo.git".to_string())
+        );
+    }
 }

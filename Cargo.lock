@@ -911,7 +911,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "repowise-core",
+ "serde",
+ "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

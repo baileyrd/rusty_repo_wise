@@ -2,17 +2,18 @@
 //! dependency graph, and health scoring as agent-facing tools over
 //! stdio, using the official `rmcp` SDK.
 //!
-//! Implements 5 of the original repowise's ~10 MCP tools —
+//! Implements 6 of the original repowise's ~10 MCP tools —
 //! `get_overview`, `search_codebase`, `get_context`, `get_risk`,
-//! `get_change_risk` — the ones whose backing data (the index, the
-//! resolved dependency graph, health findings, `repowise-git`'s
-//! hotspot/churn/bug-fix and diff-shape data) already exists in this
-//! port. `get_change_risk`'s score is a documented fixed-weight
-//! heuristic over diff-shape metrics (files/lines touched, subsystems
-//! affected, change concentration, author experience) — the original
-//! feeds the same kind of metrics into a pre-trained ML model, which
-//! this port has no labeled corpus or training pipeline to reproduce
-//! (see issue #42 and the category-A "ML-calibrated scoring" issue).
+//! `get_change_risk`, `get_symbol` — the ones whose backing data (the
+//! index, the resolved dependency graph, health findings,
+//! `repowise-git`'s hotspot/churn/bug-fix and diff-shape data, or raw
+//! source on disk) already exists in this port. `get_change_risk`'s
+//! score is a documented fixed-weight heuristic over diff-shape metrics
+//! (files/lines touched, subsystems affected, change concentration,
+//! author experience) — the original feeds the same kind of metrics
+//! into a pre-trained ML model, which this port has no labeled corpus or
+//! training pipeline to reproduce (see issue #42 and the category-A
+//! "ML-calibrated scoring" issue).
 //!
 //! Every tool call re-loads `.repowise/index.json` and rebuilds the
 //! dependency graph fresh — no in-memory caching across calls. Simple
@@ -106,6 +107,17 @@ impl Default for RiskParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+struct GetSymbolParams {
+    /// A symbol's `id`, as returned by `search_codebase`/`get_context`.
+    symbol_id: String,
+    /// Extra lines of surrounding source to include on each side of the
+    /// symbol's own line span, clamped to the file's bounds. Defaults to
+    /// `0` (just the symbol's own span).
+    #[serde(default)]
+    context_lines: usize,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 struct ChangeRiskParams {
     /// A single commit, or a `base..head` range, to assess. Defaults to
     /// `HEAD` (the most recent commit) when omitted.
@@ -147,6 +159,9 @@ struct OverviewOutput {
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct SymbolMatch {
+    /// Stable identifier for this symbol, usable with `get_symbol` to
+    /// fetch its raw source text.
+    id: String,
     name: String,
     kind: String,
     file: String,
@@ -220,6 +235,20 @@ struct ChangeRiskOutput {
     score: f64,
 }
 
+#[derive(Serialize, schemars::JsonSchema)]
+struct GetSymbolOutput {
+    id: String,
+    name: String,
+    kind: String,
+    file: String,
+    /// The returned `source`'s actual line span, after padding by
+    /// `context_lines` and clamping to the file's bounds — not
+    /// necessarily equal to the symbol's own `start_line..end_line`.
+    start_line: usize,
+    end_line: usize,
+    source: String,
+}
+
 fn display_rel(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -284,6 +313,7 @@ impl RepowiseServer {
             .search(&query)
             .into_iter()
             .map(|sym| SymbolMatch {
+                id: sym.id.clone(),
                 name: sym.name.clone(),
                 kind: sym.kind.label().to_string(),
                 file: display_rel(&sym.file, &index.root),
@@ -320,6 +350,7 @@ impl RepowiseServer {
             .iter()
             .filter(|s| !matches!(s.kind, SymbolKind::Module))
             .map(|sym| SymbolMatch {
+                id: sym.id.clone(),
                 name: sym.name.clone(),
                 kind: sym.kind.label().to_string(),
                 file: display_rel(&sym.file, &index.root),
@@ -431,6 +462,57 @@ impl RepowiseServer {
             author: risk.author,
             author_prior_commits: risk.author_prior_commits,
             score: risk.score,
+        }))
+    }
+
+    #[tool(
+        name = "get_symbol",
+        description = "Raw source text for one indexed symbol by id (as returned by `search_codebase`/`get_context`), sliced from the symbol's own file at its `start_line..end_line` span. `context_lines` (default 0) pads that span by the same number of lines on each side, clamped to the file's actual bounds. Re-reads the file fresh from disk rather than trusting the index, so edits since the last `repowise init`/`update` are reflected (the returned span may then be off if line numbers have shifted)."
+    )]
+    fn get_symbol(
+        &self,
+        Parameters(GetSymbolParams {
+            symbol_id,
+            context_lines,
+        }): Parameters<GetSymbolParams>,
+    ) -> Result<Json<GetSymbolOutput>, ErrorData> {
+        let (index, _graph) = self.load()?;
+
+        let Some(sym) = index
+            .files
+            .iter()
+            .flat_map(|f| &f.symbols)
+            .find(|s| s.id == symbol_id)
+        else {
+            return Err(ErrorData::resource_not_found(
+                format!("no indexed symbol with id {symbol_id}"),
+                None,
+            ));
+        };
+
+        let source = std::fs::read_to_string(&sym.file).map_err(|e| {
+            ErrorData::internal_error(format!("failed to read {}: {e}", sym.file.display()), None)
+        })?;
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Clamp independently to the file's real (freshly re-read) line
+        // count, then clamp `start_line` to never exceed `end_line` — the
+        // file may have shrunk since this symbol was indexed.
+        let end_line = (sym.end_line + context_lines).min(lines.len());
+        let start_line = sym
+            .start_line
+            .saturating_sub(context_lines)
+            .clamp(1, end_line.max(1));
+        let snippet = lines[(start_line - 1)..end_line].join("\n");
+
+        Ok(Json(GetSymbolOutput {
+            id: sym.id.clone(),
+            name: sym.name.clone(),
+            kind: sym.kind.label().to_string(),
+            file: display_rel(&sym.file, &index.root),
+            start_line,
+            end_line,
+            source: snippet,
         }))
     }
 }
@@ -801,5 +883,92 @@ mod tests {
             panic!("expected an error when the root isn't a git repository");
         };
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn get_symbol_returns_its_own_line_span_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("lib.rs"),
+            "fn before() {}\n\nfn target() {\n    1\n}\n\nfn after() {}\n",
+        )
+        .unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(search) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "target".to_string(),
+            }))
+            .unwrap();
+        let symbol_id = search.matches[0].id.clone();
+
+        let Json(sym) = server
+            .get_symbol(Parameters(GetSymbolParams {
+                symbol_id,
+                context_lines: 0,
+            }))
+            .unwrap();
+
+        assert_eq!(sym.name, "target");
+        assert_eq!(sym.file, "lib.rs");
+        assert_eq!(sym.start_line, 3);
+        assert_eq!(sym.end_line, 5);
+        assert_eq!(sym.source, "fn target() {\n    1\n}");
+    }
+
+    #[test]
+    fn get_symbol_pads_and_clamps_context_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("lib.rs"),
+            "fn before() {}\n\nfn target() {\n    1\n}\n\nfn after() {}\n",
+        )
+        .unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(search) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "target".to_string(),
+            }))
+            .unwrap();
+        let symbol_id = search.matches[0].id.clone();
+
+        // Requesting far more context than the file has on either side
+        // should clamp to the file's real bounds (lines 1..7) rather than
+        // panicking or going out of range.
+        let Json(sym) = server
+            .get_symbol(Parameters(GetSymbolParams {
+                symbol_id,
+                context_lines: 100,
+            }))
+            .unwrap();
+
+        assert_eq!(sym.start_line, 1);
+        assert_eq!(sym.end_line, 7);
+        assert_eq!(
+            sym.source,
+            "fn before() {}\n\nfn target() {\n    1\n}\n\nfn after() {}"
+        );
+    }
+
+    #[test]
+    fn get_symbol_errors_on_an_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root };
+        let result = server.get_symbol(Parameters(GetSymbolParams {
+            symbol_id: "nonexistent".to_string(),
+            context_lines: 0,
+        }));
+        let Err(err) = result else {
+            panic!("expected an error for an unknown symbol id");
+        };
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
     }
 }

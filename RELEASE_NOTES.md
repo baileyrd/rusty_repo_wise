@@ -6,6 +6,56 @@ repo routing work through PRs).
 
 ---
 
+## PR #109 — Add PR-body decision source to repowise-adr
+**2026-07-23** · [#109](https://github.com/baileyrd/rusty_repo_wise/pull/109) · closes [#46](https://github.com/baileyrd/rusty_repo_wise/issues/46)
+
+- **Added:** a third architectural-decision source — merged PR bodies,
+  mined via the GitHub API. A new `DecisionSource::PullRequest { number,
+  author }` variant, and a new `repowise-adr::pull_requests` module
+  applying the same decision-keyword heuristic `commits.rs` already uses
+  (`is_decision_message` is now `pub(crate)` and reused, not duplicated)
+  to each merged PR's title/body. Unlike the other two sources, a PR
+  decision links to the files that PR actually touched — reported
+  directly by the GitHub API — rather than falling back to text-matching
+  against the index.
+- **Opt-in, not automatic.** This is the first network call
+  `repowise-adr` (previously pure git/filesystem) has ever made, and it's
+  deliberately conservative about making one at all: only attempted when
+  a `REPOWISE_GITHUB_TOKEN` env var is set, `root` is a git repo with a
+  GitHub-hosted `origin` remote, and the API call succeeds — any one of
+  those failing degrades to an empty result, same "not required"
+  tradeoff already used for `docs/adr/` and git history. A local
+  codebase-analysis CLI making unsolicited outbound HTTP requests would
+  be surprising, so this requires an explicit token rather than falling
+  back to GitHub's unauthenticated (and much more rate-limited) API.
+- **New `ureq` dependency** — a synchronous HTTP client, chosen
+  deliberately over an async one (`reqwest`) specifically to avoid
+  pulling `tokio` into what's otherwise a plain git/filesystem crate.
+  `repowise-mcp` remains the only other `tokio` consumer in this
+  workspace, for its stdio server.
+- **A proxy-rewrite bug caught before it shipped:** the remote URL is
+  read via `git config --get remote.origin.url`, not `git remote
+  get-url origin` — the latter applies any configured
+  `url.<base>.insteadOf` rewrite (this sandbox's own git config rewrites
+  `github.com` URLs through a local proxy for its own purposes), which
+  would have pointed the owner/repo parser at the wrong host entirely.
+  Caught by a test asserting the exact remote URL round-trips
+  unmodified, which failed against a real proxy rewrite in this very
+  environment before the fix.
+- `DecisionSource` gaining a variant is a breaking change for any
+  exhaustive match over it — updated `repowise-cli::cmd_decisions` and
+  `repowise-mcp::get_why` accordingly, verified via a full workspace
+  build.
+- 9 new tests (GitHub remote URL parsing across SSH/HTTPS/`ssh://`
+  forms and rejection of non-GitHub remotes, decision-keyword mining
+  linked to real PR file lists, the actual HTTP/JSON request/response
+  path exercised against a hand-rolled local TCP fixture server rather
+  than a live network call or a new mocking-crate dependency, and the
+  four degrade-to-empty paths: no token, no remote, a non-GitHub remote,
+  and `git_remote_url` itself), 164 tests passing workspace-wide (up
+  from 155). Next up per the loop is issue #47, code-comment decision
+  mining — pure filesystem/parsing work, no new dependency this time.
+
 ## PR #107 — Add get_dead_code MCP tool with confidence tiers
 **2026-07-23** · [#107](https://github.com/baileyrd/rusty_repo_wise/pull/107) · closes [#45](https://github.com/baileyrd/rusty_repo_wise/issues/45)
 

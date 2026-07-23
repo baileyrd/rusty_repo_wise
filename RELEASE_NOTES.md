@@ -6,6 +6,38 @@ repo routing work through PRs).
 
 ---
 
+## PR #83 — Add C# language support
+**2026-07-23** · [#83](https://github.com/baileyrd/rusty_repo_wise/pull/83) · closes [#33](https://github.com/baileyrd/rusty_repo_wise/issues/33)
+
+- **Added:** a `repowise-parser` extractor for C# — classes, structs,
+  interfaces, methods, and constructors. Unlike Go/C++, C# methods are
+  always declared directly inside their type's body, so scoping uses
+  the same `class_stack` push/pop pattern already established for
+  Java/Kotlin. `using` directives are extracted as imports
+  (plain/dotted/aliased forms handled, `using static` skipped);
+  invocation and object-creation expressions are tracked as calls.
+- **Dependency note:** pins `tree-sitter-c-sharp = "0.21"` rather than a
+  newer 0.23.x release — 0.23.5's grammar targets ABI 15, incompatible
+  with this workspace's tree-sitter 0.24 core (ABI 13–14 only). 0.21
+  predates the `LanguageFn` API and is ABI-compatible, the same
+  workaround pattern used transiently for Rust/Python early in this
+  project.
+- **Known limitation, stated plainly:** namespace resolution
+  (`csharp_namespace_path`) is a folder-mirrors-namespace heuristic —
+  nothing in C#/.NET enforces that convention the way Maven/Gradle or
+  `go.mod` do for Java/Kotlin/Go, so a project that doesn't follow it
+  won't resolve correctly. Like Go, it's keyed by directory rather than
+  per-file, so multiple files sharing one namespace resolve to
+  whichever was indexed last.
+- 6 new tests (class/interface/method extraction, using-directive
+  forms, object-creation calls, cyclomatic complexity, duplicate-body
+  hashing, interface-signature-vs-real-method) plus a `repowise-graph`
+  end-to-end test proving folder-based namespace resolution; 78 tests
+  passing workspace-wide. Sixth language merged out of this session's
+  `parity-loop` gap-analysis pass (after TypeScript/JavaScript in #26,
+  Java in #75, Kotlin in #77, Go in #79, and C++ in #81) — next up per
+  the loop is Scala (#34).
+
 ## PR #81 — Add C++ language support
 **2026-07-23** · [#81](https://github.com/baileyrd/rusty_repo_wise/pull/81) · closes [#32](https://github.com/baileyrd/rusty_repo_wise/issues/32)
 

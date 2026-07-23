@@ -90,12 +90,17 @@ complexity not worth taking on yet).
 `decisions` is a third, independent path: `repowise-adr` reads `docs/adr/*.md`
 directly off disk, reuses `repowise-git::collect_commits` for raw commit
 messages (not `RepoIndex`, which only has complexity metrics, not commit
-history), and — only when a `REPOWISE_GITHUB_TOKEN` env var is set —
-calls the GitHub API for merged PR bodies, the one network call anywhere
-in this port's non-MCP command paths. ADR-file and commit-message
-decisions then get linked to files/symbols in the same `RepoIndex` the
-other commands use; PR decisions skip that step, already linked to the
-files the GitHub API reports that PR touched.
+history) — only when a `REPOWISE_GITHUB_TOKEN` env var is set — calls
+the GitHub API for merged PR bodies (the one network call anywhere in
+this port's non-MCP command paths), and re-reads each indexed file's
+source fresh from disk to mine decision-like comments sitting directly
+above a symbol (comment text isn't kept in `RepoIndex` any more than a
+symbol's own source is — the same tradeoff `get_symbol`/`repowise-docs`
+already make). ADR-file and commit-message decisions then get linked to
+files/symbols in the same `RepoIndex` the other commands use; PR and
+code-comment decisions skip that step, already linked to the files the
+GitHub API reports that PR touched, or the file the comment sits in,
+respectively.
 `serve` is a thin wrapper over the same `overview`/`search`/`deps`/`health`
 data paths, re-exposed as MCP tools: `repowise-mcp` loads `RepoIndex`,
 builds a `RepoGraph`, and (for `get_context`/`get_risk`) runs

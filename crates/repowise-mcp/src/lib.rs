@@ -655,6 +655,9 @@ impl RepowiseServer {
                     repowise_adr::DecisionSource::PullRequest { number, author } => {
                         format!("pr:{number} by {author}")
                     }
+                    repowise_adr::DecisionSource::CodeComment { file, line } => {
+                        format!("comment:{}:{line}", display_rel(file, &index.root))
+                    }
                 };
                 DecisionOutput {
                     id: d.id,

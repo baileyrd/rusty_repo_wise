@@ -430,6 +430,9 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             repowise_adr::DecisionSource::PullRequest { number, author } => {
                 format!("PR #{number} by {author}")
             }
+            repowise_adr::DecisionSource::CodeComment { file, line } => {
+                format!("comment ({}:{line})", display_path(file, &index.root))
+            }
         };
         let status = d.status.as_deref().unwrap_or("-");
         println!("  {:<10} {:<10} {}", d.id, status, d.title);

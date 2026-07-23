@@ -6,6 +6,32 @@ repo routing work through PRs).
 
 ---
 
+## PR #117 — Expand commit-message decision-keyword list
+**2026-07-23** · [#117](https://github.com/baileyrd/rusty_repo_wise/pull/117) · closes [#50](https://github.com/baileyrd/rusty_repo_wise/issues/50)
+
+- **Widened `commits::DECISION_KEYWORDS`** from 7 entries (`decide`
+  through `instead of`) to 19, toward the reference's documented
+  "git archaeology" keyword set. `migrate`/`replace`/`deprecate`/`drop`/
+  `rewrite`/`split`/`revert` are named explicitly in issue #50;
+  `opt for`/`in favor of`/`settle on`/`consolidate`/`standardize on`
+  round the list out to 19 from common decision-language vocabulary —
+  the reference repo wasn't reachable from this session to confirm its
+  exact remaining entries, so that last group is a documented best
+  effort rather than a verified match.
+- No logic change — `is_decision_message`'s case-insensitive substring
+  match over the keyword list is unchanged; this is purely a data
+  (const array) change plus tests.
+- **This closes out all filed ADR-mining issues (#46-50)**:
+  `repowise-adr::mine` now draws on six independent sources — ADR files,
+  commit messages (this widened list), merged PR bodies, decision-like
+  code comments, inline decision markers, and keep-a-changelog CHANGELOG
+  sections.
+- 2 new tests (all 12 newly-added keywords individually flagged as
+  decision-like; an unrelated message stays unflagged), 181 tests
+  passing workspace-wide (up from 179). Next up per the loop is issue
+  #51, the first of six filed health-marker issues (#51-56): LCOM4
+  (`low_cohesion`) structural-complexity scoring.
+
 ## PR #115 — Add CHANGELOG decision source to repowise-adr
 **2026-07-23** · [#115](https://github.com/baileyrd/rusty_repo_wise/pull/115) · closes [#49](https://github.com/baileyrd/rusty_repo_wise/issues/49)
 

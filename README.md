@@ -11,11 +11,9 @@ license with the original (AGPL-3.0) repowise.
 ## Scope so far
 
 repowise is a large product with five "intelligence layers," an MCP
-server, and a web dashboard. So far this port builds all five layers'
-CLI-facing functionality — the **dependency graph, code-health scoring,
-git analytics, auto-generated documentation, and ADR mining** — plus
-**an MCP server** exposing a subset of that as agent-facing tools, end
-to end:
+server, and a web dashboard. This port now builds all of that — every
+piece covering a subset of the original's scope within it (see below for
+specifics per layer), not full feature parity:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust and Python files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
@@ -43,18 +41,22 @@ to end:
 - Expose `get_overview`/`search_codebase`/`get_context` as MCP tools over
   stdio (the official `rmcp` SDK), so an agent can pull complete context
   for a file in one round-trip instead of piecing it together itself.
+- Generate a static-site dashboard (one self-contained HTML page, no
+  server, no JS build step) covering overview stats, code health,
+  hotspots, and mined decisions — regenerate by re-running the command.
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
-Not yet built: the web dashboard. Only Rust and Python are parsed;
-repowise's other 14 languages aren't implemented. The health scorer
-covers 6 of repowise's ~25 markers — see "Health scoring" below for
-which ones and why the rest (LCOM4 cohesion, Rabin-Karp substring clone
-detection) are deferred. LLM-written prose on top of the wiki
-(`repowise generate` in the original) is also deferred — this port's
-`docs` layer is deliberately deterministic-only, as is ADR mining (only
-2 of the original's 8 decision sources are implemented — see
-"Architectural decision mining" below). The MCP server covers 3 of the
-original's ~10 tools — see "MCP server" below for which and why.
+Only Rust and Python are parsed; repowise's other 14 languages aren't
+implemented. The health scorer covers 6 of repowise's ~25 markers — see
+"Health scoring" below for which ones and why the rest (LCOM4 cohesion,
+Rabin-Karp substring clone detection) are deferred. LLM-written prose on
+top of the wiki (`repowise generate` in the original) is also deferred —
+this port's `docs` layer is deliberately deterministic-only, as is ADR
+mining (only 2 of the original's 8 decision sources are implemented —
+see "Architectural decision mining" below). The MCP server covers 3 of
+the original's ~10 tools — see "MCP server" below for which and why. The
+dashboard is one static page with no per-file drill-down or live search
+— see "Dashboard" below for what a richer version would need.
 
 ## Crates
 
@@ -76,6 +78,8 @@ original's ~10 tools — see "MCP server" below for which and why.
   decision-like commit messages, linked to the files/symbols they mention.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
   the index/graph/health data as agent-facing tools over stdio.
+- `repowise-dashboard` — a static-site dashboard rendered from the
+  overview/health/hotspot/decision data the other layers compute.
 - `repowise-cli` — the `repowise` binary tying it together.
 
 ## Usage
@@ -96,6 +100,7 @@ repowise docs [PATH]               # generate per-file wiki pages under .repowis
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
 repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context)
+repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 ```
 
 ## Health scoring
@@ -232,6 +237,31 @@ git analytics exists — a well-scoped next addition, deliberately left out
 of this first pass rather than bundled in) and the rest of the original's
 tool surface beyond what this port's other layers currently support.
 
+## Dashboard
+
+`repowise dashboard [PATH]` writes one self-contained static HTML page to
+`.repowise/dashboard/index.html` — open it directly in a browser, no
+server to run. Kept deliberately simple: a single page combining four
+sections, each degrading gracefully to an explicit "not available"
+placeholder (never a silently blank section) when its data doesn't exist:
+
+- **Overview** — same data as `repowise overview`.
+- **Code health** — average score, markers by kind, lowest-scoring files
+  (same data as `repowise health`).
+- **Hotspots** — top files by churn × complexity (same data as `repowise
+  hotspots`), or a placeholder if `PATH` isn't a git repo.
+- **Architectural decisions** — mined ADRs/decision-commits (same data as
+  `repowise decisions`), or a placeholder if none are found.
+
+Regenerating means re-running the command — there's no live server, no
+auto-refresh, and no per-file drill-down (e.g. clicking a file to see its
+`repowise-docs` wiki page). A richer version would need at minimum: a
+small local HTTP server (the `tokio` dependency already exists from the
+MCP server) for live queries instead of a static snapshot, and linking
+each file mentioned to its rendered wiki page. Deliberately left out of
+this first pass to keep the dashboard to what "generate a static site
+from data we already compute" actually requires.
+
 ## Testing
 
 ```sh
@@ -255,4 +285,6 @@ a real git repo covering supersession and linking together), and MCP
 server tests that call each tool method directly against a real index
 built by the actual indexing pipeline (not hand-built fixtures), covering
 the happy path for all three tools plus the invalid-query and
-unindexed-file error cases.
+unindexed-file error cases, and dashboard tests covering HTML escaping,
+relative-path rendering, the graceful-degradation placeholders, and an
+end-to-end render against a real indexed temp directory.

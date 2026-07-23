@@ -84,12 +84,13 @@ impl RepoGraph {
                         go_modules.insert(mp, file.path.clone());
                     }
                 }
-                // TypeScript/JavaScript relative imports are resolved
-                // directly at parse time (see `resolve_relative_import` in
+                // TypeScript/JavaScript/C++ relative (quote-form)
+                // imports are resolved directly at parse time (see
+                // `resolve_relative_import`/`resolve_include` in
                 // `repowise-parser`), so there's no module-path index to
                 // build here, unlike Rust/Python/Java/Kotlin/Go's
                 // dotted/`::`/`/`-separated paths.
-                Language::TypeScript | Language::JavaScript | Language::Other => {}
+                Language::TypeScript | Language::JavaScript | Language::Cpp | Language::Other => {}
             }
         }
 
@@ -104,7 +105,7 @@ impl RepoGraph {
                 Language::Python => (".", &python_modules),
                 Language::Java | Language::Kotlin => (".", &jvm_modules),
                 Language::Go => ("/", &go_modules),
-                Language::TypeScript | Language::JavaScript => ("", &no_modules),
+                Language::TypeScript | Language::JavaScript | Language::Cpp => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

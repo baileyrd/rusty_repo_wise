@@ -669,28 +669,31 @@ now underway (`repowise serve-dashboard`, see the next section); this
 static page isn't going away in the meantime, since it needs nothing
 beyond the CLI to generate and view.
 
-## Live dashboard server (Phase 0)
+## Live dashboard server
 
 `repowise serve-dashboard [PATH]` starts a real, long-running server —
-`repowise-server` (axum) — rather than writing a static file: the first
-phase of pivoting the dashboard to genuine parity with repowise's own
-Next.js-frontend/FastAPI-backend architecture, minus the Node.js
-dependency. This phase only proves the architecture end to end; it isn't
-a replacement for the static dashboard yet:
+`repowise-server` (axum) — rather than writing a static file: pivoting the
+dashboard to genuine parity with repowise's own Next.js-frontend/
+FastAPI-backend architecture, minus the Node.js dependency.
 
-- **`GET /api/overview`** is the only JSON endpoint so far, returning the
-  same data `repowise overview`/the static dashboard's Overview section
-  already compute. Porting health/hotspots/decisions/symbols onto this
-  same JSON-API shape is the next phase, not done here.
-- **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate
-  fetching `/api/overview` and rendering it — proving a real client-side
-  app can talk to the server, not full UI parity yet. It's deliberately
-  **not** a member of the root Cargo workspace (its own `Cargo.toml` has
-  an empty `[workspace]` table): it only ever targets
-  `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev), and
-  pulling a WASM-only crate into the main workspace would break plain
-  `cargo build/test/clippy --workspace` for every other crate (which
-  target the host). Build it with:
+- **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
+  `/api/decisions`, and `/api/symbols` — the same data the static
+  dashboard's sections already compute (`repowise overview`/`health`/
+  `hotspots`/`decisions`, plus the full symbol list), as JSON instead of
+  baked into one static HTML page. File paths are always relative to
+  `PATH`, never absolute host paths. `/api/hotspots` returns
+  `{"available": false}` (not an error) when `PATH` isn't a git repo, same
+  "degrade gracefully" behavior as the static dashboard.
+- **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
+  fetches all five endpoints and renders every section the static
+  dashboard has — overview, code health, hotspots, architectural
+  decisions, and a symbols table with a live (client-side-reactive, not
+  just embedded-JS) kind filter. It's deliberately **not** a member of the
+  root Cargo workspace (its own `Cargo.toml` has an empty `[workspace]`
+  table): it only ever targets `wasm32-unknown-unknown` via
+  [`trunk`](https://trunkrs.dev), and pulling a WASM-only crate into the
+  main workspace would break plain `cargo build/test/clippy --workspace`
+  for every other crate (which target the host). Build it with:
   ```sh
   rustup target add wasm32-unknown-unknown   # once
   cargo install trunk                        # once
@@ -711,10 +714,12 @@ a replacement for the static dashboard yet:
   embedded via plain JS interop without pulling in a JS build toolchain
   for everything else.
 
-Later phases (not done here): porting every existing static-dashboard
-view onto the live JSON API, instant/Cmd+K search, a dependency-graph
-view, and eventually ownership/dead-code/decision-tracker views and chat
-(tying into the LLM-dependent-features follow-ups from issue #61).
+Every file path rendered in these sections isn't yet a drill-down link to
+its `repowise-docs` wiki page the way the static dashboard's is — that,
+plus instant/Cmd+K search, a dependency-graph view, and eventually
+ownership/dead-code/decision-tracker views and chat (tying into the
+LLM-dependent-features follow-ups from issue #61), are later phases, not
+done here.
 
 ## Testing
 

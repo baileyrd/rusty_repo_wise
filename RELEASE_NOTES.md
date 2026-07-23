@@ -6,6 +6,35 @@ repo routing work through PRs).
 
 ---
 
+## PR #81 — Add C++ language support
+**2026-07-23** · [#81](https://github.com/baileyrd/rusty_repo_wise/pull/81) · closes [#32](https://github.com/baileyrd/rusty_repo_wise/issues/32)
+
+- **Added:** a `repowise-parser` extractor for C++ — classes, structs,
+  functions, and methods. Like Go, out-of-class method definitions
+  (`Ret Widget::area() {...}`) get their parent read directly from the
+  qualified name's scope; unlike Go, in-class method *prototypes*
+  (`int area();` inside the class body, no bodies) are also tracked via
+  a `class_stack`, recorded as separate `Method` symbols — the same
+  dual-symbol pattern already established for Java/Kotlin/Go interface
+  signatures. Quote-form `#include "local.h"` is resolved directly
+  against the filesystem (mirroring TS/JS's relative-import resolution);
+  angle-form `#include <system>` has no include-path search list and
+  stays unresolved by design.
+- **Known limitation, stated plainly:** `.h` is deliberately left
+  unmapped to any language (`Language::Other`) — it's ambiguous between
+  C and C++, and this issue is C++-only (plain C is tracked separately
+  as issue #36). Only unambiguous C++ extensions (`.cpp`/`.cc`/`.cxx`/
+  `.hpp`/`.hh`/`.hxx`) are recognized for now.
+- 5 new tests (class/prototype/out-of-class-definition extraction,
+  quote/angle include handling, member/bare/qualified call tracking,
+  cyclomatic complexity, duplicate-body hashing) plus a `repowise-graph`
+  end-to-end test proving quote-includes resolve while angle-includes
+  stay unresolved; 71 tests passing workspace-wide. Fifth language
+  merged out of this session's `parity-loop` gap-analysis pass (after
+  TypeScript/JavaScript in #26, Java in #75, Kotlin in #77, and Go in
+  #79) — next up per the loop is whichever `parity-gap` issue is oldest
+  and unblocked (C#, per the filing order).
+
 ## PR #79 — Add Go language support
 **2026-07-23** · [#79](https://github.com/baileyrd/rusty_repo_wise/pull/79) · closes [#31](https://github.com/baileyrd/rusty_repo_wise/issues/31)
 

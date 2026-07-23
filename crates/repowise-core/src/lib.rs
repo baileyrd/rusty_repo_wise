@@ -26,6 +26,7 @@ pub enum Language {
     Scala,
     Ruby,
     C,
+    Swift,
     Other,
 }
 
@@ -49,6 +50,7 @@ impl Language {
             // `Other` rather than guessed, same call already made (and
             // documented) for C++'s own extension set.
             "c" => Language::C,
+            "swift" => Language::Swift,
             _ => Language::Other,
         }
     }
@@ -67,6 +69,7 @@ impl Language {
             Language::Scala => "Scala",
             Language::Ruby => "Ruby",
             Language::C => "C",
+            Language::Swift => "Swift",
             Language::Other => "Other",
         }
     }

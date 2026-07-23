@@ -450,3 +450,41 @@ fn resolves_c_quote_includes_of_recognized_extensions_but_not_conventional_h_hea
     // edge can't be created — it must count as unresolved.
     assert!(graph.unresolved_imports >= 1);
 }
+
+#[test]
+fn swift_module_imports_correctly_stay_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // Swift `import` is module-level, not file-level: there's no
+    // relative-import syntax and no build-graph here to map a module
+    // name to a file, so this must always land in `unresolved_imports`
+    // rather than accidentally matching some unrelated same-named file.
+    fs::write(
+        root.join("Helper.swift"),
+        "class Helper {\n    func compute(_ x: Int) -> Int {\n        return x + 1\n    }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.swift"),
+        "import Foundation\n\nfunc run() -> Int {\n    let h = Helper()\n    return h.compute(1)\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_swift = find_file(&index, "main.swift").path.clone();
+
+    // No import edges at all: `import Foundation` can't map to a file.
+    let deps = graph.dependencies_of(&main_swift);
+    assert!(
+        deps.is_empty(),
+        "expected no resolved import edges for main.swift, got {deps:?}"
+    );
+    assert!(graph.unresolved_imports >= 1);
+
+    // Call resolution is unaffected by import resolution: it's driven by
+    // the shared name index, not import edges.
+    let matches = graph.search("compute");
+    assert_eq!(matches.len(), 1);
+}

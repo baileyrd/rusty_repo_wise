@@ -17,6 +17,7 @@ mod python;
 mod ruby;
 mod rust;
 mod scala;
+mod swift;
 
 use repowise_core::{FileRecord, Language};
 use std::path::Path;
@@ -41,6 +42,7 @@ pub fn parse_file(
         Language::Scala => Ok(Some(scala::extract(path, source)?)),
         Language::Ruby => Ok(Some(ruby::extract(path, source)?)),
         Language::C => Ok(Some(c::extract(path, source)?)),
+        Language::Swift => Ok(Some(swift::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

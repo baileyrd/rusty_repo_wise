@@ -19,3 +19,4 @@ tree-sitter-cpp.workspace = true
 tree-sitter-c-sharp.workspace = true
 tree-sitter-scala.workspace = true
 tree-sitter-ruby.workspace = true
+tree-sitter-c.workspace = true

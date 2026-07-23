@@ -16,7 +16,8 @@ piece covering a subset of the original's scope within it (see below for
 specifics per layer), not full feature parity:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust, Python,
-  TypeScript, JavaScript, Java, Kotlin, Go, C++, C#, Scala, and Ruby files.
+  TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, and Ruby
+  files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
   definitions, imports, call expressions, and per-function metrics
   (cyclomatic complexity, parameter count, a duplicate-code body hash).
@@ -26,16 +27,22 @@ specifics per layer), not full feature parity:
   TypeScript/JavaScript's relative `./`/`../` specifiers, Java/Kotlin/
   Scala's shared Maven/Gradle/sbt `src/main/java`/`src/main/kotlin`/
   `src/main/scala`-anchored package paths, Go's `go.mod`-anchored module
-  paths, C++'s quote-form `#include "local.h"` resolved directly against
-  the filesystem, C#'s best-effort folder-mirrors-namespace heuristic,
-  Ruby's `require_relative` resolved directly against the filesystem) —
-  **not** full compiler-grade name resolution. Ambiguous or external
-  references (npm packages/JVM classpath dependencies/Go modules outside
-  the local `go.mod`/C++ angle-form `#include <system>` headers/C#
-  namespaces that don't follow the folder convention/Ruby's gem-based
-  plain `require`, since there's no
+  paths, C/C++'s quote-form `#include "local.h"` resolved directly
+  against the filesystem, C#'s best-effort folder-mirrors-namespace
+  heuristic, Ruby's `require_relative` resolved directly against the
+  filesystem) — **not** full compiler-grade name resolution. Ambiguous or
+  external references (npm packages/JVM classpath dependencies/Go modules
+  outside the local `go.mod`/C and C++ angle-form `#include <system>`
+  headers/C# namespaces that don't follow the folder convention/Ruby's
+  gem-based plain `require`, since there's no
   `node_modules`/classpath/Go-proxy/include-path-search/.NET-project/
-  `$LOAD_PATH` resolution) are left unresolved rather than guessed.
+  `$LOAD_PATH` resolution) are left unresolved rather than guessed. `.h`
+  is deliberately not mapped to either C or C++ (ambiguous between the
+  two, and this port has no syntax-sniffing to disambiguate) — so a
+  conventional `#include "foo.h"` split resolves against the filesystem
+  at parse time but never becomes a graph edge, since the header itself
+  is never indexed; only unambiguous extensions (`.c`, and C++'s
+  `.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`/`.hxx`) are recognized.
 - Score every file's health deterministically (0–10, no LLM/ML) from six
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, and possibly-dead code
@@ -58,7 +65,7 @@ specifics per layer), not full feature parity:
   hotspots, and mined decisions — regenerate by re-running the command.
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
-Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C++, C#,
+Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
 Scala, and Ruby are parsed; repowise's other languages aren't
 implemented — see issue #11 for the tracking/discussion issue on extending
 language support. The health scorer covers 6 of repowise's ~25 markers — see
@@ -77,7 +84,7 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-core` — shared data model (`Symbol`, `FileRecord`, `RepoIndex`,
   etc.), `.gitignore`-aware file discovery, and JSON index persistence.
 - `repowise-parser` — tree-sitter-based extraction for Rust, Python,
-  TypeScript, JavaScript, Java, Kotlin, Go, C++, C#, Scala, and Ruby,
+  TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, and Ruby,
   including per-function complexity/param-count/body-hash metrics.
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.

@@ -408,3 +408,45 @@ fn resolves_ruby_require_relative_but_not_plain_require() {
     // equivalent to resolve against, so it must count as unresolved.
     assert!(graph.unresolved_imports >= 1);
 }
+
+#[test]
+fn resolves_c_quote_includes_of_recognized_extensions_but_not_conventional_h_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // `.h` is deliberately unmapped to any language (kept as
+    // `Language::Other`, same ambiguity-with-C++ call already made for
+    // the C++ extractor), so this is never indexed — meaning a
+    // conventional `#include "helper.h"` split can't resolve to a real
+    // graph edge in this port, a known, stated limitation.
+    fs::write(root.join("helper.h"), "int compute(int x);\n").unwrap();
+    // A `.c` file, on the other hand, IS a recognized extension, so
+    // quote-form `#include` of one resolves directly against the
+    // filesystem exactly like C++'s `.hpp` case.
+    fs::write(
+        root.join("helper_impl.c"),
+        "int compute(int x) {\n    return x + 1;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.c"),
+        "#include \"helper.h\"\n#include \"helper_impl.c\"\n\nint run(void) {\n    return compute(1);\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_c = find_file(&index, "main.c").path.clone();
+    let helper_impl_c = find_file(&index, "helper_impl.c").path.clone();
+
+    let deps = graph.dependencies_of(&main_c);
+    assert!(
+        deps.contains(&helper_impl_c),
+        "expected main.c to depend on helper_impl.c, got {deps:?}"
+    );
+
+    // `#include "helper.h"` resolves against the filesystem fine at parse
+    // time, but since `.h` files are never indexed as graph nodes, the
+    // edge can't be created — it must count as unresolved.
+    assert!(graph.unresolved_imports >= 1);
+}

@@ -6,6 +6,41 @@ repo routing work through PRs).
 
 ---
 
+## PR #87 — Add Ruby language support
+**2026-07-23** · [#87](https://github.com/baileyrd/rusty_repo_wise/pull/87) · closes [#35](https://github.com/baileyrd/rusty_repo_wise/issues/35)
+
+- **Added:** a `repowise-parser` extractor for Ruby — classes and
+  modules (mapped to `Class`/`Module`), plus `def` methods (both
+  instance and `def self.`-style class methods), nested via a
+  `class_stack` the same way Java/Kotlin/Scala do. `require_relative` is
+  resolved directly against the filesystem at parse time (mirroring
+  TS/JS's relative-import resolution and C++'s quote-form `#include`),
+  trying the exact path then appending a `.rb` extension; plain
+  `require` is gem-based (`$LOAD_PATH`) with no static equivalent to
+  resolve against, so it's recorded but left unresolved by design.
+  `receiver.new` calls are recorded as a call to the receiver class
+  itself (Ruby's equivalent of `new Type()`).
+- **Notable grammar quirk, caught by its own test:** `tree-sitter-ruby`
+  names several rules after their own bare keyword (`if`, `elsif`,
+  `while`, `until`, `for`, `rescue`, `when`) and *also* keeps that
+  keyword as an anonymous child token of the identical kind string —
+  double-counting cyclomatic complexity until an `is_named()` guard was
+  added to `is_decision`.
+- **Known limitation, stated plainly:** bare parenless/argless method
+  calls (`helper` with no receiver, parens, or args) aren't
+  distinguishable from local variable references by the grammar itself,
+  so they aren't recorded as calls — callers should use explicit parens
+  (`helper()`) for a call to be tracked.
+- 5 new tests (class/module/method extraction, `require_relative`/
+  `require` handling, constructor-call tracking, cyclomatic complexity,
+  duplicate-body hashing) plus a `repowise-graph` end-to-end test
+  proving `require_relative` resolves while plain `require` stays
+  unresolved; 89 tests passing workspace-wide. Eighth language merged
+  out of this session's `parity-loop` gap-analysis pass (after
+  TypeScript/JavaScript in #26, Java in #75, Kotlin in #77, Go in #79,
+  C++ in #81, C# in #83, and Scala in #85) — next up per the loop is C
+  (#36).
+
 ## PR #85 — Add Scala language support
 **2026-07-23** · [#85](https://github.com/baileyrd/rusty_repo_wise/pull/85) · closes [#34](https://github.com/baileyrd/rusty_repo_wise/issues/34)
 

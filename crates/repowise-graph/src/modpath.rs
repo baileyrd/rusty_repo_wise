@@ -204,6 +204,31 @@ pub fn go_module_path(file: &Path) -> Option<String> {
     }
 }
 
+/// Best-effort namespace path for a C# source file, derived from its
+/// *directory* relative to the indexed root (e.g. `app/util/Helper.cs`
+/// -> `app.util`) — `using` targets a namespace, not a specific file, so
+/// (like `go_module_path`) this is keyed one level up from the file
+/// itself. Nothing in C#/.NET enforces "namespace mirrors folder path"
+/// the way Maven/Gradle or `go.mod` do for Java/Kotlin/Go, so this is
+/// noisier by construction: a project that doesn't follow the
+/// convention (or nests a deeper `namespace` declaration than its folder
+/// depth) won't resolve correctly. Multiple files in one directory share
+/// one resolved key, same "last-processed file wins" limitation already
+/// accepted for Go.
+pub fn csharp_namespace_path(file: &Path, root: &Path) -> Option<String> {
+    let dir = file.parent()?;
+    let rel = dir.strip_prefix(root).unwrap_or(dir);
+    let segments: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join("."))
+    }
+}
+
 /// Resolve an import path string against a module index by progressively
 /// stripping trailing segments (so importing a specific item from a
 /// module still resolves to that module's file).

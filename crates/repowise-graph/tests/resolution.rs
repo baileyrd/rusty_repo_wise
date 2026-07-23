@@ -302,3 +302,38 @@ fn resolves_cpp_quote_includes_but_not_angle_includes() {
     // must count as unresolved rather than silently dropped.
     assert!(graph.unresolved_imports >= 1);
 }
+
+#[test]
+fn resolves_csharp_usings_via_folder_to_namespace_heuristic() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("App/Util")).unwrap();
+    fs::write(
+        root.join("App/Util/Helper.cs"),
+        "namespace App.Util {\n  public class Helper {\n    public static int Compute(int x) {\n      return x + 1;\n    }\n  }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("Main.cs"),
+        "using App.Util;\n\nclass Program {\n  int Run() {\n    return Helper.Compute(1);\n  }\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_cs = find_file(&index, "Main.cs").path.clone();
+    let helper_cs = find_file(&index, "App/Util/Helper.cs").path.clone();
+
+    // `using App.Util;` resolves via the folder-path-mirrors-namespace
+    // heuristic, not a repo-root-relative file path.
+    let deps = graph.dependencies_of(&main_cs);
+    assert!(
+        deps.contains(&helper_cs),
+        "expected Main.cs to depend on App/Util/Helper.cs, got {deps:?}"
+    );
+
+    let matches = graph.search("Compute");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_cs);
+}

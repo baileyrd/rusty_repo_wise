@@ -6,6 +6,30 @@ repo routing work through PRs).
 
 ---
 
+## PR #139 — Abstract health-scoring penalty weights via HealthWeights
+**2026-07-23** · [#139](https://github.com/baileyrd/rusty_repo_wise/pull/139) · part of [#62](https://github.com/baileyrd/rusty_repo_wise/issues/62)
+
+- **Added:** `repowise_health::HealthWeights`, a precursor abstraction
+  for #62's ML-calibrated health-score weights. `Default` matches this
+  crate's original hand-picked penalties exactly, so every existing
+  caller (`repowise health`/`docs`/`dashboard`, the MCP server) sees no
+  behavior change.
+- `HealthWeights::from_toml_str()` parses a (possibly partial) TOML
+  document; an omitted key falls back to its documented default, so a
+  custom weights file only needs to name the penalties it wants to
+  change.
+- New `analyze_with_weights(index, graph, weights)` is the customizable
+  entry point; `analyze(index, graph)` stays exactly as before,
+  delegating to it with `HealthWeights::default()`.
+- New `repowise health --weights <FILE>` CLI flag — the first real
+  consumer of the abstraction.
+- **Scope:** this is plumbing, not calibration itself. A real
+  calibrated weight set still needs a labeled defect corpus and a
+  training pipeline this port doesn't have — that sourcing question
+  remains open. This PR does not close #62.
+
+---
+
 ## PR #137 — Add opt-in LLM-written wiki summaries via repowise-llm
 **2026-07-23** · [#137](https://github.com/baileyrd/rusty_repo_wise/pull/137) · part of [#61](https://github.com/baileyrd/rusty_repo_wise/issues/61)
 

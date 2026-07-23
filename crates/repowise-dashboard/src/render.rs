@@ -1,4 +1,5 @@
 use repowise_adr::DecisionRecord;
+use repowise_core::RepoIndex;
 use repowise_git::Hotspot;
 use repowise_graph::Overview;
 use repowise_health::HealthReport;
@@ -41,6 +42,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 /// text otherwise.
 pub fn render(
     root: &Path,
+    index: &RepoIndex,
     overview: &Overview,
     health: &HealthReport,
     hotspots: Option<&[Hotspot]>,
@@ -53,13 +55,14 @@ pub fn render(
          <title>repowise dashboard</title>\n<style>{STYLE}</style>\n</head>\n<body>\n\
          <h1>repowise dashboard</h1>\n\
          <p class=\"subtitle\">{}</p>\n\
-         {}\n{}\n{}\n{}\n\
+         {}\n{}\n{}\n{}\n{}\n\
          </body>\n</html>\n",
         escape(&root.display().to_string()),
         overview_section(overview, root, wiki_pages),
         health_section(health, root, wiki_pages),
         hotspots_section(hotspots, root, wiki_pages),
         decisions_section(decisions),
+        symbols_section(index, root, wiki_pages),
     )
 }
 
@@ -247,6 +250,65 @@ fn decisions_section(decisions: &[DecisionRecord]) -> String {
     out
 }
 
+/// All indexed symbols across every file, with a small embedded-JS kind
+/// filter over the already-rendered table (no external requests, no
+/// build step -- the whole table is embedded once, the dropdown just
+/// toggles row visibility client-side).
+fn symbols_section(index: &RepoIndex, root: &Path, wiki_pages: &HashSet<PathBuf>) -> String {
+    let mut out = String::from("<h2>Symbols</h2>\n");
+    let symbols: Vec<_> = index.files.iter().flat_map(|f| &f.symbols).collect();
+    if symbols.is_empty() {
+        out.push_str("<p class=\"empty\">No symbols indexed.</p>\n");
+        return out;
+    }
+
+    let mut sorted = symbols.clone();
+    sorted.sort_by(|a, b| a.file.cmp(&b.file).then(a.start_line.cmp(&b.start_line)));
+
+    let mut kinds: Vec<&'static str> = symbols.iter().map(|s| s.kind.label()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+
+    out.push_str(&format!("<p>{} symbol(s).</p>\n", sorted.len()));
+    out.push_str(
+        "<label for=\"symbol-kind-filter\">Filter by kind: </label>\
+         <select id=\"symbol-kind-filter\"><option value=\"\">All</option>\n",
+    );
+    for kind in &kinds {
+        out.push_str(&format!("<option value=\"{kind}\">{kind}</option>\n"));
+    }
+    out.push_str("</select>\n");
+
+    out.push_str(
+        "<table id=\"symbols-table\"><thead><tr><th>Name</th><th>Kind</th>\
+         <th>File</th><th class=\"num\">Line</th></tr></thead><tbody>\n",
+    );
+    for sym in &sorted {
+        out.push_str(&format!(
+            "<tr data-kind=\"{}\"><td class=\"mono\">{}</td><td>{}</td>\
+             <td class=\"mono\">{}</td><td class=\"num\">{}</td></tr>\n",
+            sym.kind.label(),
+            escape(&sym.name),
+            sym.kind.label(),
+            file_cell(&sym.file, root, wiki_pages),
+            sym.start_line
+        ));
+    }
+    out.push_str("</tbody></table>\n");
+
+    out.push_str(
+        "<script>\n\
+         document.getElementById('symbol-kind-filter').addEventListener('change', function (e) {\n\
+         \x20\x20var kind = e.target.value;\n\
+         \x20\x20document.querySelectorAll('#symbols-table tbody tr').forEach(function (row) {\n\
+         \x20\x20\x20\x20row.style.display = (!kind || row.dataset.kind === kind) ? '' : 'none';\n\
+         \x20\x20});\n\
+         });\n\
+         </script>\n",
+    );
+    out
+}
+
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -258,8 +320,17 @@ fn escape(s: &str) -> String {
 mod tests {
     use super::*;
     use repowise_adr::DecisionSource;
+    use repowise_core::{FileRecord, Language, Symbol, SymbolKind};
     use repowise_health::FindingKind;
     use std::path::PathBuf;
+
+    fn empty_index(root: &Path) -> RepoIndex {
+        RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![],
+            other_files: 0,
+        }
+    }
 
     #[test]
     fn escapes_untrusted_text() {
@@ -300,7 +371,16 @@ mod tests {
             average_score: 6.5,
         };
 
-        let html = render(&root, &overview, &health, None, &[], &HashSet::new());
+        let index = empty_index(&root);
+        let html = render(
+            &root,
+            &index,
+            &overview,
+            &health,
+            None,
+            &[],
+            &HashSet::new(),
+        );
 
         // Relative paths, not absolute.
         assert!(html.contains(">core.rs<"));
@@ -358,8 +438,10 @@ mod tests {
             linked_files: vec![root.join("hot.rs")],
         }];
 
+        let index = empty_index(&root);
         let html = render(
             &root,
+            &index,
             &overview,
             &health,
             Some(&hotspots),
@@ -395,11 +477,95 @@ mod tests {
         let mut wiki_pages = HashSet::new();
         wiki_pages.insert(root.join("has_wiki.rs"));
 
-        let html = render(&root, &overview, &health, None, &[], &wiki_pages);
+        let index = empty_index(&root);
+        let html = render(&root, &index, &overview, &health, None, &[], &wiki_pages);
 
         assert!(html.contains("<a href=\"../wiki/has_wiki.rs.md\">has_wiki.rs</a>"));
         // No wiki page for this one -- plain text, not a broken link.
         assert!(html.contains(">no_wiki.rs<"));
         assert!(!html.contains("../wiki/no_wiki.rs"));
+    }
+
+    #[test]
+    fn renders_a_symbols_table_with_a_kind_filter_and_links_files_with_wiki_pages() {
+        let root = PathBuf::from("/repo");
+        let overview = Overview {
+            file_count: 1,
+            other_file_count: 0,
+            by_language: vec![],
+            symbol_counts: vec![],
+            total_lines: 5,
+            import_edges: 0,
+            call_edges: 0,
+            unresolved_imports: 0,
+            unresolved_calls: 0,
+            most_depended_on: vec![],
+        };
+        let health = repowise_health::HealthReport {
+            file_scores: vec![],
+            findings: vec![],
+            average_score: 10.0,
+        };
+        let file = root.join("lib.rs");
+        let index = RepoIndex {
+            root: root.clone(),
+            files: vec![FileRecord {
+                path: file.clone(),
+                language: Language::Rust,
+                lines: 10,
+                symbols: vec![
+                    Symbol {
+                        id: "lib.rs::helper::1".to_string(),
+                        name: "helper".to_string(),
+                        kind: SymbolKind::Function,
+                        file: file.clone(),
+                        start_line: 1,
+                        end_line: 3,
+                        parent: None,
+                        complexity: 1,
+                        max_nesting_depth: 0,
+                        bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
+                        param_count: 0,
+                        primitive_param_count: 0,
+                        body_hash: None,
+                    },
+                    Symbol {
+                        id: "lib.rs::Widget::5".to_string(),
+                        name: "Widget".to_string(),
+                        kind: SymbolKind::Struct,
+                        file: file.clone(),
+                        start_line: 5,
+                        end_line: 8,
+                        parent: None,
+                        complexity: 0,
+                        max_nesting_depth: 0,
+                        bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
+                        param_count: 0,
+                        primitive_param_count: 0,
+                        body_hash: None,
+                    },
+                ],
+                imports: vec![],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        let mut wiki_pages = HashSet::new();
+        wiki_pages.insert(file.clone());
+
+        let html = render(&root, &index, &overview, &health, None, &[], &wiki_pages);
+
+        assert!(html.contains("id=\"symbol-kind-filter\""));
+        assert!(html.contains("<option value=\"function\">function</option>"));
+        assert!(html.contains("<option value=\"struct\">struct</option>"));
+        assert!(html.contains("data-kind=\"function\""));
+        assert!(html.contains("data-kind=\"struct\""));
+        assert!(html.contains(">helper<"));
+        assert!(html.contains(">Widget<"));
+        // File cell for the symbol's file links to its wiki page.
+        assert!(html.contains("<a href=\"../wiki/lib.rs.md\">lib.rs</a>"));
     }
 }

@@ -52,6 +52,7 @@ pub fn generate(root: &Path) -> anyhow::Result<PathBuf> {
 
     let html = render::render(
         root,
+        &index,
         &overview,
         &health,
         hotspots.as_deref(),

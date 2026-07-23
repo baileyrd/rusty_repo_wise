@@ -45,6 +45,11 @@ fn writes_a_dashboard_covering_overview_and_health() {
     assert!(html.contains(">function</td><td class=\"num\">1<"));
     assert!(html.contains("No git history found"));
     assert!(html.contains("No decisions found"));
+    // Symbols index section: the indexed function shows up in the table
+    // with a working kind filter.
+    assert!(html.contains("id=\"symbol-kind-filter\""));
+    assert!(html.contains(">helper<"));
+    assert!(html.contains("data-kind=\"function\""));
 }
 
 #[test]

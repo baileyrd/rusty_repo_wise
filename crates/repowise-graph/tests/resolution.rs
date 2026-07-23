@@ -115,3 +115,43 @@ fn resolves_rust_module_imports_across_files() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, foo_rs);
 }
+
+#[test]
+fn resolves_typescript_relative_imports_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/utils.ts"),
+        "export function helper(x: number): number {\n  return x + 1;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.ts"),
+        "import { helper } from \"./utils\";\nimport \"left-pad\";\n\nexport function run(): number {\n  return helper(1);\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_ts = find_file(&index, "main.ts").path.clone();
+    let utils_ts = find_file(&index, "utils.ts").path.clone();
+
+    // The extensionless relative import is resolved directly at parse
+    // time (see `resolve_relative_import` in `repowise-parser`), same as
+    // Rust's `mod foo;`.
+    let deps = graph.dependencies_of(&main_ts);
+    assert!(
+        deps.contains(&utils_ts),
+        "expected main.ts to depend on utils.ts, got {deps:?}"
+    );
+
+    // A bare (npm-package) specifier has no `node_modules` to resolve
+    // against, so it must count as unresolved rather than silently drop.
+    assert!(graph.unresolved_imports >= 1);
+
+    let matches = graph.search("helper");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, utils_ts);
+}

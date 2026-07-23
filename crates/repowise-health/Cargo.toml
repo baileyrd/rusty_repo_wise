@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 repowise-core = { path = "../repowise-core" }
 repowise-graph = { path = "../repowise-graph" }
+
+[dev-dependencies]
+tempfile = "3"

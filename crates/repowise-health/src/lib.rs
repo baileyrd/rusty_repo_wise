@@ -3,20 +3,28 @@
 //! This implements a focused subset of repowise's "25 deterministic
 //! markers": long functions, high cyclomatic complexity, oversized
 //! parameter lists, god classes (too many methods), duplicate code
-//! (identical function/method bodies), possibly-dead code (zero
-//! resolved callers), and low cohesion (LCOM4 — see the `lcom4` module
-//! doc comment for its Rust/Python/TS+JS-only scope). Git-history-based
-//! markers (churn, hotspots, bug-fix history) aren't implemented yet —
-//! that needs the git-analytics layer, which is a separate phase.
+//! (identical function/method bodies), near-duplicate code (Rabin-Karp
+//! rolling-hash overlap — see the `near_duplicate` module doc comment),
+//! possibly-dead code (zero resolved callers), and low cohesion (LCOM4 —
+//! see the `lcom4` module doc comment for its Rust/Python/TS+JS-only
+//! scope). Git-history-based markers (churn, hotspots, bug-fix history)
+//! aren't implemented yet — that needs the git-analytics layer, which is
+//! a separate phase.
 //!
 //! Every marker here is a plain threshold over data `repowise-parser`/
 //! `repowise-graph` already computed; nothing is inferred or guessed.
+//! The one exception is `near_duplicate`, which re-reads source text
+//! fresh from disk since `Symbol` doesn't carry raw body text — see its
+//! own module doc comment for why that's still consistent with this
+//! crate's usual "no I/O" shape rather than a quiet exception to it.
 
 mod dead_code;
 mod lcom4;
+mod near_duplicate;
 
 pub use dead_code::{find_dead_code, DeadCodeCandidate, DeadCodeConfidence};
 pub use lcom4::{find_low_cohesion, LowCohesionCandidate, LOW_COHESION_MIN_COMPONENTS};
+pub use near_duplicate::{find_near_duplicates, NearDuplicateCandidate};
 
 use repowise_core::{Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
@@ -39,6 +47,9 @@ const PENALTY_GOD_CLASS: f64 = 1.5;
 const PENALTY_DUPLICATE: f64 = 0.5;
 const PENALTY_DEAD_CODE: f64 = 0.2;
 const PENALTY_LOW_COHESION: f64 = 1.0;
+// Weaker signal than an exact-hash `DuplicateCode` match (a heuristic
+// overlap ratio, not a byte-for-byte match), so it's penalized less.
+const PENALTY_NEAR_DUPLICATE: f64 = 0.3;
 
 const MAX_SCORE: f64 = 10.0;
 
@@ -49,6 +60,7 @@ pub enum FindingKind {
     TooManyParameters,
     GodClass,
     DuplicateCode,
+    NearDuplicateCode,
     PossiblyDeadCode,
     LowCohesion,
 }
@@ -61,6 +73,7 @@ impl FindingKind {
             FindingKind::TooManyParameters => "too-many-params",
             FindingKind::GodClass => "god-class",
             FindingKind::DuplicateCode => "duplicate-code",
+            FindingKind::NearDuplicateCode => "near-duplicate-code",
             FindingKind::PossiblyDeadCode => "possibly-dead-code",
             FindingKind::LowCohesion => "low-cohesion",
         }
@@ -73,6 +86,7 @@ impl FindingKind {
             FindingKind::TooManyParameters => PENALTY_TOO_MANY_PARAMS,
             FindingKind::GodClass => PENALTY_GOD_CLASS,
             FindingKind::DuplicateCode => PENALTY_DUPLICATE,
+            FindingKind::NearDuplicateCode => PENALTY_NEAR_DUPLICATE,
             FindingKind::PossiblyDeadCode => PENALTY_DEAD_CODE,
             FindingKind::LowCohesion => PENALTY_LOW_COHESION,
         }
@@ -136,6 +150,7 @@ pub fn analyze(index: &RepoIndex, graph: &RepoGraph) -> HealthReport {
 
     check_god_classes(index, &mut findings);
     check_duplicate_code(index, &mut findings);
+    check_near_duplicate_code(index, &mut findings);
     check_low_cohesion(index, &mut findings);
 
     let file_scores = score_files(index, &findings);
@@ -266,6 +281,24 @@ fn check_duplicate_code(index: &RepoIndex, findings: &mut Vec<Finding>) {
                 detail: format!("body identical to: {}", others.join(", ")),
             });
         }
+    }
+}
+
+fn check_near_duplicate_code(index: &RepoIndex, findings: &mut Vec<Finding>) {
+    for candidate in near_duplicate::find_near_duplicates(index) {
+        findings.push(Finding {
+            file: candidate.file,
+            symbol: Some(candidate.symbol),
+            line: Some(candidate.line),
+            kind: FindingKind::NearDuplicateCode,
+            detail: format!(
+                "~{:.0}% textually similar to `{}` in {} (not identical -- \
+                 see 'duplicate code' for exact matches)",
+                candidate.overlap_ratio * 100.0,
+                candidate.other_symbol,
+                candidate.other_file.display()
+            ),
+        });
     }
 }
 

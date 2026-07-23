@@ -69,18 +69,24 @@ impl RepoGraph {
                         python_modules.insert(mp, file.path.clone());
                     }
                 }
-                Language::Other => {}
+                // TypeScript/JavaScript relative imports are resolved
+                // directly at parse time (see `resolve_relative_import` in
+                // `repowise-parser`), so there's no module-path index to
+                // build here, unlike Rust/Python's dotted/`::` paths.
+                Language::TypeScript | Language::JavaScript | Language::Other => {}
             }
         }
 
         let mut unresolved_imports = 0usize;
         let mut unresolved_calls = 0usize;
+        let no_modules = HashMap::new();
 
         for file in &index.files {
             let from = file_index[&file.path];
             let (sep, map): (&str, &HashMap<String, PathBuf>) = match file.language {
                 Language::Rust => ("::", &rust_modules),
                 Language::Python => (".", &python_modules),
+                Language::TypeScript | Language::JavaScript => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

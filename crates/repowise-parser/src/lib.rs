@@ -5,6 +5,7 @@
 //! the same spirit as repowise's own tree-sitter-driven approach, but with
 //! none of the semantic-analysis machinery a real compiler front-end has.
 
+mod javascript;
 mod metrics;
 mod python;
 mod rust;
@@ -22,6 +23,8 @@ pub fn parse_file(
     match language {
         Language::Rust => Ok(Some(rust::extract(path, source)?)),
         Language::Python => Ok(Some(python::extract(path, source)?)),
+        Language::TypeScript => Ok(Some(javascript::extract_typescript(path, source)?)),
+        Language::JavaScript => Ok(Some(javascript::extract_javascript(path, source)?)),
         Language::Other => Ok(None),
     }
 }

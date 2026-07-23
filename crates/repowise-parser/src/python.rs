@@ -6,7 +6,7 @@ use tree_sitter::{Node, Parser};
 
 pub fn extract(path: &Path, source: &str) -> anyhow::Result<FileRecord> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_python::language())?;
+    parser.set_language(&tree_sitter_python::LANGUAGE.into())?;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse {}", path.display()))?;

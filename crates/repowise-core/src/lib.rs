@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 pub enum Language {
     Rust,
     Python,
+    TypeScript,
+    JavaScript,
     Other,
 }
 
@@ -24,6 +26,8 @@ impl Language {
         match ext {
             "rs" => Language::Rust,
             "py" | "pyi" => Language::Python,
+            "ts" | "tsx" => Language::TypeScript,
+            "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
             _ => Language::Other,
         }
     }
@@ -32,6 +36,8 @@ impl Language {
         match self {
             Language::Rust => "Rust",
             Language::Python => "Python",
+            Language::TypeScript => "TypeScript",
+            Language::JavaScript => "JavaScript",
             Language::Other => "Other",
         }
     }

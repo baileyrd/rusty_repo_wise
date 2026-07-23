@@ -95,6 +95,16 @@ impl<'a> Walker<'a> {
                             })
                         })
                         .unwrap_or(0);
+                    let complex_conditionals = body
+                        .map(|b| {
+                            metrics::complex_conditionals(
+                                b,
+                                condition_of,
+                                is_boolean_operator,
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -108,6 +118,7 @@ impl<'a> Walker<'a> {
                         complexity,
                         max_nesting_depth,
                         bumpy_road_bumps,
+                        complex_conditionals,
                         param_count,
                         body_hash,
                     });
@@ -133,6 +144,7 @@ impl<'a> Walker<'a> {
                         complexity: 0,
                         max_nesting_depth: 0,
                         bumpy_road_bumps: 0,
+                        complex_conditionals: Vec::new(),
                         param_count: 0,
                         body_hash: None,
                     });
@@ -285,6 +297,21 @@ fn is_decision(n: Node) -> bool {
     )
 }
 
+/// A short-circuiting `and`/`or` -- a separate helper from `is_decision`
+/// since `complex_conditionals` counts these within one condition's own
+/// subtree, not decision points across the whole function body.
+fn is_boolean_operator(n: Node) -> bool {
+    n.kind() == "boolean_operator"
+}
+
+/// The condition sub-expression of an `if`/`elif`/`while`.
+fn condition_of(n: Node) -> Option<Node> {
+    match n.kind() {
+        "if_statement" | "elif_clause" | "while_statement" => n.child_by_field_name("condition"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +422,19 @@ mod tests {
         assert_eq!(scattered.max_nesting_depth, single_deep.max_nesting_depth);
         assert_eq!(scattered.bumpy_road_bumps, 3);
         assert_eq!(single_deep.bumpy_road_bumps, 1);
+    }
+
+    #[test]
+    fn flags_conditions_chaining_three_or_more_boolean_operators() {
+        let rec = extract_str(
+            "def tangled(a, b, c, d):\n    if a and b and c and d:\n        return 1\n    return 0\n\ndef simple(a, b):\n    if a and b:\n        return 1\n    return 0\n",
+        );
+        let tangled = rec.symbols.iter().find(|s| s.name == "tangled").unwrap();
+        let simple = rec.symbols.iter().find(|s| s.name == "simple").unwrap();
+
+        assert_eq!(tangled.complex_conditionals.len(), 1);
+        assert_eq!(tangled.complex_conditionals[0].operator_count, 3);
+        assert!(simple.complex_conditionals.is_empty());
     }
 
     #[test]

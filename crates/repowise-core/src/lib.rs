@@ -156,6 +156,21 @@ pub struct Symbol {
     /// best-effort duplicate-code detection. `None` when there's no body
     /// or the body is too short to be a meaningful duplicate signal.
     pub body_hash: Option<u64>,
+    /// `if`/`while`/etc. conditions within the body chaining more than a
+    /// documented threshold of boolean operators (`&&`/`||` and language
+    /// equivalents). Empty for symbols with no body, and for languages
+    /// this extraction isn't implemented for yet (see each language's
+    /// own extraction logic in `repowise-parser`).
+    pub complex_conditionals: Vec<ComplexConditionalRef>,
+}
+
+/// A single flagged `if`/`while`/etc. condition: `line` points at the
+/// condition itself, not the enclosing function, so `get_why`/dashboard/
+/// wiki consumers can jump straight to the hard-to-read expression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplexConditionalRef {
+    pub line: usize,
+    pub operator_count: usize,
 }
 
 impl Symbol {

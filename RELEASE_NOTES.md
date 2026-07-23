@@ -6,6 +6,57 @@ repo routing work through PRs).
 
 ---
 
+## PR #121 — Add dry_violation near-duplicate code health marker
+**2026-07-23** · [#121](https://github.com/baileyrd/rusty_repo_wise/pull/121) · closes [#52](https://github.com/baileyrd/rusty_repo_wise/issues/52)
+
+- **Added:** `dry_violation`, a near-duplicate-code detector catching
+  *partial* duplicates that the existing exact-body-hash `Duplicate
+  code` marker misses entirely — a function that's mostly identical to
+  another with a few renamed variables or a tweaked constant, where even
+  one differing character breaks a hash match. New
+  `repowise-health::near_duplicate` module, new
+  `FindingKind::NearDuplicateCode` (penalty −0.3, lighter than
+  `DuplicateCode`'s −0.5 since it's a heuristic overlap ratio rather
+  than a byte-for-byte match).
+- **Tokenized, not raw-character, Rabin-Karp windows.** Each candidate
+  symbol's source is tokenized (identifier/number runs plus
+  single-character punctuation) before windowing, rather than sliding a
+  window over raw normalized characters — an identifier rename changes
+  *length* (`total` -> `sum`), which would shift every subsequent
+  character position and misalign every raw-character window from that
+  point on even though the code is otherwise identical. A token-level
+  window only invalidates the windows actually containing the renamed
+  token. Verified this empirically against a realistic renamed-variable
+  fixture before landing on a 3-token window and a 50% overlap
+  threshold — an earlier 40-character/60%-overlap attempt scored a
+  genuine near-duplicate pair at 0% overlap due to exactly this
+  misalignment problem.
+- **Rabin-Karp bucketing, not brute-force all-pairs comparison:** two
+  symbols only become a "candidate pair" once they share at least one
+  window hash; pairs with nothing in common are never compared at all.
+  Candidate pairs are then scored by shared-window-count ÷ the smaller
+  symbol's window count.
+- **Explicitly excludes pairs already caught by `DuplicateCode`**
+  (identical `body_hash`) so a pair is never reported under both finding
+  kinds at once — the two answer different questions ("identical" vs
+  "mostly the same").
+- **Architectural note:** this is the first marker in `repowise-health`
+  that isn't a pure function of already-computed `RepoIndex`/`RepoGraph`
+  data — `Symbol` doesn't carry raw body text, so it re-reads each
+  candidate symbol's file fresh from disk, the same tradeoff
+  `repowise-mcp::get_symbol` and the ADR code-comment/inline-marker
+  sources already make elsewhere in this workspace. A file moved or
+  deleted since indexing degrades that file's contribution to empty
+  rather than failing the whole scan.
+- 5 new tests (a genuinely near-duplicate pair with a renamed
+  accumulator variable and a tweaked constant is flagged; genuinely
+  different functions aren't; a pair already caught by the exact-hash
+  marker is excluded; symbols too short to have a `body_hash` are
+  skipped; a file missing from disk degrades gracefully), 194 tests
+  passing workspace-wide (up from 189). Next up per the loop is issue
+  #53 (`nested_complexity` — max nesting depth), the third of six filed
+  health-marker issues.
+
 ## PR #119 — Add LCOM4 low_cohesion health marker (Rust/Python/TS+JS)
 **2026-07-23** · [#119](https://github.com/baileyrd/rusty_repo_wise/pull/119) · closes [#51](https://github.com/baileyrd/rusty_repo_wise/issues/51)
 

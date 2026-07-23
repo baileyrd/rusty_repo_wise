@@ -6,6 +6,49 @@ repo routing work through PRs).
 
 ---
 
+## PR #97 — Add shell (sh/bash/zsh) language support
+**2026-07-23** · [#97](https://github.com/baileyrd/rusty_repo_wise/pull/97) · closes [#40](https://github.com/baileyrd/rusty_repo_wise/issues/40)
+
+- **Added:** a `repowise-parser` extractor for shell scripts, deliberately
+  narrower in scope than every prior language per repowise's own
+  documented tiering: functions only (shell has no classes/structs).
+  `source`/`.` with a plain relative path resolves directly against the
+  including script's own directory, same as C/C++/Ruby/Dart. The common
+  `SCRIPT_DIR="$(dirname "$0")"` / `source "$SCRIPT_DIR/helper.sh"`
+  idiom is explicitly recognized — since `$SCRIPT_DIR` is, by that
+  idiom's own convention, the script's own directory, the remaining
+  path suffix resolves the same way a plain relative `source` would.
+  Any other expansion in the path (`$HOME`, `$(cmd)`, a differently-
+  named variable) has no static value to resolve, so it's recorded but
+  left unresolved. Every bareword command invocation is recorded as a
+  call (indistinguishable, syntactically, from a call to an external
+  program or builtin) — unresolvable ones are naturally filtered out by
+  the existing name-index-based resolution.
+- **`repowise-health`: shell is exempt from dead-code detection.** Per
+  this issue's own acceptance criteria and repowise's documented
+  shell-tier scope, shell functions are now unconditionally exempt from
+  the possibly-dead-code marker (a new `skip_dead_code` parameter
+  threaded through `check_function_markers`, keyed on
+  `Language::Shell`) — a shell function is routinely invoked only from
+  the command line, another script, or a cron job, none of which this
+  port's call graph can see, making the signal too unreliable to report
+  for this language. All other markers (long-function, high-complexity,
+  too-many-params, duplicate-code) still apply to shell the same as
+  everywhere else — confirmed both by a dedicated unit test and live
+  through the CLI against a hand-built fixture with an intentionally
+  uncalled function.
+- 5 new `repowise-parser` unit tests, 1 new `repowise-graph` end-to-end
+  test proving the `SCRIPT_DIR` idiom resolves, and 1 new
+  `repowise-health` test proving the dead-code exemption; 118 tests
+  passing workspace-wide. Thirteenth language merged out of this
+  session's `parity-loop` gap-analysis pass (after TypeScript/JavaScript
+  in #26, Java in #75, Kotlin in #77, Go in #79, C++ in #81, C# in #83,
+  Scala in #85, Ruby in #87, C in #89, Swift in #91, PHP in #93, and
+  Dart in #95) — this was the last of the filed B1 language-support
+  issues; next up per the loop is whichever non-language `parity-gap`
+  issue is oldest and unblocked (MCP tools, ADR sources, health markers,
+  dashboard, or git analytics).
+
 ## PR #95 — Add Dart language support
 **2026-07-23** · [#95](https://github.com/baileyrd/rusty_repo_wise/pull/95) · closes [#39](https://github.com/baileyrd/rusty_repo_wise/issues/39)
 

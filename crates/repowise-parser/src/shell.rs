@@ -88,6 +88,15 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or(0);
+                    let bumpy_road_bumps = body
+                        .map(|b| {
+                            metrics::bumpy_road_bumps(
+                                b,
+                                |n| is_decision(n, self.source),
+                                is_nested_function,
+                            )
+                        })
+                        .unwrap_or(0);
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
                         id: id.clone(),
@@ -99,6 +108,7 @@ impl<'a> Walker<'a> {
                         parent: None,
                         complexity,
                         max_nesting_depth,
+                        bumpy_road_bumps,
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

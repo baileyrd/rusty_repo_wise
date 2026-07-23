@@ -1,6 +1,7 @@
 //! Language-agnostic per-symbol metrics computed directly from the AST:
-//! cyclomatic complexity, parameter count, and a duplicate-code body hash.
-//! These feed `repowise-health`'s deterministic scoring.
+//! cyclomatic complexity, max nesting depth, a "bumpy road" nested-block
+//! count, parameter count, and a duplicate-code body hash. These feed
+//! `repowise-health`'s deterministic scoring.
 
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -72,6 +73,69 @@ pub fn max_nesting_depth(
         max_depth
     }
     walk(body, 0, &is_decision, &is_nested_function)
+}
+
+/// Minimum nesting depth (see `max_nesting_depth`) a decision node must
+/// reach to count as a "bump" in `bumpy_road_bumps` — a depth-1 (i.e.
+/// un-nested) `if`/`for`/etc. is just ordinary branching, already
+/// captured by `cyclomatic_complexity`; a bump specifically means a
+/// block nested *inside* another one.
+const BUMP_MIN_DEPTH: usize = 2;
+
+/// "Bumpy Road" count: the number of distinct nested-block regions at
+/// or beyond `BUMP_MIN_DEPTH` within `body`. Complements
+/// `max_nesting_depth` (which only reports the single deepest point):
+/// a function with three separate two-level-deep `if`s reads worse than
+/// one with a single two-level-deep `if`, even though both have the same
+/// max nesting depth — `max_nesting_depth` alone can't tell them apart,
+/// but this can.
+///
+/// Counting rule: only *leaf* decision nodes count — a decision node
+/// with no further decision node nested inside it (before hitting an
+/// `is_nested_function` boundary). A linear chain (`if` containing
+/// `if` containing `if`) has exactly one leaf (the innermost `if`) and
+/// so counts as a single bump, not three — it's one deep block, not
+/// several scattered ones. Three separate sibling `if`s, each with one
+/// level of nesting inside, have three leaves and count as three bumps.
+/// This is computed in one post-order pass: `walk` returns whether the
+/// subtree it just visited contained any decision node at all, which is
+/// exactly "does this decision node have further nesting inside it".
+pub fn bumpy_road_bumps(
+    body: Node,
+    is_decision: impl Fn(Node) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> usize {
+    fn walk(
+        node: Node,
+        depth: usize,
+        is_decision: &dyn Fn(Node) -> bool,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        bumps: &mut usize,
+    ) -> bool {
+        let mut subtree_has_decision = false;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            if is_decision(child) {
+                subtree_has_decision = true;
+                let child_depth = depth + 1;
+                let child_has_nested =
+                    walk(child, child_depth, is_decision, is_nested_function, bumps);
+                if !child_has_nested && child_depth >= BUMP_MIN_DEPTH {
+                    *bumps += 1;
+                }
+            } else {
+                let child_has_decision = walk(child, depth, is_decision, is_nested_function, bumps);
+                subtree_has_decision |= child_has_decision;
+            }
+        }
+        subtree_has_decision
+    }
+    let mut bumps = 0;
+    walk(body, 0, &is_decision, &is_nested_function, &mut bumps);
+    bumps
 }
 
 /// Best-effort parameter count: the number of named children of a

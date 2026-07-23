@@ -142,6 +142,13 @@ pub struct Symbol {
     /// same 10 ifs nested inside each other score identically on
     /// cyclomatic complexity but read very differently.
     pub max_nesting_depth: usize,
+    /// "Bumpy Road" count: number of distinct nested-block regions
+    /// (leaf decision nodes nested >= 2 levels deep) within the body.
+    /// `0` for symbols with no body to analyze, same as `complexity`.
+    /// Complements `max_nesting_depth`: a function with three separate
+    /// two-level-deep blocks reads worse than one with a single
+    /// two-level-deep block, even at the same max nesting depth.
+    pub bumpy_road_bumps: usize,
     /// Number of declared parameters. `0` for symbols without a
     /// parameter list.
     pub param_count: usize,

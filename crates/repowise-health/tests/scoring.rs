@@ -6,8 +6,8 @@
 use repowise_core::{CallRef, FileRecord, Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
 use repowise_health::{
-    analyze, FindingKind, GOD_CLASS_METHODS, HIGH_COMPLEXITY, HIGH_NESTING_DEPTH,
-    LONG_FUNCTION_LINES, TOO_MANY_PARAMS,
+    analyze, FindingKind, BUMPY_ROAD_MIN_BUMPS, GOD_CLASS_METHODS, HIGH_COMPLEXITY,
+    HIGH_NESTING_DEPTH, LONG_FUNCTION_LINES, TOO_MANY_PARAMS,
 };
 use std::path::{Path, PathBuf};
 
@@ -34,6 +34,7 @@ fn symbol(
         parent: parent.map(str::to_string),
         complexity,
         max_nesting_depth: 0,
+        bumpy_road_bumps: 0,
         param_count,
         body_hash,
     }
@@ -157,6 +158,48 @@ fn flags_deeply_nested_functions_but_not_shallow_ones() {
     );
     // At the threshold, not above it -- not flagged.
     assert!(findings_for(&report, "shallow", FindingKind::NestedComplexity).is_empty());
+}
+
+#[test]
+fn flags_bumpy_functions_but_not_ones_below_the_bump_threshold() {
+    let mut bumpy = symbol(
+        "bumpy.rs",
+        "bumpy",
+        SymbolKind::Function,
+        1,
+        20,
+        None,
+        5,
+        1,
+        None,
+    );
+    bumpy.bumpy_road_bumps = BUMPY_ROAD_MIN_BUMPS;
+    let mut smooth = symbol(
+        "bumpy.rs",
+        "smooth",
+        SymbolKind::Function,
+        22,
+        30,
+        None,
+        3,
+        1,
+        None,
+    );
+    smooth.bumpy_road_bumps = BUMPY_ROAD_MIN_BUMPS - 1;
+
+    let idx = index(vec![file_record(
+        "bumpy.rs",
+        vec![bumpy, smooth],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    assert_eq!(
+        findings_for(&report, "bumpy", FindingKind::BumpyRoad).len(),
+        1
+    );
+    assert!(findings_for(&report, "smooth", FindingKind::BumpyRoad).is_empty());
 }
 
 #[test]

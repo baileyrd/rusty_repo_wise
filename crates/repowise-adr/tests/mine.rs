@@ -82,6 +82,7 @@ fn mines_and_links_adrs_and_decision_commits() {
         parent: None,
         complexity: 0,
         max_nesting_depth: 0,
+        bumpy_road_bumps: 0,
         param_count: 0,
         body_hash: None,
     };

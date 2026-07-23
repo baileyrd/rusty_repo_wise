@@ -6,6 +6,30 @@ repo routing work through PRs).
 
 ---
 
+## PR #73 — Add recency-weighted hotspot scoring
+**2026-07-23** · [#73](https://github.com/baileyrd/rusty_repo_wise/pull/73) · closes [#28](https://github.com/baileyrd/rusty_repo_wise/issues/28)
+
+- **Added:** `repowise-git`'s `hotspots()` now ranks files by a
+  recency-weighted variant of churn × complexity — each commit
+  contributes `exp(-age_days / 90)` toward a file's "decayed churn"
+  instead of a flat `1`, so a file touched recently outranks an
+  equally-churny file that's gone quiet. `CommitInfo` gained an
+  author-date timestamp field to support this. The existing raw
+  `score`/`churn` fields are unchanged and still reported (CLI, dashboard)
+  alongside the new `decayed_score`.
+- **Known limitation, stated plainly:** the decay half-life (90 days) is a
+  fixed, documented constant, not configurable — no per-repo tuning.
+  The bug-fix heuristic (message keywords only, no linked-issue-reference
+  signal) remains a separate, still-open gap (issue #60).
+- 1 new test (verifying both the decayed-score values and the resulting
+  rank order — a recently-touched file outranks an equally-churny old
+  one); 45 tests passing workspace-wide. First PR merged out of this
+  session's `parity-loop` gap-analysis pass against the real repowise
+  (45 gap issues filed: #28, #29-40 languages, #41-45 MCP tools, #46-50
+  ADR sources, #51-56 health markers, #57-59 dashboard, #60 git analytics,
+  plus 13 `needs-human` issues for product-direction/design questions
+  outside the loop's auto-implement scope).
+
 ## PR #26 — Add TypeScript/JavaScript language support
 **2026-07-23** · [#26](https://github.com/baileyrd/rusty_repo_wise/pull/26) · closes [#22](https://github.com/baileyrd/rusty_repo_wise/issues/22)
 

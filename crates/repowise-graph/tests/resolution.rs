@@ -194,3 +194,45 @@ fn resolves_java_package_imports_via_maven_source_root() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, helper_java);
 }
+
+#[test]
+fn resolves_kotlin_imports_including_across_a_mixed_java_kotlin_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    // A Java class under the Maven/Gradle Java source root...
+    let java_src_root = root.join("src/main/java/com/example/util");
+    fs::create_dir_all(&java_src_root).unwrap();
+    fs::write(
+        java_src_root.join("Helper.java"),
+        "package com.example.util;\n\npublic class Helper {\n  public static int compute(int x) {\n    return x + 1;\n  }\n}\n",
+    )
+    .unwrap();
+
+    // ...imported from a Kotlin file under the sibling Kotlin source root.
+    let kotlin_src_root = root.join("src/main/kotlin/com/example/app");
+    fs::create_dir_all(&kotlin_src_root).unwrap();
+    fs::write(
+        kotlin_src_root.join("Main.kt"),
+        "package com.example.app\n\nimport com.example.util.Helper\n\nclass Main {\n  fun run(): Int {\n    return Helper.compute(1)\n  }\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_kt = find_file(&index, "Main.kt").path.clone();
+    let helper_java = find_file(&index, "Helper.java").path.clone();
+
+    // Resolved via the shared JVM package-path convention across both
+    // `src/main/java` and `src/main/kotlin` source roots.
+    let deps = graph.dependencies_of(&main_kt);
+    assert!(
+        deps.contains(&helper_java),
+        "expected Main.kt to depend on Helper.java, got {deps:?}"
+    );
+
+    let matches = graph.search("compute");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_java);
+}

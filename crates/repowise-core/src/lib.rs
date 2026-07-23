@@ -19,6 +19,7 @@ pub enum Language {
     TypeScript,
     JavaScript,
     Java,
+    Kotlin,
     Other,
 }
 
@@ -30,6 +31,7 @@ impl Language {
             "ts" | "tsx" => Language::TypeScript,
             "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
             "java" => Language::Java,
+            "kt" | "kts" => Language::Kotlin,
             _ => Language::Other,
         }
     }
@@ -41,6 +43,7 @@ impl Language {
             Language::TypeScript => "TypeScript",
             Language::JavaScript => "JavaScript",
             Language::Java => "Java",
+            Language::Kotlin => "Kotlin",
             Language::Other => "Other",
         }
     }

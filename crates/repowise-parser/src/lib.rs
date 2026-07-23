@@ -7,6 +7,7 @@
 
 mod java;
 mod javascript;
+mod kotlin;
 mod metrics;
 mod python;
 mod rust;
@@ -27,6 +28,7 @@ pub fn parse_file(
         Language::TypeScript => Ok(Some(javascript::extract_typescript(path, source)?)),
         Language::JavaScript => Ok(Some(javascript::extract_javascript(path, source)?)),
         Language::Java => Ok(Some(java::extract(path, source)?)),
+        Language::Kotlin => Ok(Some(kotlin::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

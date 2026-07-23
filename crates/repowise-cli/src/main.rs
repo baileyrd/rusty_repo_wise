@@ -10,9 +10,8 @@ use std::path::{Path, PathBuf};
 /// far: parsing, symbol/import/call extraction, dependency-graph queries,
 /// deterministic code-health scoring, git-history analytics (churn,
 /// hotspots, ownership, co-change coupling), auto-generated per-file
-/// documentation, architectural-decision mining, and an MCP server
-/// exposing a subset of these as agent-facing tools. The web dashboard
-/// from the original project is not yet implemented.
+/// documentation, architectural-decision mining, an MCP server exposing
+/// a subset of these as agent-facing tools, and a static-site dashboard.
 #[derive(Parser)]
 #[command(name = "repowise", version, about)]
 struct Cli {
@@ -102,6 +101,12 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Generate a static HTML dashboard (overview, health, hotspots,
+    /// decisions) under `.repowise/dashboard/index.html`.
+    Dashboard {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -119,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         Command::Docs { path } => cmd_docs(&path),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
         Command::Serve { path } => cmd_serve(&path),
+        Command::Dashboard { path } => cmd_dashboard(&path),
     }
 }
 
@@ -441,6 +447,13 @@ fn cmd_serve(path: &Path) -> anyhow::Result<()> {
     // async runtime, so build one here rather than making `main` async.
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(repowise_mcp::run(root))
+}
+
+fn cmd_dashboard(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let written = repowise_dashboard::generate(&root)?;
+    println!("Dashboard written to {}", written.display());
+    Ok(())
 }
 
 fn display_path(path: &Path, root: &Path) -> String {

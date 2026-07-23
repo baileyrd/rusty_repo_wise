@@ -1,23 +1,17 @@
 [package]
-name = "repowise-cli"
+name = "repowise-dashboard"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "repowise"
-path = "src/main.rs"
-
 [dependencies]
 repowise-core = { path = "../repowise-core" }
-repowise-parser = { path = "../repowise-parser" }
 repowise-graph = { path = "../repowise-graph" }
 repowise-health = { path = "../repowise-health" }
 repowise-git = { path = "../repowise-git" }
-repowise-docs = { path = "../repowise-docs" }
 repowise-adr = { path = "../repowise-adr" }
-repowise-mcp = { path = "../repowise-mcp" }
-repowise-dashboard = { path = "../repowise-dashboard" }
 anyhow.workspace = true
-clap.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+repowise-parser = { path = "../repowise-parser" }
+tempfile = "3"

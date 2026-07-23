@@ -9,6 +9,7 @@ members = [
     "crates/repowise-docs",
     "crates/repowise-adr",
     "crates/repowise-mcp",
+    "crates/repowise-dashboard",
     "crates/repowise-cli",
 ]
 

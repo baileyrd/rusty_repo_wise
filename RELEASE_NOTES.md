@@ -6,6 +6,61 @@ repo routing work through PRs).
 
 ---
 
+## PR #107 — Add get_dead_code MCP tool with confidence tiers
+**2026-07-23** · [#107](https://github.com/baileyrd/rusty_repo_wise/pull/107) · closes [#45](https://github.com/baileyrd/rusty_repo_wise/issues/45)
+
+- **Added:** an eighth MCP tool, `get_dead_code(min_confidence?, safe_only?, limit?)`,
+  and a new `repowise_health::find_dead_code` behind it — a richer
+  sibling to the existing `possibly-dead-code` health marker rather than
+  a thin wrapper over it. Both start from the same base signal (zero
+  resolved in-repo callers), but `find_dead_code` tiers each candidate
+  `low`/`medium`/`high` by two cheap, fully-documented risk factors:
+  1. **Ambiguous name** — another symbol elsewhere in the index shares
+     this exact name. Call resolution prefers a same-file match and
+     otherwise fans out to every same-named candidate, so a call meant
+     for this symbol could have resolved to the other same-named one
+     instead — the "zero callers" reading is less trustworthy.
+  2. **Same-stem unresolved import elsewhere** — an import elsewhere in
+     the repo failed to resolve, and its last path segment matches this
+     symbol's file stem: plausibly a missed attempt to import this file.
+
+  Zero risk factors → `high`; one → `medium`; both → `low`. Shell is
+  exempt entirely, same as the existing marker and for the same reason
+  (a shell function's real callers — the command line, another script,
+  cron — are invisible to this port's call graph).
+- **`RepoGraph` gains `unresolved_import_stems`** (a `HashSet<String>`,
+  populated during `build()` right alongside the existing
+  `unresolved_imports` counter) — the one piece of raw resolution data
+  neither `RepoIndex` nor the existing `Overview` aggregate exposed,
+  needed for risk factor 2. Purely additive; no existing field changed.
+- **A dead end worth recording:** the first design also tracked
+  `unresolved_call_names`, meant to flag "a call elsewhere shares this
+  symbol's name but didn't resolve." Tracing through `repowise-graph`'s
+  actual call-resolution logic showed that set could never contain a
+  name matching any real indexed symbol — if a name exists anywhere in
+  the index, resolution always finds at least one candidate for it, so
+  the check could never fire. Dropped before it shipped as dead code in
+  favor of the "ambiguous name" signal above, which needs no `RepoGraph`
+  change at all (derivable straight from `RepoIndex`).
+- `min_confidence` (`"low"`/`"medium"`/`"high"`, case-insensitive) filters
+  to that tier and above; `safe_only` narrows to `high` only — the
+  closest this gets to the reference's "safe to delete" designation,
+  though the tool description explicitly says this is **not** a
+  runtime-safety guarantee at any tier (reflection, dynamic dispatch, and
+  entry points are all invisible to this port's static call graph, same
+  caveat the existing marker already carries). `limit` (default 50) caps
+  the returned list; `total_matching` in the response reports the count
+  before truncation.
+- 11 new tests (7 in `repowise-health` covering the tiering logic and
+  sort order directly, 4 in `repowise-mcp` covering the tool's
+  filtering/limiting/error-handling), 155 tests passing workspace-wide
+  (up from 144). This closes out the last of the filed MCP-tool issues
+  (#41-45). Next up per the loop is issue #46, PR-body decision mining —
+  worth a heads-up before starting: it needs a GitHub API call to fetch
+  merged PR bodies, a new kind of dependency for `repowise-adr` (currently
+  pure git/filesystem), which the issue itself flags as worth calling out
+  rather than adding silently.
+
 ## PR #105 — Add get_why MCP tool
 **2026-07-23** · [#105](https://github.com/baileyrd/rusty_repo_wise/pull/105) · closes [#44](https://github.com/baileyrd/rusty_repo_wise/issues/44)
 

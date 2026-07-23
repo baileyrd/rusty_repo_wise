@@ -169,14 +169,17 @@ fn hotspots_section(hotspots: Option<&[Hotspot]>, root: &Path) -> String {
         return out;
     }
     out.push_str(
-        "<table><tr><th>File</th><th class=\"num\">Score</th><th class=\"num\">Churn</th>\
+        "<table><tr><th>File</th><th class=\"num\">Score (recency-weighted)</th>\
+         <th class=\"num\">Score (raw)</th><th class=\"num\">Churn</th>\
          <th class=\"num\">Complexity</th><th class=\"num\">Bugfixes</th></tr>\n",
     );
     for h in hotspots.iter().take(15) {
         out.push_str(&format!(
-            "<tr><td class=\"mono\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+            "<tr><td class=\"mono\">{}</td><td class=\"num\">{:.1}</td>\
+             <td class=\"num\">{}</td><td class=\"num\">{}</td>\
              <td class=\"num\">{}</td><td class=\"num\">{}</td></tr>\n",
             escape(&display_rel(&h.file, root)),
+            h.decayed_score,
             h.score,
             h.churn,
             h.total_complexity,
@@ -309,6 +312,7 @@ mod tests {
             total_complexity: 10,
             bugfix_commits: 1,
             score: 40,
+            decayed_score: 40.0,
             last_touch: None,
         }];
         let decisions = vec![DecisionRecord {

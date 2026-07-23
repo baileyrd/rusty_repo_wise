@@ -150,8 +150,12 @@ time against the repo's real history:
 - **Churn**: number of commits touching a file, from a single `git log
   --name-only` walk of the whole history.
 - **Hotspot score**: `churn × total cyclomatic complexity` of the file's
-  symbols (complexity already computed by `repowise-parser`). Simple and
-  legible by design — no recency weighting or decay.
+  symbols (complexity already computed by `repowise-parser`). `hotspots()`
+  ranks files by a **recency-weighted** variant of this score: each commit
+  contributes `exp(-age_days / 90)` instead of a flat `1`, so a file with
+  the same raw churn as another but touched more recently ranks higher.
+  The raw (non-decayed) score is still reported alongside it for
+  transparency.
 - **Bug-fix commits**: commits whose message contains a fix-like keyword
   (`fix`, `bug`, `hotfix`, `patch`) touching the file. A heuristic, not
   ground truth — a fix described without one of these words won't be
@@ -163,9 +167,9 @@ time against the repo's real history:
 - **Ownership**: per-author share of a file's lines from `git blame
   --line-porcelain`.
 
-Not implemented from the original's git-analytics scope: recency-weighted
-or decayed hotspot scoring, and a bug-fix heuristic based on linked-issue
-references rather than just message keywords.
+Not implemented from the original's git-analytics scope: a bug-fix
+heuristic based on linked-issue references rather than just message
+keywords.
 
 ## Documentation generation
 

@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A single commit: its hash, author name, subject line, and the files it
-/// touched (paths absolute, resolved against the repo's real top-level
-/// directory — see `collect_history`).
+/// A single commit: its hash, author name, subject line, author-date
+/// (Unix seconds), and the files it touched (paths absolute, resolved
+/// against the repo's real top-level directory — see `collect_history`).
 pub struct CommitInfo {
     pub hash: String,
     pub author: String,
     pub message: String,
+    pub timestamp: i64,
     pub files: Vec<PathBuf>,
 }
 
@@ -45,7 +46,7 @@ fn git_toplevel(root: &Path) -> anyhow::Result<PathBuf> {
 pub fn collect_history(root: &Path) -> anyhow::Result<Vec<CommitInfo>> {
     let toplevel = git_toplevel(root)?;
 
-    let format = format!("--pretty=format:{RECORD_SEP}%H{FIELD_SEP}%an{FIELD_SEP}%s");
+    let format = format!("--pretty=format:{RECORD_SEP}%H{FIELD_SEP}%an{FIELD_SEP}%at{FIELD_SEP}%s");
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -68,9 +69,10 @@ pub fn collect_history(root: &Path) -> anyhow::Result<Vec<CommitInfo>> {
         }
         let mut lines = record.lines();
         let header = lines.next().unwrap_or_default();
-        let mut parts = header.splitn(3, FIELD_SEP);
+        let mut parts = header.splitn(4, FIELD_SEP);
         let hash = parts.next().unwrap_or_default().to_string();
         let author = parts.next().unwrap_or_default().to_string();
+        let timestamp = parts.next().unwrap_or_default().parse().unwrap_or(0);
         let message = parts.next().unwrap_or_default().to_string();
         if hash.is_empty() {
             continue;
@@ -83,6 +85,7 @@ pub fn collect_history(root: &Path) -> anyhow::Result<Vec<CommitInfo>> {
             hash,
             author,
             message,
+            timestamp,
             files,
         });
     }

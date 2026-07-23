@@ -308,8 +308,8 @@ fn cmd_hotspots(path: &Path, top: usize) -> anyhow::Result<()> {
         return Ok(());
     }
     println!(
-        "  {:<8} {:<6} {:<11} {:<8} {:<10} file (last touched by)",
-        "score", "churn", "complexity", "bugfixes", "last"
+        "  {:<10} {:<8} {:<6} {:<11} {:<8} {:<10} file (last touched by)",
+        "score", "raw score", "churn", "complexity", "bugfixes", "last"
     );
     for h in hotspots.iter().take(top) {
         let last = h
@@ -318,7 +318,8 @@ fn cmd_hotspots(path: &Path, top: usize) -> anyhow::Result<()> {
             .map(|(hash, author)| format!("{hash} {author}"))
             .unwrap_or_default();
         println!(
-            "  {:<8} {:<6} {:<11} {:<8} {:<10} {}",
+            "  {:<10.1} {:<8} {:<6} {:<11} {:<8} {:<10} {}",
+            h.decayed_score,
             h.score,
             h.churn,
             h.total_complexity,

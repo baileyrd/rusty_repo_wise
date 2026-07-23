@@ -6,6 +6,31 @@ repo routing work through PRs).
 
 ---
 
+## PR #99 — Add get_risk MCP tool
+**2026-07-23** · [#99](https://github.com/baileyrd/rusty_repo_wise/pull/99) · closes [#41](https://github.com/baileyrd/rusty_repo_wise/issues/41)
+
+- **Added:** a fourth MCP tool, `get_risk`, exposing `repowise-git`'s
+  hotspot/churn/bug-fix-commit analytics alongside `repowise-health`'s
+  findings for the same file — essentially `get_context` plus git
+  history. Given a `file`, returns that file's hotspot score (churn ×
+  total symbol complexity), raw churn, bug-fix-commit count, health
+  score, and health findings. Given no `file`, returns the `top_n`
+  (default 10) riskiest files repo-wide, ranked by hotspot score. Both
+  shapes return the same `{ files: [...] }` structure (one entry or
+  many) rather than a tagged union, keeping the tool's output and its
+  tests simpler.
+- **New dependency:** `repowise-mcp` now depends on `repowise-git`
+  (previously only `repowise-core`/`repowise-graph`/`repowise-health`).
+  Git analytics degrade to zero/empty via `GitAnalytics::collect(...).ok()`
+  rather than erroring the whole call when the indexed root isn't a git
+  repository — the same degrade-gracefully pattern `repowise-dashboard`
+  already established, reused here for the first time in the MCP layer.
+- 5 new tests (single-file risk with real git history, repo-wide top-N
+  ranking, graceful degradation with no git repo, and the existing
+  unindexed-file error path), 123 tests passing workspace-wide. Next up
+  per the loop is issue #42, `get_change_risk` (deterministic scoring,
+  not the reference's ML model).
+
 ## PR #97 — Add shell (sh/bash/zsh) language support
 **2026-07-23** · [#97](https://github.com/baileyrd/rusty_repo_wise/pull/97) · closes [#40](https://github.com/baileyrd/rusty_repo_wise/issues/40)
 

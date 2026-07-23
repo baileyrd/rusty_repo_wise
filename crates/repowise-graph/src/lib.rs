@@ -96,12 +96,16 @@ impl RepoGraph {
                 // `resolve_include`/`resolve_require_relative` in
                 // `repowise-parser`), so there's no module-path index to
                 // build here, unlike Rust/Python/Java/Kotlin/Go/C#/Scala's
-                // dotted/`::`/`/`-separated paths.
+                // dotted/`::`/`/`-separated paths. Swift's module-level
+                // `import` has no per-file mapping at all (no build graph
+                // to resolve against), so its imports are always left
+                // unresolved by design, same "no index needed" bucket.
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C
                 | Language::Cpp
                 | Language::Ruby
+                | Language::Swift
                 | Language::Other => {}
             }
         }
@@ -122,7 +126,8 @@ impl RepoGraph {
                 | Language::JavaScript
                 | Language::C
                 | Language::Cpp
-                | Language::Ruby => ("", &no_modules),
+                | Language::Ruby
+                | Language::Swift => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

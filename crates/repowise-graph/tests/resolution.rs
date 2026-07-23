@@ -272,3 +272,33 @@ fn resolves_kotlin_imports_including_across_a_mixed_java_kotlin_project() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, helper_java);
 }
+
+#[test]
+fn resolves_cpp_quote_includes_but_not_angle_includes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // `.hpp`, not `.h` — `.h` is deliberately left as `Language::Other`
+    // (ambiguous with a future plain-C extractor), so it isn't indexed.
+    fs::write(root.join("helper.hpp"), "int compute(int x);\n").unwrap();
+    fs::write(
+        root.join("main.cpp"),
+        "#include \"helper.hpp\"\n#include <vector>\n\nint run() {\n    return compute(1);\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_cpp = find_file(&index, "main.cpp").path.clone();
+    let helper_hpp = find_file(&index, "helper.hpp").path.clone();
+
+    let deps = graph.dependencies_of(&main_cpp);
+    assert!(
+        deps.contains(&helper_hpp),
+        "expected main.cpp to depend on helper.hpp, got {deps:?}"
+    );
+
+    // `<vector>` has no include-path search list to resolve against and
+    // must count as unresolved rather than silently dropped.
+    assert!(graph.unresolved_imports >= 1);
+}

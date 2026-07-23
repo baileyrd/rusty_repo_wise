@@ -6,6 +6,35 @@ repo routing work through PRs).
 
 ---
 
+## PR #105 — Add get_why MCP tool
+**2026-07-23** · [#105](https://github.com/baileyrd/rusty_repo_wise/pull/105) · closes [#44](https://github.com/baileyrd/rusty_repo_wise/issues/44)
+
+- **Added:** a seventh MCP tool, `get_why(targets?)`, returning
+  architectural decisions mined via `repowise-adr::mine` whose body links
+  to at least one of the given `targets`' files — same data as `repowise
+  decisions --for-file`. With no targets (or an empty list), returns
+  every mined decision.
+- **A thin wrapper, no new mining logic.** `repowise-adr` already mines
+  `docs/adr/*.md` and decision-like commit messages and links each to the
+  files it mentions; `get_why` calls `mine()` fresh on every call (the
+  same "no caching" rule every other tool follows) and just filters the
+  result. Mirrors how `get_overview`/`search_codebase` already wrap
+  existing library calls rather than reimplementing anything.
+- **Targets can be file paths or symbol ids.** A target that exactly
+  matches an indexed symbol's `id` (as returned by `search_codebase`/
+  `get_context`, both extended with `id` in the `get_symbol` PR) resolves
+  to that symbol's own file before filtering; anything else is treated
+  as a file path, same resolution rules `get_context`/`get_risk` already
+  use.
+- `repowise-mcp` gains `repowise-adr` as a new dependency (previously
+  `repowise-core`/`repowise-graph`/`repowise-health`/`repowise-git` only).
+- 4 new tests (no targets returns every decision, filter by file target,
+  filter by symbol target, an unmatched target returns nothing), 144
+  tests passing workspace-wide (up from 140). Next up per the loop is
+  issue #45, `get_dead_code` — a larger (L-sized) tool needing confidence
+  tiering beyond this port's existing single-signal dead-code marker, so
+  it wasn't folded into the smaller `get_symbol`/`get_why` additions.
+
 ## PR #103 — Add get_symbol MCP tool
 **2026-07-23** · [#103](https://github.com/baileyrd/rusty_repo_wise/pull/103) · closes [#43](https://github.com/baileyrd/rusty_repo_wise/issues/43)
 

@@ -6,6 +6,33 @@ repo routing work through PRs).
 
 ---
 
+## PR #26 — Add TypeScript/JavaScript language support
+**2026-07-23** · [#26](https://github.com/baileyrd/rusty_repo_wise/pull/26) · closes [#22](https://github.com/baileyrd/rusty_repo_wise/issues/22)
+
+- **Added:** a `repowise-parser` extractor for TypeScript and JavaScript —
+  functions, methods, classes, TypeScript interfaces (mapped to `Trait`),
+  and named arrow-function/function-expression bindings, each with
+  cyclomatic complexity, parameter count, and a duplicate-code body hash.
+  ESM `import`/CommonJS `require` are resolved directly against the
+  filesystem for relative (`./`, `../`) specifiers, same as Rust's
+  `mod foo;`. `new ClassName(...)` is recorded as a call to the class so
+  instantiated classes don't read as dead code. Bumped `tree-sitter` and
+  the Rust/Python grammar crates to `LanguageFn`-based versions so
+  `tree-sitter-typescript`/`tree-sitter-javascript` share the same core.
+- **Known limitation, stated plainly:** no `node_modules` resolution
+  (bare/npm specifiers are left unresolved) and no `tsconfig.json` path
+  alias support — both explicitly out of scope per issue #22. A `new
+  ClassName()` call resolves to the class, not the constructor method
+  itself, so an only-ever-`new`'d class's constructor can still read as
+  possibly-dead-code — a known heuristic gap, not a bug.
+- 9 new tests (symbol/class/interface extraction, arrow/function-expression
+  bindings, ESM+CommonJS imports, `new`-expression call tracking, cyclomatic
+  complexity, duplicate-body hashing) plus a `repowise-graph` end-to-end
+  relative-import-resolution test; 44 tests passing workspace-wide. Also
+  filed issues #23 (MCP `get_risk`/`get_change_risk`), #24 (dashboard live
+  search/drill-down/auto-refresh), and #25 (ADR mining additional sources)
+  covering the other previously-called-out known limitations.
+
 ## PR #20 — Add static-site dashboard
 **2026-07-23** · [#20](https://github.com/baileyrd/rusty_repo_wise/pull/20) · closes [#10](https://github.com/baileyrd/rusty_repo_wise/issues/10)
 

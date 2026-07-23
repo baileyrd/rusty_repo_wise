@@ -51,6 +51,7 @@ impl RepoGraph {
         let mut jvm_modules = HashMap::new();
         let mut go_modules = HashMap::new();
         let mut csharp_modules = HashMap::new();
+        let mut php_modules = HashMap::new();
 
         for file in &index.files {
             let fnode = graph.add_node(Node::File(file.path.clone()));
@@ -90,6 +91,16 @@ impl RepoGraph {
                         csharp_modules.insert(mp, file.path.clone());
                     }
                 }
+                // PHP has two import forms: `require`/`include` (already
+                // resolved directly against the filesystem at parse time,
+                // same as C/C++/Ruby, bypassing this map entirely) and
+                // `use Namespace\Class;` (resolved via this PSR-4-style
+                // folder-mirrors-namespace map, same convention as C#).
+                Language::Php => {
+                    if let Some(mp) = modpath::php_namespace_path(&file.path, &index.root) {
+                        php_modules.insert(mp, file.path.clone());
+                    }
+                }
                 // TypeScript/JavaScript/C/C++/Ruby relative (quote-form/
                 // `require_relative`) imports are resolved directly at
                 // parse time (see `resolve_relative_import`/
@@ -122,6 +133,7 @@ impl RepoGraph {
                 Language::Java | Language::Kotlin | Language::Scala => (".", &jvm_modules),
                 Language::Go => ("/", &go_modules),
                 Language::CSharp => (".", &csharp_modules),
+                Language::Php => ("\\", &php_modules),
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C

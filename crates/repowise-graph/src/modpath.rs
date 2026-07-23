@@ -232,6 +232,31 @@ pub fn csharp_namespace_path(file: &Path, root: &Path) -> Option<String> {
     }
 }
 
+/// Best-effort PSR-4-style namespace path for a PHP source file, derived
+/// from its *directory* relative to the indexed root (e.g.
+/// `App/Util/Helper.php` -> `App\Util`) — a `use` statement targets a
+/// namespace, not a specific file, so (like C#/Go) this is keyed one
+/// level up from the file itself. This is the "assume the folder layout
+/// mirrors the namespace" half of PSR-4, without reading `composer.json`
+/// for the project's real autoload root/prefix mapping — a project with
+/// a nonstandard layout, or a namespace root that isn't the repo root,
+/// won't resolve correctly. Multiple files in one directory share one
+/// resolved key, same "last-processed file wins" limitation already
+/// accepted for Go/C#.
+pub fn php_namespace_path(file: &Path, root: &Path) -> Option<String> {
+    let dir = file.parent()?;
+    let rel = dir.strip_prefix(root).unwrap_or(dir);
+    let segments: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join("\\"))
+    }
+}
+
 /// Resolve an import path string against a module index by progressively
 /// stripping trailing segments (so importing a specific item from a
 /// module still resolves to that module's file).

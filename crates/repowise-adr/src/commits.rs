@@ -36,7 +36,7 @@ pub fn mine_commit_decisions(commits: &[CommitInfo]) -> Vec<DecisionRecord> {
         .collect()
 }
 
-fn is_decision_message(message: &str) -> bool {
+pub(crate) fn is_decision_message(message: &str) -> bool {
     let lower = message.to_lowercase();
     DECISION_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }

@@ -652,6 +652,9 @@ impl RepowiseServer {
                     repowise_adr::DecisionSource::CommitMessage { hash, author } => {
                         format!("commit:{} by {author}", &hash[..hash.len().min(7)])
                     }
+                    repowise_adr::DecisionSource::PullRequest { number, author } => {
+                        format!("pr:{number} by {author}")
+                    }
                 };
                 DecisionOutput {
                     id: d.id,

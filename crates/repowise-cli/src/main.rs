@@ -413,7 +413,9 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
         decisions.len()
     );
     if decisions.is_empty() {
-        println!("  No decisions found (docs/adr/*.md and decision-like commit messages).");
+        println!(
+            "  No decisions found (docs/adr/*.md, decision-like commit messages, and merged PR bodies)."
+        );
         return Ok(());
     }
 
@@ -424,6 +426,9 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             }
             repowise_adr::DecisionSource::CommitMessage { hash, author } => {
                 format!("commit {} by {author}", &hash[..hash.len().min(7)])
+            }
+            repowise_adr::DecisionSource::PullRequest { number, author } => {
+                format!("PR #{number} by {author}")
             }
         };
         let status = d.status.as_deref().unwrap_or("-");

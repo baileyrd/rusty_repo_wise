@@ -37,7 +37,14 @@ since git-history analysis doesn't need the dependency graph at all.
 `repowise-git` (to reuse its commit-log parsing for decision-mining rather
 than duplicating it), but not `repowise-graph`/`repowise-health` — decision
 mining doesn't need the resolved dependency graph or health scores, just
-the raw index and commit history. `repowise-mcp` depends on
+the raw index and commit history. It also depends on `ureq` (a
+synchronous HTTP client, chosen over an async one like `reqwest`
+specifically to avoid pulling `tokio` into a crate that's otherwise
+plain git/filesystem work) for its one network-dependent source: mining
+merged PR bodies via the GitHub API, gated behind an explicit
+`REPOWISE_GITHUB_TOKEN` env var (see the README's "Architectural
+decision mining" section for why that's opt-in rather than falling back
+to an unauthenticated API call). `repowise-mcp` depends on
 `repowise-core`/`repowise-graph`/`repowise-health`/`repowise-git`/
 `repowise-adr` (it's a thin transport layer wrapping their existing query
 functions as MCP tools — `get_risk` and `get_change_risk` are the two
@@ -81,10 +88,14 @@ anything cached in `.repowise/index.json` — see ARCHITECTURE's "Non-goals"
 and the README's "Git analytics" section for why (staleness/invalidation
 complexity not worth taking on yet).
 `decisions` is a third, independent path: `repowise-adr` reads `docs/adr/*.md`
-directly off disk and reuses `repowise-git::collect_commits` for raw commit
+directly off disk, reuses `repowise-git::collect_commits` for raw commit
 messages (not `RepoIndex`, which only has complexity metrics, not commit
-history), then links each decision's body text to files/symbols in the
-same `RepoIndex` the other commands use.
+history), and — only when a `REPOWISE_GITHUB_TOKEN` env var is set —
+calls the GitHub API for merged PR bodies, the one network call anywhere
+in this port's non-MCP command paths. ADR-file and commit-message
+decisions then get linked to files/symbols in the same `RepoIndex` the
+other commands use; PR decisions skip that step, already linked to the
+files the GitHub API reports that PR touched.
 `serve` is a thin wrapper over the same `overview`/`search`/`deps`/`health`
 data paths, re-exposed as MCP tools: `repowise-mcp` loads `RepoIndex`,
 builds a `RepoGraph`, and (for `get_context`/`get_risk`) runs

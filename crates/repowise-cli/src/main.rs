@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 /// far: parsing, symbol/import/call extraction, dependency-graph queries,
 /// deterministic code-health scoring, git-history analytics (churn,
 /// hotspots, ownership, co-change coupling), auto-generated per-file
-/// documentation, and architectural-decision mining. Other layers from
-/// the original project (MCP server, dashboard) are not yet implemented.
+/// documentation, architectural-decision mining, and an MCP server
+/// exposing a subset of these as agent-facing tools. The web dashboard
+/// from the original project is not yet implemented.
 #[derive(Parser)]
 #[command(name = "repowise", version, about)]
 struct Cli {
@@ -95,6 +96,12 @@ enum Command {
         #[arg(long)]
         for_file: Option<PathBuf>,
     },
+    /// Run an MCP server over stdio exposing get_overview/search_codebase/
+    /// get_context. Requires a prior `repowise init`/`update`.
+    Serve {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -111,6 +118,7 @@ fn main() -> anyhow::Result<()> {
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Docs { path } => cmd_docs(&path),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
+        Command::Serve { path } => cmd_serve(&path),
     }
 }
 
@@ -425,6 +433,14 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_serve(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    // The rest of the CLI is synchronous; only the MCP server needs an
+    // async runtime, so build one here rather than making `main` async.
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(repowise_mcp::run(root))
 }
 
 fn display_path(path: &Path, root: &Path) -> String {

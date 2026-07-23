@@ -16,5 +16,7 @@ repowise-health = { path = "../repowise-health" }
 repowise-git = { path = "../repowise-git" }
 repowise-docs = { path = "../repowise-docs" }
 repowise-adr = { path = "../repowise-adr" }
+repowise-mcp = { path = "../repowise-mcp" }
 anyhow.workspace = true
 clap.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }

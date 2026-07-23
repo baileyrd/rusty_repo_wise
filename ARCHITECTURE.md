@@ -2,9 +2,10 @@
 
 ## Overview
 A Rust CLI (`repowise`) that indexes a codebase and answers questions about
-it: dependency graph queries and deterministic code-health scores. Not (yet):
-git-history analytics, doc generation, ADR mining, an MCP server, or a
-dashboard — see the root README for current scope.
+it: dependency graph queries, deterministic code-health scores, git-history
+analytics (churn/hotspots/ownership/coupling), and auto-generated per-file
+documentation. Not (yet): ADR mining, an MCP server, or a dashboard — see
+the root README for current scope.
 
 ## Boundaries
 This is a straightforward layered pipeline, not a plugin-style
@@ -20,25 +21,31 @@ today:
 | Index persistence (`RepoIndex::save`/`load`) | JSON on disk (`.repowise/index.json`) | the one and only backing store so far |
 
 ## Structure
-Modular monolith: one Cargo workspace, six crates. Most are a layer over the
-one below it — `repowise-core` (data model, file discovery, index
+Modular monolith: one Cargo workspace, seven crates. Most are a layer over
+the one below it — `repowise-core` (data model, file discovery, index
 persistence) → `repowise-parser` (tree-sitter extraction) → `repowise-graph`
 (dependency graph + queries) → `repowise-health` (deterministic scoring on
-top of the graph) — all tied together by `repowise-cli` (the binary).
-`repowise-git` is the one exception to the strict pipeline: it depends only
-on `repowise-core` (for `RepoIndex`'s per-symbol complexity) and the `git`
-CLI directly, not on `repowise-graph`, since git-history analysis doesn't
-need the dependency graph at all. No crate has been split out as a separate
-service or process; there's no forcing function (scaling, team boundary,
-fault isolation) that would justify it yet.
+top of the graph) → `repowise-docs` (renders `repowise-health`'s findings
+and `repowise-graph`'s deps/dependents into per-file pages) — all tied
+together by `repowise-cli` (the binary). `repowise-git` is the one
+exception to the strict pipeline: it depends only on `repowise-core` (for
+`RepoIndex`'s per-symbol complexity) and the `git` CLI directly, not on
+`repowise-graph`, since git-history analysis doesn't need the dependency
+graph at all. No crate has been split out as a separate service or process;
+there's no forcing function (scaling, team boundary, fault isolation) that
+would justify it yet.
 
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`
 extracts symbols/imports/calls per file into a `RepoIndex` → saved to
 `.repowise/index.json`. Every other command (`overview`, `search`, `deps`,
-`health`) loads that index, builds a `RepoGraph` (resolves imports/calls into
-`Contains`/`Imports`/`Calls` edges), and queries it — `repowise-health` adds
-one more pass over the graph's symbols and call-in-degrees to score files.
+`health`, `docs`) loads that index, builds a `RepoGraph` (resolves
+imports/calls into `Contains`/`Imports`/`Calls` edges), and queries it —
+`repowise-health` adds one more pass over the graph's symbols and
+call-in-degrees to score files, and `repowise-docs` renders one markdown
+page per file from the index/graph/health data, tracking freshness via a
+hash of each file's own source re-read from disk (not the index) at
+generation time.
 `hotspots`/`ownership`/`coupled` are a separate path: they load the same
 `RepoIndex` for complexity data, but get their git-history data by shelling
 out to `git log`/`git blame` fresh on every invocation rather than reading
@@ -54,6 +61,6 @@ tradeoffs.
 - Compiler-grade name resolution — import/call resolution is directory-layout
   heuristics; ambiguous or external references are left unresolved rather
   than guessed (see README).
-- Feature parity with the original repowise project's other four
-  intelligence layers, its MCP server, and its dashboard — not in scope until
-  explicitly picked up.
+- Feature parity with the original repowise project's remaining
+  intelligence layer (ADR mining), its MCP server, and its dashboard — not
+  in scope until explicitly picked up.

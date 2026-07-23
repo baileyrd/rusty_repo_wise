@@ -18,6 +18,7 @@ pub enum Language {
     Python,
     TypeScript,
     JavaScript,
+    Java,
     Other,
 }
 
@@ -28,6 +29,7 @@ impl Language {
             "py" | "pyi" => Language::Python,
             "ts" | "tsx" => Language::TypeScript,
             "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
+            "java" => Language::Java,
             _ => Language::Other,
         }
     }
@@ -38,6 +40,7 @@ impl Language {
             Language::Python => "Python",
             Language::TypeScript => "TypeScript",
             Language::JavaScript => "JavaScript",
+            Language::Java => "Java",
             Language::Other => "Other",
         }
     }

@@ -89,6 +89,55 @@ pub fn python_module_path(file: &Path, root: &Path) -> Option<String> {
     }
 }
 
+/// Conventional Maven/Gradle source-root directory names: everything
+/// under one of these is package-path-relative to it, not to the repo root.
+const JAVA_SOURCE_ROOTS: &[[&str; 3]] = &[["src", "main", "java"], ["src", "test", "java"]];
+
+/// Find the nearest `src/main/java` or `src/test/java` ancestor of `file`
+/// and return the directory it points to (i.e. the package-path base).
+fn find_java_source_root(file: &Path) -> Option<PathBuf> {
+    let components: Vec<_> = file.components().collect();
+    for i in 0..components.len() {
+        for pattern in JAVA_SOURCE_ROOTS {
+            let matches = pattern.iter().enumerate().all(|(j, seg)| {
+                components
+                    .get(i + j)
+                    .and_then(|c| c.as_os_str().to_str())
+                    .is_some_and(|s| s == *seg)
+            });
+            if matches {
+                let mut base = PathBuf::new();
+                for comp in &components[..i + pattern.len()] {
+                    base.push(comp);
+                }
+                return Some(base);
+            }
+        }
+    }
+    None
+}
+
+/// Module path for a Java source file, e.g. `com.example.app.Foo`. Uses
+/// the conventional Maven/Gradle `src/main/java`/`src/test/java` source
+/// root as the package-path base when present; otherwise falls back to
+/// treating the file's path relative to the indexed root as the package
+/// path, same convention as `python_module_path`. Not classpath-aware —
+/// a project with a nonstandard layout won't resolve correctly.
+pub fn java_module_path(file: &Path, root: &Path) -> Option<String> {
+    let base = find_java_source_root(file).unwrap_or_else(|| root.to_path_buf());
+    let rel = file.strip_prefix(&base).unwrap_or(file);
+    let segments: Vec<String> = rel
+        .with_extension("")
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join("."))
+    }
+}
+
 /// Resolve an import path string against a module index by progressively
 /// stripping trailing segments (so importing a specific item from a
 /// module still resolves to that module's file).

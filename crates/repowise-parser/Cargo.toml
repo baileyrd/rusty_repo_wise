@@ -23,4 +23,5 @@ tree-sitter-c.workspace = true
 tree-sitter-swift.workspace = true
 tree-sitter-php.workspace = true
 tree-sitter-dart.workspace = true
+tree-sitter-bash.workspace = true
 

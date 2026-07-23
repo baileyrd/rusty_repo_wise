@@ -11,7 +11,7 @@
 //! Every marker here is a plain threshold over data `repowise-parser`/
 //! `repowise-graph` already computed; nothing is inferred or guessed.
 
-use repowise_core::{RepoIndex, Symbol, SymbolKind};
+use repowise_core::{Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -108,11 +108,18 @@ pub fn analyze(index: &RepoIndex, graph: &RepoGraph) -> HealthReport {
     let mut findings = Vec::new();
 
     for file in &index.files {
+        // Per repowise's own documented scope, shell scripts get a
+        // narrower marker set than Full/Good-tier languages: no
+        // dead-code detection (a shell function is routinely invoked
+        // only from the command line, another script, or a cron job —
+        // none of which this port's call graph can see, making the
+        // signal too unreliable to report).
+        let skip_dead_code = file.language == Language::Shell;
         for sym in &file.symbols {
             if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
                 continue;
             }
-            check_function_markers(sym, graph, &mut findings);
+            check_function_markers(sym, graph, skip_dead_code, &mut findings);
         }
     }
 
@@ -133,7 +140,12 @@ pub fn analyze(index: &RepoIndex, graph: &RepoGraph) -> HealthReport {
     }
 }
 
-fn check_function_markers(sym: &Symbol, graph: &RepoGraph, findings: &mut Vec<Finding>) {
+fn check_function_markers(
+    sym: &Symbol,
+    graph: &RepoGraph,
+    skip_dead_code: bool,
+    findings: &mut Vec<Finding>,
+) {
     let length = sym.end_line.saturating_sub(sym.start_line) + 1;
     if length > LONG_FUNCTION_LINES {
         findings.push(Finding {
@@ -165,7 +177,7 @@ fn check_function_markers(sym: &Symbol, graph: &RepoGraph, findings: &mut Vec<Fi
             detail: format!("{} parameters (> {TOO_MANY_PARAMS})", sym.param_count),
         });
     }
-    if graph.call_in_degree(&sym.id) == 0 {
+    if !skip_dead_code && graph.call_in_degree(&sym.id) == 0 {
         findings.push(Finding {
             file: sym.file.clone(),
             symbol: Some(sym.name.clone()),

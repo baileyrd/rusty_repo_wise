@@ -29,6 +29,7 @@ pub enum Language {
     Swift,
     Php,
     Dart,
+    Shell,
     Other,
 }
 
@@ -55,6 +56,7 @@ impl Language {
             "swift" => Language::Swift,
             "php" => Language::Php,
             "dart" => Language::Dart,
+            "sh" | "bash" | "zsh" => Language::Shell,
             _ => Language::Other,
         }
     }
@@ -76,6 +78,7 @@ impl Language {
             Language::Swift => "Swift",
             Language::Php => "PHP",
             Language::Dart => "Dart",
+            Language::Shell => "Shell",
             Language::Other => "Other",
         }
     }

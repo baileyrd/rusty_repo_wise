@@ -17,7 +17,7 @@ specifics per layer), not full feature parity:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
-  Swift, PHP, and Dart files.
+  Swift, PHP, Dart, and shell (`.sh`/`.bash`/`.zsh`) files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
   definitions, imports, call expressions, and per-function metrics
   (cyclomatic complexity, parameter count, a duplicate-code body hash).
@@ -56,11 +56,20 @@ specifics per layer), not full feature parity:
   `import 'local.dart'` is resolved directly against the filesystem the
   same way; `import 'package:x/y.dart'` (a pub package) has no package
   registry here to resolve against and is left unresolved, same
-  tradeoff as bare npm specifiers.
+  tradeoff as bare npm specifiers. Shell's `source`/`.` is likewise
+  resolved directly against the filesystem, including the common
+  `SCRIPT_DIR="$(dirname "$0")"` / `source "$SCRIPT_DIR/helper.sh"`
+  idiom for a script sourcing something relative to its own directory;
+  any other variable/command-substitution in the path has no static
+  value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from six
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, and possibly-dead code
-  (zero resolved callers).
+  (zero resolved callers) — except for shell scripts, which are
+  deliberately exempt from the dead-code marker: a shell function is
+  routinely invoked only from the command line, another script, or a
+  cron job, none of which this port's call graph can see, making the
+  signal too unreliable to report for that language.
 - Derive git-history analytics — churn, hotspot score (churn × complexity),
   bug-fix commit frequency, co-change coupling, and per-author line
   ownership — by shelling out to `git log`/`git blame`, joined against the
@@ -80,9 +89,9 @@ specifics per layer), not full feature parity:
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
-Scala, Ruby, Swift, PHP, and Dart are parsed; repowise's other languages
-aren't implemented — see issue #11 for the tracking/discussion issue on
-extending language support. The health scorer covers 6 of repowise's ~25 markers — see
+Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
+other languages aren't implemented — see issue #11 for the
+tracking/discussion issue on extending language support. The health scorer covers 6 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (LCOM4 cohesion,
 Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
@@ -99,8 +108,8 @@ dashboard is one static page with no per-file drill-down or live search
   etc.), `.gitignore`-aware file discovery, and JSON index persistence.
 - `repowise-parser` — tree-sitter-based extraction for Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
-  Swift, PHP, and Dart, including per-function complexity/param-count/
-  body-hash metrics.
+  Swift, PHP, Dart, and shell scripts, including per-function
+  complexity/param-count/body-hash metrics.
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -154,6 +163,12 @@ to `[0, 10]`:
 | God class | > 15 methods | −1.5 |
 | Duplicate code | body hash matches another symbol's | −0.5 |
 | Possibly dead code | 0 resolved callers | −0.2 |
+
+"Possibly dead code" is never applied to shell scripts (`Language::Shell`)
+— a shell function is routinely invoked only from the command line,
+another script, or a cron job, none of which this port's call graph can
+see, so the signal is too unreliable to report for that language. All
+other markers still apply to shell the same as everywhere else.
 
 All of these come from data already computed by `repowise-parser`
 (per-symbol line span, complexity, param count, body hash) and

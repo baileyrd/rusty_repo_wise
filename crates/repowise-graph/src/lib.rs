@@ -45,9 +45,9 @@ impl RepoGraph {
         let mut name_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut rust_modules = HashMap::new();
         let mut python_modules = HashMap::new();
-        // Shared between Java and Kotlin: both use the same JVM
-        // package-path convention, and a mixed-language project can
-        // reasonably import one from the other.
+        // Shared between Java, Kotlin, and Scala: all three use the same
+        // JVM package-path convention, and a mixed-language project can
+        // reasonably import one from another.
         let mut jvm_modules = HashMap::new();
         let mut go_modules = HashMap::new();
         let mut csharp_modules = HashMap::new();
@@ -75,7 +75,7 @@ impl RepoGraph {
                         python_modules.insert(mp, file.path.clone());
                     }
                 }
-                Language::Java | Language::Kotlin => {
+                Language::Java | Language::Kotlin | Language::Scala => {
                     if let Some(mp) = modpath::jvm_module_path(&file.path, &index.root) {
                         jvm_modules.insert(mp, file.path.clone());
                     }
@@ -94,7 +94,7 @@ impl RepoGraph {
                 // imports are resolved directly at parse time (see
                 // `resolve_relative_import`/`resolve_include` in
                 // `repowise-parser`), so there's no module-path index to
-                // build here, unlike Rust/Python/Java/Kotlin/Go/C#'s
+                // build here, unlike Rust/Python/Java/Kotlin/Go/C#/Scala's
                 // dotted/`::`/`/`-separated paths.
                 Language::TypeScript | Language::JavaScript | Language::Cpp | Language::Other => {}
             }
@@ -109,7 +109,7 @@ impl RepoGraph {
             let (sep, map): (&str, &HashMap<String, PathBuf>) = match file.language {
                 Language::Rust => ("::", &rust_modules),
                 Language::Python => (".", &python_modules),
-                Language::Java | Language::Kotlin => (".", &jvm_modules),
+                Language::Java | Language::Kotlin | Language::Scala => (".", &jvm_modules),
                 Language::Go => ("/", &go_modules),
                 Language::CSharp => (".", &csharp_modules),
                 Language::TypeScript | Language::JavaScript | Language::Cpp => ("", &no_modules),

@@ -337,3 +337,42 @@ fn resolves_csharp_usings_via_folder_to_namespace_heuristic() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, helper_cs);
 }
+
+#[test]
+fn resolves_scala_package_imports_via_sbt_source_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let src_root = root.join("src/main/scala/com/example/util");
+    fs::create_dir_all(&src_root).unwrap();
+    fs::write(
+        src_root.join("Helper.scala"),
+        "package com.example.util\n\nobject Helper {\n  def compute(x: Int): Int = {\n    x + 1\n  }\n}\n",
+    )
+    .unwrap();
+    let app_root = root.join("src/main/scala/com/example/app");
+    fs::create_dir_all(&app_root).unwrap();
+    fs::write(
+        app_root.join("Main.scala"),
+        "package com.example.app\n\nimport com.example.util.Helper\n\nclass Main {\n  def run(): Int = {\n    Helper.compute(1)\n  }\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_scala = find_file(&index, "Main.scala").path.clone();
+    let helper_scala = find_file(&index, "Helper.scala").path.clone();
+
+    // Resolved via the `src/main/scala`-anchored package path (the same
+    // `jvm_module_path` convention shared with Java/Kotlin), not a
+    // repo-root-relative one.
+    let deps = graph.dependencies_of(&main_scala);
+    assert!(
+        deps.contains(&helper_scala),
+        "expected Main.scala to depend on Helper.scala, got {deps:?}"
+    );
+
+    let matches = graph.search("compute");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_scala);
+}

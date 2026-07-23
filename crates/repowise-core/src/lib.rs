@@ -23,6 +23,7 @@ pub enum Language {
     Go,
     Cpp,
     CSharp,
+    Scala,
     Other,
 }
 
@@ -38,6 +39,7 @@ impl Language {
             "go" => Language::Go,
             "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Language::Cpp,
             "cs" => Language::CSharp,
+            "scala" | "sc" => Language::Scala,
             _ => Language::Other,
         }
     }
@@ -53,6 +55,7 @@ impl Language {
             Language::Go => "Go",
             Language::Cpp => "C++",
             Language::CSharp => "C#",
+            Language::Scala => "Scala",
             Language::Other => "Other",
         }
     }

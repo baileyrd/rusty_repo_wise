@@ -14,6 +14,7 @@ mod kotlin;
 mod metrics;
 mod python;
 mod rust;
+mod scala;
 
 use repowise_core::{FileRecord, Language};
 use std::path::Path;
@@ -35,6 +36,7 @@ pub fn parse_file(
         Language::Go => Ok(Some(go::extract(path, source)?)),
         Language::Cpp => Ok(Some(cpp::extract(path, source)?)),
         Language::CSharp => Ok(Some(csharp::extract(path, source)?)),
+        Language::Scala => Ok(Some(scala::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

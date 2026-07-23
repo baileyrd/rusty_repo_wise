@@ -6,6 +6,23 @@ repo routing work through PRs).
 
 ---
 
+## PR #12 — Add git-analytics layer: churn, hotspots, ownership, co-change coupling
+**2026-07-22** · [#12](https://github.com/baileyrd/rusty_repo_wise/pull/12) · closes [#6](https://github.com/baileyrd/rusty_repo_wise/issues/6)
+
+- **Added:** a new `repowise-git` crate computing git-history analytics by
+  shelling out to `git log`/`git blame` — per-file churn, hotspot score
+  (churn × total cyclomatic complexity, reusing `repowise-parser`'s
+  existing complexity data), bug-fix-commit frequency (message-keyword
+  heuristic), co-change coupling, and per-author line ownership. Wired
+  up as `repowise hotspots`/`ownership`/`coupled`.
+- **Known limitation, stated plainly:** git analytics are computed fresh
+  on every invocation rather than cached in `.repowise/index.json`, to
+  avoid taking on cache-invalidation design in this pass. Bug-fix
+  detection is a message-keyword heuristic, not linked-issue-aware.
+- 4 new integration tests build real, disposable git repos (via the
+  `git` CLI) to exercise this against actual `git log`/`git blame`
+  output; 19 tests passing workspace-wide.
+
 ## PR #4 — Update default-branch references now that main exists
 **2026-07-22** · [#4](https://github.com/baileyrd/rusty_repo_wise/pull/4)
 

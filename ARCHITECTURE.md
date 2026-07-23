@@ -40,9 +40,12 @@ mining doesn't need the resolved dependency graph or health scores, just
 the raw index and commit history. `repowise-mcp` depends on
 `repowise-core`/`repowise-graph`/`repowise-health`/`repowise-git` (it's a
 thin transport layer wrapping their existing query functions as MCP
-tools — `get_risk` is the one tool that needs `repowise-git`'s
-hotspot/churn/bug-fix data, degrading to zero/empty rather than erroring
-when the indexed root isn't a git repository) plus `rmcp` (the official
+tools — `get_risk` and `get_change_risk` are the two tools that need
+`repowise-git`'s data. `get_risk` degrades to zero/empty hotspot/churn/
+bug-fix data rather than erroring when the indexed root isn't a git
+repository; `get_change_risk` is pure diff-shape analysis with no index
+dependency at all — it errors instead, since there's no diff to compute
+without a git repository) plus `rmcp` (the official
 Rust MCP SDK) and `tokio` — the only crates in this workspace with an
 async runtime dependency; `repowise-cli` builds a
 `tokio::runtime::Runtime` manually just for the `serve` subcommand rather
@@ -81,8 +84,12 @@ history), then links each decision's body text to files/symbols in the
 same `RepoIndex` the other commands use.
 `serve` is a thin wrapper over the same `overview`/`search`/`deps`/`health`
 data paths, re-exposed as MCP tools: `repowise-mcp` loads `RepoIndex`,
-builds a `RepoGraph`, and (for `get_context`) runs `repowise_health::analyze`
-fresh on every tool call — no state held across calls, no caching.
+builds a `RepoGraph`, and (for `get_context`/`get_risk`) runs
+`repowise_health::analyze` fresh on every tool call — no state held
+across calls, no caching. `get_change_risk` is the one tool that bypasses
+this path entirely: it never loads the index or graph, calling straight
+into `repowise-git`'s diff-shape analysis (`git diff`/`git show`/
+`git rev-list`) against the indexed root.
 `dashboard` composes all of the above into one static page: `repowise-dashboard`
 calls the same `overview`/`analyze` functions, tries `repowise-git::GitAnalytics::collect`
 and `repowise-adr::mine` (both degrading to `None`/empty on failure rather

@@ -2,13 +2,17 @@
 //! dependency graph, and health scoring as agent-facing tools over
 //! stdio, using the official `rmcp` SDK.
 //!
-//! Implements 4 of the original repowise's ~10 MCP tools —
-//! `get_overview`, `search_codebase`, `get_context`, `get_risk` — the
-//! ones whose backing data (the index, the resolved dependency graph,
-//! health findings, `repowise-git`'s hotspot/churn/bug-fix data) already
-//! exists in this port. `get_change_risk` is a separate, deliberately
-//! deferred addition (see issue #42): the original feeds diff-shape
-//! metrics into a pre-trained ML model this port has no equivalent for.
+//! Implements 5 of the original repowise's ~10 MCP tools —
+//! `get_overview`, `search_codebase`, `get_context`, `get_risk`,
+//! `get_change_risk` — the ones whose backing data (the index, the
+//! resolved dependency graph, health findings, `repowise-git`'s
+//! hotspot/churn/bug-fix and diff-shape data) already exists in this
+//! port. `get_change_risk`'s score is a documented fixed-weight
+//! heuristic over diff-shape metrics (files/lines touched, subsystems
+//! affected, change concentration, author experience) — the original
+//! feeds the same kind of metrics into a pre-trained ML model, which
+//! this port has no labeled corpus or training pipeline to reproduce
+//! (see issue #42 and the category-A "ML-calibrated scoring" issue).
 //!
 //! Every tool call re-loads `.repowise/index.json` and rebuilds the
 //! dependency graph fresh — no in-memory caching across calls. Simple
@@ -101,6 +105,14 @@ impl Default for RiskParams {
     }
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+struct ChangeRiskParams {
+    /// A single commit, or a `base..head` range, to assess. Defaults to
+    /// `HEAD` (the most recent commit) when omitted.
+    #[serde(default)]
+    revspec: Option<String>,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 struct LanguageCount {
     language: String,
@@ -186,6 +198,26 @@ struct RiskOutput {
     /// One entry when `file` was given in the request; up to `top_n`
     /// entries (highest hotspot score first) when it was omitted.
     files: Vec<FileRisk>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct ChangeRiskOutput {
+    revspec: String,
+    lines_added: usize,
+    lines_deleted: usize,
+    files_touched: usize,
+    subsystems_touched: usize,
+    /// `0.0..=1.0`; how evenly the changed lines are spread across the
+    /// touched files (`0.0` = concentrated in one file, `1.0` = spread
+    /// perfectly evenly). See `repowise_git::ChangeRisk` for the formula.
+    concentration: f64,
+    author: String,
+    author_prior_commits: usize,
+    /// `0.0..=10.0`, higher is riskier. A documented fixed-weight
+    /// heuristic over the fields above — **not** a calibrated
+    /// probability, and not the reference repowise's trained-model score
+    /// (see the module doc comment).
+    score: f64,
 }
 
 fn display_rel(path: &Path, root: &Path) -> String {
@@ -376,6 +408,30 @@ impl RepowiseServer {
             .map(|h| file_risk(&h.file, &index, analytics.as_ref(), &health))
             .collect();
         Ok(Json(RiskOutput { files }))
+    }
+
+    #[tool(
+        name = "get_change_risk",
+        description = "Deterministic diff-shape risk score for a single commit or a `base..head` range: lines added/deleted, files touched, subsystems (top-level directories) touched, change concentration (how evenly the diff is spread across files), and the head commit's author's prior-commit count as an experience proxy. These combine into a documented fixed-weight 0-10 score. This is a heuristic approximation of the reference repowise's `get_change_risk`, NOT its ML-calibrated score — this port has no trained model or labeled defect corpus, so treat the number as a rough signal, not a probability."
+    )]
+    fn get_change_risk(
+        &self,
+        Parameters(ChangeRiskParams { revspec }): Parameters<ChangeRiskParams>,
+    ) -> Result<Json<ChangeRiskOutput>, ErrorData> {
+        let risk = repowise_git::change_risk(&self.root, revspec.as_deref()).map_err(|e| {
+            ErrorData::invalid_params(format!("failed to compute change risk: {e}"), None)
+        })?;
+        Ok(Json(ChangeRiskOutput {
+            revspec: risk.revspec,
+            lines_added: risk.lines_added,
+            lines_deleted: risk.lines_deleted,
+            files_touched: risk.files_touched,
+            subsystems_touched: risk.subsystems_touched,
+            concentration: risk.concentration,
+            author: risk.author,
+            author_prior_commits: risk.author_prior_commits,
+            score: risk.score,
+        }))
     }
 }
 
@@ -682,5 +738,68 @@ mod tests {
             panic!("expected an error for an unindexed file");
         };
         assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn get_change_risk_defaults_to_head_and_reports_diff_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+
+        std::fs::write(root.join("lib.rs"), "fn a() {}\n").unwrap();
+        git(&root, &["add", "lib.rs"]);
+        git(&root, &["commit", "-q", "-m", "Add lib"]);
+        std::fs::write(root.join("lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "Grow lib"]);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(risk) = server
+            .get_change_risk(Parameters(ChangeRiskParams { revspec: None }))
+            .unwrap();
+
+        assert_eq!(risk.revspec, "HEAD");
+        assert_eq!(risk.lines_added, 1);
+        assert_eq!(risk.lines_deleted, 0);
+        assert_eq!(risk.files_touched, 1);
+        assert_eq!(risk.author, "default@example.com");
+        assert!((0.0..=10.0).contains(&risk.score));
+    }
+
+    #[test]
+    fn get_change_risk_accepts_an_explicit_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "Add a"]);
+        git(&root, &["tag", "base"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "Grow a"]);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(risk) = server
+            .get_change_risk(Parameters(ChangeRiskParams {
+                revspec: Some("base..HEAD".to_string()),
+            }))
+            .unwrap();
+
+        assert_eq!(risk.revspec, "base..HEAD");
+        assert_eq!(risk.lines_added, 1);
+        assert_eq!(risk.files_touched, 1);
+    }
+
+    #[test]
+    fn get_change_risk_errors_when_not_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let server = RepowiseServer { root };
+        let result = server.get_change_risk(Parameters(ChangeRiskParams { revspec: None }));
+        let Err(err) = result else {
+            panic!("expected an error when the root isn't a git repository");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
 }

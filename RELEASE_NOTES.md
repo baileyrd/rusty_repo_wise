@@ -6,6 +6,39 @@ repo routing work through PRs).
 
 ---
 
+## PR #141 — Add live dashboard server scaffolding (Phase 0)
+**2026-07-23** · [#141](https://github.com/baileyrd/rusty_repo_wise/pull/141) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** Phase 0 of the pivot away from the one-shot static
+  `repowise dashboard` page toward a genuinely live server, matching
+  real repowise's Next.js+FastAPI architecture instead of a static
+  site (issue #10's original design).
+- **New `repowise-server` crate:** an `axum` backend exposing indexed
+  repo data as JSON. Only `GET /api/overview` exists so far — proving
+  the server-plus-frontend architecture end to end. It also serves a
+  built frontend's static assets via `ServeDir` when `--static-dir` is
+  given.
+- **New `repowise-web` crate:** a Leptos (WASM, CSR) frontend that
+  fetches `/api/overview` and renders it. Deliberately kept as its own
+  standalone Cargo workspace (an empty `[workspace]` table in its
+  `Cargo.toml`) rather than a member of the root workspace, so its
+  WASM-only target can never break `cargo build/test/clippy
+  --workspace` for the rest of the project. Build it with `cd
+  crates/repowise-web && trunk build`.
+- **New `repowise serve-dashboard [PATH]` CLI command** (`--addr`,
+  `--static-dir`) — starts the live server, printing a hint about
+  building the frontend if `--static-dir` is omitted.
+- Verified end-to-end manually: indexed a scratch repo, ran `trunk
+  build`, started the real compiled server pointed at the built
+  `dist/`, and `curl`-confirmed both the JSON API and static asset
+  serving (including correct `content-type: application/wasm`).
+- **Scope:** this is scaffolding only — one endpoint, no ported views.
+  Porting the existing static-dashboard views (health, hotspots,
+  decisions, symbols) onto this same JSON-API shape is the next phase,
+  not done here. This PR does not close #59 or #65.
+
+---
+
 ## PR #139 — Abstract health-scoring penalty weights via HealthWeights
 **2026-07-23** · [#139](https://github.com/baileyrd/rusty_repo_wise/pull/139) · part of [#62](https://github.com/baileyrd/rusty_repo_wise/issues/62)
 

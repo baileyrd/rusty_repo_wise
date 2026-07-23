@@ -6,6 +6,47 @@ repo routing work through PRs).
 
 ---
 
+## PR #137 — Add opt-in LLM-written wiki summaries via repowise-llm
+**2026-07-23** · [#137](https://github.com/baileyrd/rusty_repo_wise/pull/137) · part of [#61](https://github.com/baileyrd/rusty_repo_wise/issues/61)
+
+- **Added:** a first, deliberately narrow slice of issue #61's
+  LLM-dependent feature tier. New `repowise generate [PATH]` CLI
+  command layers an LLM-written summary on top of each existing
+  `repowise-docs` wiki page.
+- **New `repowise-llm` crate:** an OpenAI-compatible chat-completions
+  client (`ureq`, synchronous — same HTTP-client choice
+  `repowise-adr`/`repowise-git` already made for their own opt-in
+  network calls, so `repowise generate` doesn't need an async runtime
+  the way `repowise serve` does). Works against any OpenAI-compatible
+  endpoint, including a self-hosted
+  [`rusty_provider`](https://github.com/baileyrd/rusty_provider)
+  instance.
+- **Entirely opt-in**, mirroring `REPOWISE_GITHUB_TOKEN`'s "unset =
+  feature off" pattern: `REPOWISE_LLM_BASE_URL` is the on/off switch,
+  with `REPOWISE_LLM_MODEL` (default `"smart"`) and an optional
+  `REPOWISE_LLM_API_KEY`.
+- `generate_wiki_summaries` reads each file's existing wiki page (via a
+  new `pub wiki_page_path` helper exported from `repowise-docs`), asks
+  the LLM for a 2-3 sentence summary, and inserts it as a "## Summary"
+  section right after the title — idempotent (replaces rather than
+  stacks a previous summary) and per-file fault-tolerant (one page's
+  failure doesn't stop the rest; `repowise generate` reports
+  written/skipped/failed counts).
+- Requires `repowise docs` to have been run first — same "augment,
+  don't generate" relationship the dashboard drill-down links (#57)
+  have with wiki pages.
+- Tests: `complete()` against a real HTTP/JSON fixture server (same
+  hand-rolled approach `repowise-adr`/`repowise-git`'s own network-call
+  tests use), `insert_summary`'s idempotent-replace behavior, and an
+  end-to-end `generate_wiki_summaries` test covering both an existing
+  wiki page and a missing one.
+- **Scope:** wiki-prose generation only. RAG chat, refactor-plan
+  codegen, and doc-gen-as-decision-source — the other three features
+  #61 bundles — remain deferred as separate follow-ups needing their
+  own retrieval/context design. This PR does not close #61.
+
+---
+
 ## PR #135 — Add linked-issue-reference bug-fix heuristic
 **2026-07-23** · [#135](https://github.com/baileyrd/rusty_repo_wise/pull/135) · closes [#60](https://github.com/baileyrd/rusty_repo_wise/issues/60)
 

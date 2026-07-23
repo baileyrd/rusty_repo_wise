@@ -3,17 +3,20 @@
 //! This implements a focused subset of repowise's "25 deterministic
 //! markers": long functions, high cyclomatic complexity, oversized
 //! parameter lists, god classes (too many methods), duplicate code
-//! (identical function/method bodies), and possibly-dead code (zero
-//! resolved callers). Git-history-based markers (churn, hotspots, bug-fix
-//! history) aren't implemented yet — that needs the git-analytics layer,
-//! which is a separate phase.
+//! (identical function/method bodies), possibly-dead code (zero
+//! resolved callers), and low cohesion (LCOM4 — see the `lcom4` module
+//! doc comment for its Rust/Python/TS+JS-only scope). Git-history-based
+//! markers (churn, hotspots, bug-fix history) aren't implemented yet —
+//! that needs the git-analytics layer, which is a separate phase.
 //!
 //! Every marker here is a plain threshold over data `repowise-parser`/
 //! `repowise-graph` already computed; nothing is inferred or guessed.
 
 mod dead_code;
+mod lcom4;
 
 pub use dead_code::{find_dead_code, DeadCodeCandidate, DeadCodeConfidence};
+pub use lcom4::{find_low_cohesion, LowCohesionCandidate, LOW_COHESION_MIN_COMPONENTS};
 
 use repowise_core::{Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
@@ -35,6 +38,7 @@ const PENALTY_TOO_MANY_PARAMS: f64 = 0.3;
 const PENALTY_GOD_CLASS: f64 = 1.5;
 const PENALTY_DUPLICATE: f64 = 0.5;
 const PENALTY_DEAD_CODE: f64 = 0.2;
+const PENALTY_LOW_COHESION: f64 = 1.0;
 
 const MAX_SCORE: f64 = 10.0;
 
@@ -46,6 +50,7 @@ pub enum FindingKind {
     GodClass,
     DuplicateCode,
     PossiblyDeadCode,
+    LowCohesion,
 }
 
 impl FindingKind {
@@ -57,6 +62,7 @@ impl FindingKind {
             FindingKind::GodClass => "god-class",
             FindingKind::DuplicateCode => "duplicate-code",
             FindingKind::PossiblyDeadCode => "possibly-dead-code",
+            FindingKind::LowCohesion => "low-cohesion",
         }
     }
 
@@ -68,6 +74,7 @@ impl FindingKind {
             FindingKind::GodClass => PENALTY_GOD_CLASS,
             FindingKind::DuplicateCode => PENALTY_DUPLICATE,
             FindingKind::PossiblyDeadCode => PENALTY_DEAD_CODE,
+            FindingKind::LowCohesion => PENALTY_LOW_COHESION,
         }
     }
 }
@@ -129,6 +136,7 @@ pub fn analyze(index: &RepoIndex, graph: &RepoGraph) -> HealthReport {
 
     check_god_classes(index, &mut findings);
     check_duplicate_code(index, &mut findings);
+    check_low_cohesion(index, &mut findings);
 
     let file_scores = score_files(index, &findings);
     let average_score = if file_scores.is_empty() {
@@ -258,6 +266,21 @@ fn check_duplicate_code(index: &RepoIndex, findings: &mut Vec<Finding>) {
                 detail: format!("body identical to: {}", others.join(", ")),
             });
         }
+    }
+}
+
+fn check_low_cohesion(index: &RepoIndex, findings: &mut Vec<Finding>) {
+    for candidate in lcom4::find_low_cohesion(index) {
+        findings.push(Finding {
+            file: candidate.file,
+            symbol: Some(candidate.class),
+            line: candidate.line,
+            kind: FindingKind::LowCohesion,
+            detail: format!(
+                "{} disjoint field-access groups across {} tracked methods (>= {LOW_COHESION_MIN_COMPONENTS})",
+                candidate.components, candidate.tracked_methods
+            ),
+        });
     }
 }
 

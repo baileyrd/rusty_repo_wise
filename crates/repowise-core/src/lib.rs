@@ -177,6 +177,20 @@ pub struct CallRef {
     pub line: usize,
 }
 
+/// A `self`/`this` field or property access (read or write; the
+/// distinction doesn't matter for cohesion purposes, only that the
+/// method touches the field) found inside a method body. Used to compute
+/// LCOM4 (structural class cohesion) in `repowise-health`; not populated
+/// for languages without field-access extraction (see `FileRecord`'s own
+/// doc comment).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldAccessRef {
+    /// The enclosing method's symbol id.
+    pub method: SymbolId,
+    pub field_name: String,
+    pub line: usize,
+}
+
 /// Everything extracted from a single source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRecord {
@@ -186,6 +200,11 @@ pub struct FileRecord {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<ImportRef>,
     pub calls: Vec<CallRef>,
+    /// Empty for languages/extractors that don't yet extract field
+    /// accesses (see each language module's own extraction logic) —
+    /// degrades LCOM4 scoring to "not enough data" for those files rather
+    /// than failing.
+    pub field_accesses: Vec<FieldAccessRef>,
 }
 
 /// The full index for a repository: one record per parsed file, plus

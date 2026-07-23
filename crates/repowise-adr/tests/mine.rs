@@ -93,6 +93,7 @@ fn mines_and_links_adrs_and_decision_commits() {
             symbols: vec![symbol],
             imports: Vec::new(),
             calls: Vec::new(),
+            field_accesses: Vec::new(),
         }],
         other_files: 0,
     };

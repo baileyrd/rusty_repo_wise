@@ -31,6 +31,7 @@ fn build_index(root: &std::path::Path) -> RepoIndex {
             symbols: vec![symbol],
             imports: Vec::new(),
             calls: Vec::new(),
+            field_accesses: Vec::new(),
         }],
         other_files: 0,
     }

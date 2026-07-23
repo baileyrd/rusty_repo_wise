@@ -73,14 +73,19 @@ justify it yet.
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`
 extracts symbols/imports/calls per file into a `RepoIndex` → saved to
-`.repowise/index.json`. Every other command (`overview`, `search`, `deps`,
-`health`, `docs`) loads that index, builds a `RepoGraph` (resolves
-imports/calls into `Contains`/`Imports`/`Calls` edges), and queries it —
-`repowise-health` adds one more pass over the graph's symbols and
-call-in-degrees to score files, and `repowise-docs` renders one markdown
-page per file from the index/graph/health data, tracking freshness via a
-hash of each file's own source re-read from disk (not the index) at
-generation time.
+`.repowise/index.json`. For Rust/Python/TypeScript/JavaScript specifically,
+extraction also walks each method body for `self`/`this` field
+reads/writes into `FileRecord::field_accesses` (empty for the other 12
+parsed languages, which don't extract it yet). Every other command
+(`overview`, `search`, `deps`, `health`, `docs`) loads that index, builds a
+`RepoGraph` (resolves imports/calls into `Contains`/`Imports`/`Calls`
+edges), and queries it — `repowise-health` adds one more pass over the
+graph's symbols and call-in-degrees to score files (plus a separate pass
+over `field_accesses` alone for the LCOM4 low-cohesion marker, which
+doesn't need the call graph at all — see `repowise-health::lcom4`), and
+`repowise-docs` renders one markdown page per file from the index/graph/
+health data, tracking freshness via a hash of each file's own source
+re-read from disk (not the index) at generation time.
 `hotspots`/`ownership`/`coupled` are a separate path: they load the same
 `RepoIndex` for complexity data, but get their git-history data by shelling
 out to `git log`/`git blame` fresh on every invocation rather than reading

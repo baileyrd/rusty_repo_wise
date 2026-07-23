@@ -54,6 +54,7 @@ mod tests {
             hash: "abcdef1234567890".to_string(),
             author: "A. Uthor".to_string(),
             message: message.to_string(),
+            timestamp: 0,
             files: Vec::new(),
         }
     }

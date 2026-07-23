@@ -36,6 +36,28 @@ fn init_repo(dir: &Path) {
     git(dir, &["config", "user.email", "default@example.com"]);
 }
 
+/// Same as `git`, but backdates the commit's author/committer date so
+/// recency-decay tests don't have to wait for real time to pass.
+fn git_commit_at(dir: &Path, message: &str, iso_date: &str) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["commit", "-q", "-m", message])
+        .env_remove("GIT_AUTHOR_NAME")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env_remove("GIT_COMMITTER_NAME")
+        .env_remove("GIT_COMMITTER_EMAIL")
+        .env("GIT_AUTHOR_DATE", iso_date)
+        .env("GIT_COMMITTER_DATE", iso_date)
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn tracks_churn_bugfix_commits_and_last_touch() {
     let dir = tempfile::tempdir().unwrap();
@@ -175,4 +197,89 @@ fn hotspot_score_multiplies_churn_by_complexity() {
     assert_eq!(hotspots[0].churn, 2);
     assert_eq!(hotspots[0].total_complexity, 5);
     assert_eq!(hotspots[0].score, 10);
+}
+
+#[test]
+fn decayed_score_ranks_recent_churn_above_equally_old_churn() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    init_repo(&root);
+
+    // `old.rs`: same churn/complexity as `new.rs`, but both its commits
+    // are backdated ~3 years, many half-lives past the 90-day decay —
+    // its recency-weighted churn should be effectively zero.
+    std::fs::write(root.join("old.rs"), "fn old() {}\n").unwrap();
+    git(&root, &["add", "old.rs"]);
+    git_commit_at(&root, "Add old.rs", "2022-01-01T00:00:00");
+    std::fs::write(root.join("old.rs"), "fn old() { 1 }\n").unwrap();
+    git(&root, &["add", "old.rs"]);
+    git_commit_at(&root, "Tweak old.rs", "2022-01-02T00:00:00");
+
+    // `new.rs`: committed "now" (no backdating).
+    std::fs::write(root.join("new.rs"), "fn new_fn() {}\n").unwrap();
+    git(&root, &["add", "new.rs"]);
+    git(&root, &["commit", "-q", "-m", "Add new.rs"]);
+    std::fs::write(root.join("new.rs"), "fn new_fn() { 1 }\n").unwrap();
+    git(&root, &["add", "new.rs"]);
+    git(&root, &["commit", "-q", "-m", "Tweak new.rs"]);
+
+    let old_path = root.join("old.rs");
+    let new_path = root.join("new.rs");
+    let make_symbol = |file: &Path, name: &str| Symbol {
+        id: Symbol::make_id(file, name, 1),
+        name: name.to_string(),
+        kind: SymbolKind::Function,
+        file: file.to_path_buf(),
+        start_line: 1,
+        end_line: 1,
+        parent: None,
+        complexity: 5,
+        param_count: 0,
+        body_hash: None,
+    };
+    let index = RepoIndex {
+        root: root.clone(),
+        files: vec![
+            FileRecord {
+                path: old_path.clone(),
+                language: Language::Rust,
+                lines: 1,
+                symbols: vec![make_symbol(&old_path, "old")],
+                imports: Vec::new(),
+                calls: Vec::new(),
+            },
+            FileRecord {
+                path: new_path.clone(),
+                language: Language::Rust,
+                lines: 1,
+                symbols: vec![make_symbol(&new_path, "new_fn")],
+                imports: Vec::new(),
+                calls: Vec::new(),
+            },
+        ],
+        other_files: 0,
+    };
+
+    let analytics = GitAnalytics::collect(&root).unwrap();
+    let hotspots = repowise_git::hotspots(&index, &analytics);
+
+    let old_hotspot = hotspots.iter().find(|h| h.file == old_path).unwrap();
+    let new_hotspot = hotspots.iter().find(|h| h.file == new_path).unwrap();
+
+    // Equal raw churn/complexity, so equal raw score...
+    assert_eq!(old_hotspot.churn, new_hotspot.churn);
+    assert_eq!(old_hotspot.score, new_hotspot.score);
+    // ...but the recently-touched file ranks higher on decayed score.
+    assert!(new_hotspot.decayed_score > old_hotspot.decayed_score);
+    // Recent commits decay by a negligible amount over a test run.
+    assert!(new_hotspot.decayed_score > old_hotspot.score as f64 - 0.01);
+    // Old commits (~3 years, dozens of half-lives past 90 days) decay to
+    // effectively nothing.
+    assert!(old_hotspot.decayed_score < 0.01);
+
+    // Ranking (not just the raw values) reflects recency: `new.rs` sorts
+    // ahead of `old.rs` despite identical churn/complexity.
+    let new_rank = hotspots.iter().position(|h| h.file == new_path).unwrap();
+    let old_rank = hotspots.iter().position(|h| h.file == old_path).unwrap();
+    assert!(new_rank < old_rank);
 }

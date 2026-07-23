@@ -33,10 +33,22 @@ const BUGFIX_KEYWORDS: &[&str] = &["fix", "bug", "hotfix", "patch"];
 /// otherwise flood every touched file's coupling list with noise.
 const MAX_COCHANGE_COMMIT_FILES: usize = 50;
 
+/// Half-life (in days) for recency-weighted churn: a commit this many
+/// days old contributes half as much as a commit made today, decaying
+/// exponentially. 90 days is a deliberately simple, documented choice —
+/// long enough that a quarter's worth of steady activity still registers,
+/// short enough that a burst of churn from a year ago reads as cold today.
+const HOTSPOT_HALF_LIFE_DAYS: f64 = 90.0;
+const SECONDS_PER_DAY: f64 = 86_400.0;
+
 /// Git-history analytics for a repository, collected fresh from `git log`
 /// / `git blame` output rather than cached — see the README for why.
 pub struct GitAnalytics {
     churn: HashMap<PathBuf, usize>,
+    /// Sum of `exp(-age_days / HOTSPOT_HALF_LIFE_DAYS)` per commit
+    /// touching the file, `age_days` measured from `now` (collection
+    /// time) to each commit's author-date. See `decayed_churn_of`.
+    decayed_churn: HashMap<PathBuf, f64>,
     bugfix_commits: HashMap<PathBuf, usize>,
     co_change: HashMap<(PathBuf, PathBuf), usize>,
     /// (short hash, author) of the most recent commit known to touch
@@ -50,15 +62,24 @@ impl GitAnalytics {
     /// Walk the full commit history of the repo containing `root`.
     pub fn collect(root: &Path) -> anyhow::Result<Self> {
         let commits = log::collect_history(root)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
         let mut churn: HashMap<PathBuf, usize> = HashMap::new();
+        let mut decayed_churn: HashMap<PathBuf, f64> = HashMap::new();
         let mut bugfix_commits: HashMap<PathBuf, usize> = HashMap::new();
         let mut co_change: HashMap<(PathBuf, PathBuf), usize> = HashMap::new();
         let mut last_touch: HashMap<PathBuf, (String, String)> = HashMap::new();
 
         for commit in &commits {
             let is_bugfix = is_bugfix_message(&commit.message);
+            let age_days = (now - commit.timestamp).max(0) as f64 / SECONDS_PER_DAY;
+            let weight = (-age_days / HOTSPOT_HALF_LIFE_DAYS).exp();
             for file in &commit.files {
                 *churn.entry(file.clone()).or_insert(0) += 1;
+                *decayed_churn.entry(file.clone()).or_insert(0.0) += weight;
                 if is_bugfix {
                     *bugfix_commits.entry(file.clone()).or_insert(0) += 1;
                 }
@@ -78,6 +99,7 @@ impl GitAnalytics {
 
         Ok(GitAnalytics {
             churn,
+            decayed_churn,
             bugfix_commits,
             co_change,
             last_touch,
@@ -87,6 +109,14 @@ impl GitAnalytics {
 
     pub fn churn_of(&self, file: &Path) -> usize {
         self.churn.get(file).copied().unwrap_or(0)
+    }
+
+    /// Recency-weighted churn: each commit touching `file` contributes
+    /// `exp(-age_days / HOTSPOT_HALF_LIFE_DAYS)` rather than a flat `1`,
+    /// so old activity counts for less than recent activity even when the
+    /// raw commit count (`churn_of`) is the same.
+    pub fn decayed_churn_of(&self, file: &Path) -> f64 {
+        self.decayed_churn.get(file).copied().unwrap_or(0.0)
     }
 
     pub fn bugfix_commits_of(&self, file: &Path) -> usize {
@@ -155,9 +185,9 @@ pub fn ownership_of(root: &Path, file: &Path) -> anyhow::Result<Vec<Ownership>> 
 }
 
 /// A file's hotspot score: churn × total cyclomatic complexity of its
-/// symbols. Deterministic, no recency weighting or decay — a simple,
-/// legible starting point matching the original repowise's "hotspots =
-/// churn × complexity" framing.
+/// symbols. A simple, legible starting point matching the original
+/// repowise's "hotspots = churn × complexity" framing. See `decayed_score`
+/// for the recency-weighted variant used to rank results.
 #[derive(Debug, Clone)]
 pub struct Hotspot {
     pub file: PathBuf,
@@ -165,12 +195,17 @@ pub struct Hotspot {
     pub total_complexity: usize,
     pub bugfix_commits: usize,
     pub score: usize,
+    /// `decayed_churn_of(file) × total_complexity` — the same formula as
+    /// `score`, but with recency-weighted churn instead of a raw commit
+    /// count, so old activity contributes less than recent activity.
+    /// Used to order the results `hotspots()` returns.
+    pub decayed_score: f64,
     /// (short hash, author) of the most recent commit touching this file.
     pub last_touch: Option<(String, String)>,
 }
 
-/// Rank every indexed file with nonzero churn by hotspot score,
-/// highest first.
+/// Rank every indexed file with nonzero churn by (recency-weighted)
+/// hotspot score, highest first.
 pub fn hotspots(index: &RepoIndex, analytics: &GitAnalytics) -> Vec<Hotspot> {
     let mut out: Vec<Hotspot> = index
         .files
@@ -188,11 +223,16 @@ pub fn hotspots(index: &RepoIndex, analytics: &GitAnalytics) -> Vec<Hotspot> {
                 total_complexity,
                 bugfix_commits,
                 score: churn * total_complexity,
+                decayed_score: analytics.decayed_churn_of(&f.path) * total_complexity as f64,
                 last_touch,
             }
         })
         .filter(|h| h.churn > 0)
         .collect();
-    out.sort_by_key(|h| std::cmp::Reverse(h.score));
+    out.sort_by(|a, b| {
+        b.decayed_score
+            .partial_cmp(&a.decayed_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }

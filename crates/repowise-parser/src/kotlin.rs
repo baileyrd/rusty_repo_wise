@@ -82,6 +82,7 @@ impl<'a> Walker<'a> {
                         parent: None,
                         complexity: 0,
                         max_nesting_depth: 0,
+                        bumpy_road_bumps: 0,
                         param_count: 0,
                         body_hash: None,
                     });
@@ -120,6 +121,15 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or(0);
+                    let bumpy_road_bumps = body
+                        .map(|b| {
+                            metrics::bumpy_road_bumps(
+                                b,
+                                |n| is_decision(n, self.source),
+                                is_nested_function,
+                            )
+                        })
+                        .unwrap_or(0);
                     let params = find_child(node, "function_value_parameters");
                     let param_count = metrics::count_params(params);
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
@@ -133,6 +143,7 @@ impl<'a> Walker<'a> {
                         parent,
                         complexity,
                         max_nesting_depth,
+                        bumpy_road_bumps,
                         param_count,
                         body_hash,
                     });

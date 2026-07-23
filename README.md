@@ -62,19 +62,21 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from nine
+- Score every file's health deterministically (0–10, no LLM/ML) from ten
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
-  (LCOM4 — Rust/Python/TS+JS only, see "Health scoring" below), and
-  nested complexity (`nested_complexity` — maximum control-flow nesting
-  depth, complementing cyclomatic complexity's flat branch count) —
-  except for shell scripts, which are deliberately exempt from the
-  dead-code marker: a shell function is routinely invoked only from the
-  command line, another script, or a cron job, none of which this
-  port's call graph can see, making the signal too unreliable to report
-  for that language.
+  (LCOM4 — Rust/Python/TS+JS only, see "Health scoring" below), nested
+  complexity (`nested_complexity` — maximum control-flow nesting depth,
+  complementing cyclomatic complexity's flat branch count), and a
+  "bumpy road" (`bumpy_road` — count of distinct nested-block regions,
+  complementing nesting depth's single deepest-point view) — except for
+  shell scripts, which are deliberately exempt from the dead-code
+  marker: a shell function is routinely invoked only from the command
+  line, another script, or a cron job, none of which this port's call
+  graph can see, making the signal too unreliable to report for that
+  language.
 - Derive git-history analytics — churn, hotspot score (churn × complexity),
   bug-fix commit frequency, co-change coupling, and per-author line
   ownership — by shelling out to `git log`/`git blame`, joined against the
@@ -101,7 +103,7 @@ specifics per layer), not full feature parity:
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
 Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
 other languages aren't implemented — see issue #11 for the
-tracking/discussion issue on extending language support. The health scorer covers 9 of repowise's ~25 markers — see
+tracking/discussion issue on extending language support. The health scorer covers 10 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
@@ -119,8 +121,9 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-parser` — tree-sitter-based extraction for Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
   Swift, PHP, Dart, and shell scripts, including per-function
-  complexity/nesting-depth/param-count/body-hash metrics, plus per-method
-  `self`/`this` field-access tracking for Rust/Python/TS+JS (feeds LCOM4).
+  complexity/nesting-depth/bumpy-road/param-count/body-hash metrics, plus
+  per-method `self`/`this` field-access tracking for Rust/Python/TS+JS
+  (feeds LCOM4).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -184,6 +187,7 @@ to `[0, 10]`:
 | Possibly dead code | 0 resolved callers | −0.2 |
 | Low cohesion (LCOM4) | >= 2 disjoint field-access groups | −1.0 |
 | Nested complexity (`nested_complexity`) | control flow nested > 4 levels deep | −1.0 |
+| Bumpy road (`bumpy_road`) | >= 3 separate nested-block regions | −0.5 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -228,6 +232,22 @@ rather than a flat count — for **all 16 parsed languages** (unlike
 LCOM4, this needed no new per-language extraction logic, since every
 language's `is_decision` classification already existed for cyclomatic
 complexity).
+
+**Bumpy road (`bumpy_road`)** complements `nested_complexity`: rather
+than the single deepest point reached, it counts how many *separate*
+nested-block regions occur within one function — three separate
+two-level-deep blocks read worse than one two-level-deep block, even
+at the same max nesting depth, and `max_nesting_depth` alone can't
+tell them apart. Computed by `repowise-parser::metrics::bumpy_road_bumps`,
+also alongside `cyclomatic_complexity`/`max_nesting_depth` for all 16
+languages. Counting rule: only *leaf* decision nodes count (a decision
+node with no further decision node nested inside it, before hitting a
+nested-function boundary) that reach a nesting depth of at least 2 —
+a linear chain (`if` containing `if` containing `if`) has exactly one
+leaf and counts as a single bump, not three, since it's one deep block
+rather than several scattered ones; three separate sibling `if`s each
+with one level of nesting inside have three leaves and count as three
+bumps. Flagged at 3+ bumps.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

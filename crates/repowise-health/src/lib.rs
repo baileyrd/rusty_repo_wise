@@ -7,8 +7,10 @@
 //! rolling-hash overlap — see the `near_duplicate` module doc comment),
 //! possibly-dead code (zero resolved callers), low cohesion (LCOM4 —
 //! see the `lcom4` module doc comment for its Rust/Python/TS+JS-only
-//! scope), and nested complexity (max control-flow nesting depth — see
-//! `repowise_core::Symbol::max_nesting_depth`). Git-history-based
+//! scope), nested complexity (max control-flow nesting depth — see
+//! `repowise_core::Symbol::max_nesting_depth`), and a "bumpy road"
+//! (count of distinct nested-block regions — see
+//! `repowise_core::Symbol::bumpy_road_bumps`). Git-history-based
 //! markers (churn, hotspots, bug-fix history) aren't implemented yet —
 //! that needs the git-analytics layer, which is a separate phase.
 //!
@@ -43,6 +45,9 @@ pub const GOD_CLASS_METHODS: usize = 15;
 /// A function/method with control-flow nested deeper than this is flagged.
 /// E.g. an `if` inside a `for` inside an `if` is depth 3.
 pub const HIGH_NESTING_DEPTH: usize = 4;
+/// A function/method with at least this many "bumpy road" nested-block
+/// regions (see `repowise_core::Symbol::bumpy_road_bumps`) is flagged.
+pub const BUMPY_ROAD_MIN_BUMPS: usize = 3;
 
 const PENALTY_LONG_FUNCTION: f64 = 0.5;
 const PENALTY_HIGH_COMPLEXITY: f64 = 1.0;
@@ -58,6 +63,10 @@ const PENALTY_NEAR_DUPLICATE: f64 = 0.3;
 // signals of the same rough severity, just measuring different things
 // (branch count vs. nesting depth).
 const PENALTY_NESTED_COMPLEXITY: f64 = 1.0;
+// Lighter than `NestedComplexity`: a complementary signal on the same
+// underlying data (scattered nesting vs. a single deep point), not an
+// independent problem worth double-weighting.
+const PENALTY_BUMPY_ROAD: f64 = 0.5;
 
 const MAX_SCORE: f64 = 10.0;
 
@@ -72,6 +81,7 @@ pub enum FindingKind {
     PossiblyDeadCode,
     LowCohesion,
     NestedComplexity,
+    BumpyRoad,
 }
 
 impl FindingKind {
@@ -86,6 +96,7 @@ impl FindingKind {
             FindingKind::PossiblyDeadCode => "possibly-dead-code",
             FindingKind::LowCohesion => "low-cohesion",
             FindingKind::NestedComplexity => "nested-complexity",
+            FindingKind::BumpyRoad => "bumpy-road",
         }
     }
 
@@ -100,6 +111,7 @@ impl FindingKind {
             FindingKind::PossiblyDeadCode => PENALTY_DEAD_CODE,
             FindingKind::LowCohesion => PENALTY_LOW_COHESION,
             FindingKind::NestedComplexity => PENALTY_NESTED_COMPLEXITY,
+            FindingKind::BumpyRoad => PENALTY_BUMPY_ROAD,
         }
     }
 }
@@ -215,6 +227,18 @@ fn check_function_markers(
             detail: format!(
                 "control flow nested {} levels deep (> {HIGH_NESTING_DEPTH})",
                 sym.max_nesting_depth
+            ),
+        });
+    }
+    if sym.bumpy_road_bumps >= BUMPY_ROAD_MIN_BUMPS {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(sym.start_line),
+            kind: FindingKind::BumpyRoad,
+            detail: format!(
+                "{} separate nested-block regions (>= {BUMPY_ROAD_MIN_BUMPS})",
+                sym.bumpy_road_bumps
             ),
         });
     }

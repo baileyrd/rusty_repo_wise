@@ -88,6 +88,13 @@ impl<'a> Walker<'a> {
                             })
                         })
                         .unwrap_or(0);
+                    let bumpy_road_bumps = body
+                        .map(|b| {
+                            metrics::bumpy_road_bumps(b, is_decision, |n| {
+                                n.kind() == "function_definition"
+                            })
+                        })
+                        .unwrap_or(0);
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -100,6 +107,7 @@ impl<'a> Walker<'a> {
                         parent,
                         complexity,
                         max_nesting_depth,
+                        bumpy_road_bumps,
                         param_count,
                         body_hash,
                     });
@@ -124,6 +132,7 @@ impl<'a> Walker<'a> {
                         parent: None,
                         complexity: 0,
                         max_nesting_depth: 0,
+                        bumpy_road_bumps: 0,
                         param_count: 0,
                         body_hash: None,
                     });
@@ -365,6 +374,27 @@ mod tests {
         assert_eq!(sequential.complexity, nested.complexity);
         assert_eq!(sequential.max_nesting_depth, 1);
         assert_eq!(nested.max_nesting_depth, 3);
+    }
+
+    #[test]
+    fn measures_bumpy_road_bumps_independently_of_max_nesting_depth() {
+        // Both reach the same max nesting depth (2), but `scattered` has
+        // three separate two-level-deep blocks while `single_deep` has
+        // just one -- max_nesting_depth alone can't tell them apart, but
+        // bumpy_road_bumps can.
+        let rec = extract_str(
+            "def scattered(x, y, z):\n    if x > 0:\n        if x > 10:\n            return 1\n    if y > 0:\n        if y > 10:\n            return 2\n    if z > 0:\n        if z > 10:\n            return 3\n    return 0\n\ndef single_deep(x):\n    if x > 0:\n        if x > 10:\n            return 1\n    return 0\n",
+        );
+        let scattered = rec.symbols.iter().find(|s| s.name == "scattered").unwrap();
+        let single_deep = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "single_deep")
+            .unwrap();
+
+        assert_eq!(scattered.max_nesting_depth, single_deep.max_nesting_depth);
+        assert_eq!(scattered.bumpy_road_bumps, 3);
+        assert_eq!(single_deep.bumpy_road_bumps, 1);
     }
 
     #[test]

@@ -121,6 +121,7 @@ mod tests {
             parent: None,
             complexity: 12,
             max_nesting_depth: 0,
+            bumpy_road_bumps: 0,
             param_count: 1,
             body_hash: None,
         };

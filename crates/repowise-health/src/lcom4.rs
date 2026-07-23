@@ -189,6 +189,7 @@ mod tests {
             parent: Some(class.to_string()),
             complexity: 1,
             max_nesting_depth: 0,
+            bumpy_road_bumps: 0,
             param_count: 0,
             body_hash: None,
         }
@@ -206,6 +207,7 @@ mod tests {
             parent: None,
             complexity: 0,
             max_nesting_depth: 0,
+            bumpy_road_bumps: 0,
             param_count: 0,
             body_hash: None,
         }

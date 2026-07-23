@@ -174,6 +174,7 @@ fn hotspot_score_multiplies_churn_by_complexity() {
         parent: None,
         complexity: 5,
         max_nesting_depth: 0,
+        bumpy_road_bumps: 0,
         param_count: 0,
         body_hash: None,
     };
@@ -237,6 +238,7 @@ fn decayed_score_ranks_recent_churn_above_equally_old_churn() {
         parent: None,
         complexity: 5,
         max_nesting_depth: 0,
+        bumpy_road_bumps: 0,
         param_count: 0,
         body_hash: None,
     };

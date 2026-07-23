@@ -150,6 +150,7 @@ mod tests {
                 symbols: Vec::new(),
                 imports: Vec::new(),
                 calls: Vec::new(),
+                field_accesses: Vec::new(),
             }],
             other_files: 0,
         }

@@ -72,6 +72,7 @@ mod tests {
                     symbols: vec![symbol],
                     imports: vec![],
                     calls: vec![],
+                    field_accesses: vec![],
                 },
                 FileRecord {
                     path: b_path.clone(),
@@ -80,6 +81,7 @@ mod tests {
                     symbols: vec![],
                     imports: vec![],
                     calls: vec![],
+                    field_accesses: vec![],
                 },
             ],
             other_files: 0,

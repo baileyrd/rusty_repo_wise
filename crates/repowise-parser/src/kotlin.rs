@@ -33,6 +33,7 @@ pub fn extract(path: &Path, source: &str) -> anyhow::Result<FileRecord> {
         symbols,
         imports,
         calls,
+        field_accesses: Vec::new(),
     })
 }
 

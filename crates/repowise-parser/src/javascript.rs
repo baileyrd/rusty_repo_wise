@@ -1,6 +1,6 @@
 use crate::metrics;
 use crate::util::text;
-use repowise_core::{CallRef, FileRecord, ImportRef, Language, Symbol, SymbolKind};
+use repowise_core::{CallRef, FieldAccessRef, FileRecord, ImportRef, Language, Symbol, SymbolKind};
 use std::path::{Component, Path, PathBuf};
 use tree_sitter::{Node, Parser};
 
@@ -44,6 +44,7 @@ fn extract(
     let mut symbols = Vec::new();
     let mut imports = Vec::new();
     let mut calls = Vec::new();
+    let mut field_accesses = Vec::new();
 
     let mut walker = Walker {
         path,
@@ -51,6 +52,7 @@ fn extract(
         symbols: &mut symbols,
         imports: &mut imports,
         calls: &mut calls,
+        field_accesses: &mut field_accesses,
         scope_stack: Vec::new(),
         class_stack: Vec::new(),
     };
@@ -63,6 +65,7 @@ fn extract(
         symbols,
         imports,
         calls,
+        field_accesses,
     })
 }
 
@@ -72,6 +75,7 @@ struct Walker<'a> {
     symbols: &'a mut Vec<Symbol>,
     imports: &'a mut Vec<ImportRef>,
     calls: &'a mut Vec<CallRef>,
+    field_accesses: &'a mut Vec<FieldAccessRef>,
     scope_stack: Vec<String>,
     class_stack: Vec<String>,
 }
@@ -200,6 +204,22 @@ impl<'a> Walker<'a> {
                     });
                 }
             }
+            "member_expression" => {
+                if let (Some(object), Some(property)) = (
+                    node.child_by_field_name("object"),
+                    node.child_by_field_name("property"),
+                ) {
+                    if text(object, self.source) == "this" && !is_call_target(node) {
+                        if let Some(method) = self.current_scope() {
+                            self.field_accesses.push(FieldAccessRef {
+                                method,
+                                field_name: text(property, self.source).to_string(),
+                                line: self.line_of(node),
+                            });
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         self.visit_children(node);
@@ -280,6 +300,25 @@ fn call_target_name(node: Node, source: &str) -> String {
             .unwrap_or_else(|| text(node, source).to_string()),
         _ => text(node, source).to_string(),
     }
+}
+
+/// True when `node` (a `member_expression`) is the target of its parent
+/// `call_expression`/`new_expression` — i.e. `this.method()`/
+/// `new this.Ctor()` rather than a field read/write like `this.field`.
+/// Excluded from field-access tracking so method/constructor names don't
+/// pollute the field-cohesion signal.
+fn is_call_target(node: Node) -> bool {
+    node.parent()
+        .map(|p| match p.kind() {
+            "call_expression" => {
+                p.child_by_field_name("function").map(|f| f.id()) == Some(node.id())
+            }
+            "new_expression" => {
+                p.child_by_field_name("constructor").map(|c| c.id()) == Some(node.id())
+            }
+            _ => false,
+        })
+        .unwrap_or(false)
 }
 
 /// A function/method's declared parameter count: the `parameters` field is
@@ -410,6 +449,22 @@ mod tests {
         assert_eq!(rec.calls.len(), 1);
         assert_eq!(rec.calls[0].callee_name, "helper");
         assert_eq!(rec.calls[0].caller, Some(render.id.clone()));
+    }
+
+    #[test]
+    fn records_this_field_reads_and_writes_but_not_method_calls() {
+        let rec = extract_js(
+            "class Point {\n  shift(dx) {\n    this.x += dx;\n    this.helper();\n    return this.y;\n  }\n\n  helper() {}\n}\n",
+        );
+        let shift = rec.symbols.iter().find(|s| s.name == "shift").unwrap();
+        let field_names: Vec<&str> = rec
+            .field_accesses
+            .iter()
+            .filter(|f| f.method == shift.id)
+            .map(|f| f.field_name.as_str())
+            .collect();
+        assert_eq!(field_names, vec!["x", "y"]);
+        assert!(!field_names.contains(&"helper"));
     }
 
     #[test]

@@ -135,6 +135,7 @@ mod tests {
             symbols: vec![symbol],
             imports: vec![],
             calls: vec![call],
+            field_accesses: vec![],
         };
         let b_file = FileRecord {
             path: b_path.clone(),
@@ -143,6 +144,7 @@ mod tests {
             symbols: vec![],
             imports: vec![],
             calls: vec![],
+            field_accesses: vec![],
         };
         let index = RepoIndex {
             root: root.clone(),

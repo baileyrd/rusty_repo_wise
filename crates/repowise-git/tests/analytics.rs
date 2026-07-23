@@ -185,6 +185,7 @@ fn hotspot_score_multiplies_churn_by_complexity() {
             symbols: vec![symbol],
             imports: Vec::new(),
             calls: Vec::new(),
+            field_accesses: Vec::new(),
         }],
         other_files: 0,
     };
@@ -247,6 +248,7 @@ fn decayed_score_ranks_recent_churn_above_equally_old_churn() {
                 symbols: vec![make_symbol(&old_path, "old")],
                 imports: Vec::new(),
                 calls: Vec::new(),
+                field_accesses: Vec::new(),
             },
             FileRecord {
                 path: new_path.clone(),
@@ -255,6 +257,7 @@ fn decayed_score_ranks_recent_churn_above_equally_old_churn() {
                 symbols: vec![make_symbol(&new_path, "new_fn")],
                 imports: Vec::new(),
                 calls: Vec::new(),
+                field_accesses: Vec::new(),
             },
         ],
         other_files: 0,

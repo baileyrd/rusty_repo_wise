@@ -54,6 +54,7 @@ fn file_record_with_language(
         symbols,
         imports: Vec::new(),
         calls,
+        field_accesses: Vec::new(),
     }
 }
 

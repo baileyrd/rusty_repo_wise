@@ -1,6 +1,6 @@
 use crate::metrics;
 use crate::util::text;
-use repowise_core::{CallRef, FileRecord, ImportRef, Language, Symbol, SymbolKind};
+use repowise_core::{CallRef, FieldAccessRef, FileRecord, ImportRef, Language, Symbol, SymbolKind};
 use std::path::Path;
 use tree_sitter::{Node, Parser};
 
@@ -14,6 +14,7 @@ pub fn extract(path: &Path, source: &str) -> anyhow::Result<FileRecord> {
     let mut symbols = Vec::new();
     let mut imports = Vec::new();
     let mut calls = Vec::new();
+    let mut field_accesses = Vec::new();
 
     let mut walker = Walker {
         path,
@@ -21,6 +22,7 @@ pub fn extract(path: &Path, source: &str) -> anyhow::Result<FileRecord> {
         symbols: &mut symbols,
         imports: &mut imports,
         calls: &mut calls,
+        field_accesses: &mut field_accesses,
         scope_stack: Vec::new(),
         class_stack: Vec::new(),
     };
@@ -33,6 +35,7 @@ pub fn extract(path: &Path, source: &str) -> anyhow::Result<FileRecord> {
         symbols,
         imports,
         calls,
+        field_accesses,
     })
 }
 
@@ -42,6 +45,7 @@ struct Walker<'a> {
     symbols: &'a mut Vec<Symbol>,
     imports: &'a mut Vec<ImportRef>,
     calls: &'a mut Vec<CallRef>,
+    field_accesses: &'a mut Vec<FieldAccessRef>,
     scope_stack: Vec<String>,
     class_stack: Vec<String>,
 }
@@ -188,6 +192,22 @@ impl<'a> Walker<'a> {
                     });
                 }
             }
+            "attribute" => {
+                if let (Some(object), Some(attribute)) = (
+                    node.child_by_field_name("object"),
+                    node.child_by_field_name("attribute"),
+                ) {
+                    if text(object, self.source) == "self" && !is_call_target(node) {
+                        if let Some(method) = self.current_scope() {
+                            self.field_accesses.push(FieldAccessRef {
+                                method,
+                                field_name: text(attribute, self.source).to_string(),
+                                line: self.line_of(node),
+                            });
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         self.visit_children(node);
@@ -215,6 +235,19 @@ fn call_target_name(node: Node, source: &str) -> String {
             .unwrap_or_else(|| text(node, source))
             .to_string(),
     }
+}
+
+/// True when `node` (an `attribute`) is the `function` position of its
+/// parent `call` — i.e. `self.method()` rather than a field read/write
+/// like `self.field`. Excluded from field-access tracking so method
+/// names don't pollute the field-cohesion signal.
+fn is_call_target(node: Node) -> bool {
+    node.parent()
+        .map(|p| {
+            p.kind() == "call"
+                && p.child_by_field_name("function").map(|f| f.id()) == Some(node.id())
+        })
+        .unwrap_or(false)
 }
 
 /// Cyclomatic-complexity decision points for Python: branches (including
@@ -261,6 +294,22 @@ mod tests {
         assert_eq!(rec.calls.len(), 1);
         assert_eq!(rec.calls[0].callee_name, "helper");
         assert_eq!(rec.calls[0].caller, Some(render.id.clone()));
+    }
+
+    #[test]
+    fn records_self_field_reads_and_writes_but_not_method_calls() {
+        let rec = extract_str(
+            "class Point:\n    def shift(self, dx):\n        self.x += dx\n        self.helper()\n        return self.y\n\n    def helper(self):\n        pass\n",
+        );
+        let shift = rec.symbols.iter().find(|s| s.name == "shift").unwrap();
+        let field_names: Vec<&str> = rec
+            .field_accesses
+            .iter()
+            .filter(|f| f.method == shift.id)
+            .map(|f| f.field_name.as_str())
+            .collect();
+        assert_eq!(field_names, vec!["x", "y"]);
+        assert!(!field_names.contains(&"helper"));
     }
 
     #[test]

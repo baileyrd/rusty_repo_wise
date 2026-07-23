@@ -62,10 +62,11 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from six
+- Score every file's health deterministically (0–10, no LLM/ML) from seven
   rule-based markers: long functions, high cyclomatic complexity, oversized
-  parameter lists, god classes, duplicate code, and possibly-dead code
-  (zero resolved callers) — except for shell scripts, which are
+  parameter lists, god classes, duplicate code, possibly-dead code
+  (zero resolved callers), and low cohesion (LCOM4 — Rust/Python/TS+JS
+  only, see "Health scoring" below) — except for shell scripts, which are
   deliberately exempt from the dead-code marker: a shell function is
   routinely invoked only from the command line, another script, or a
   cron job, none of which this port's call graph can see, making the
@@ -96,9 +97,10 @@ specifics per layer), not full feature parity:
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
 Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
 other languages aren't implemented — see issue #11 for the
-tracking/discussion issue on extending language support. The health scorer covers 6 of repowise's ~25 markers — see
-"Health scoring" below for which ones and why the rest (LCOM4 cohesion,
-Rabin-Karp substring clone detection) are deferred. LLM-written prose on
+tracking/discussion issue on extending language support. The health scorer covers 7 of repowise's ~25 markers — see
+"Health scoring" below for which ones and why the rest (Rabin-Karp
+substring clone detection, the ML-calibrated organizational-signal
+markers) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
 mining (only 6 of the original's 8 decision sources are implemented —
@@ -114,11 +116,13 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-parser` — tree-sitter-based extraction for Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
   Swift, PHP, Dart, and shell scripts, including per-function
-  complexity/param-count/body-hash metrics.
+  complexity/param-count/body-hash metrics, plus per-method
+  `self`/`this` field-access tracking for Rust/Python/TS+JS (feeds LCOM4).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
-  the parsed metrics and the call graph.
+  the parsed metrics and the call graph, including LCOM4 low-cohesion
+  detection over per-class field-access data.
 - `repowise-git` — git-history analytics (churn, hotspots, bug-fix
   frequency, co-change coupling, ownership), computed fresh from `git
   log`/`git blame` each time it's queried rather than cached in the index.
@@ -173,6 +177,7 @@ to `[0, 10]`:
 | God class | > 15 methods | −1.5 |
 | Duplicate code | body hash matches another symbol's | −0.5 |
 | Possibly dead code | 0 resolved callers | −0.2 |
+| Low cohesion (LCOM4) | >= 2 disjoint field-access groups | −1.0 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -189,13 +194,30 @@ best-effort call/import resolution: a symbol can look uncalled just
 because a call site couldn't be resolved (trait dispatch, dynamic
 dispatch, an external caller), not because it's truly unused.
 
-Deferred markers from the original repowise (not implemented): LCOM4
-cohesion (needs field-level access tracking per method); Rabin-Karp
+**Low cohesion (LCOM4)** builds a per-class graph — methods are nodes,
+an edge connects two methods that both access at least one common field
+— and flags a class whose field-touching methods split into 2+ disjoint
+groups (no shared field access between groups at all). Field-access
+extraction (`self`/`this` field reads/writes) is currently implemented
+for **Rust, Python, and TypeScript/JavaScript only** — the three
+languages issue #51's own acceptance criteria named explicitly, out of
+the 16 languages this port otherwise parses; the other 13 have an empty
+field-access list per file and are silently skipped for this one marker
+(not enough data, not "cohesive"), not flagged. A method that never
+touches a field of its own (a pure delegator, a static-style helper) is
+excluded from the per-class graph entirely rather than counted as its
+own singleton component — otherwise nearly any real-world class would
+trip this marker. Extending field-access tracking to the remaining
+languages is a natural follow-up, not done here.
+
+Deferred markers from the original repowise (not implemented): Rabin-Karp
 substring clone detection (this port only detects whole-body duplicates
-via exact hash match, not partial/near-duplicate code). Hotspots and
-bug-fix history are now implemented (see "Git analytics" below) but
-aren't yet folded into the health score itself — that's a natural
-follow-up, not done here.
+via exact hash match, not partial/near-duplicate code); the
+ML-calibrated organizational-signal markers (`churn_risk`,
+`co_change_scatter`, etc. — see issue #62, a design-level "needs-human"
+question, not a mechanical gap). Hotspots and bug-fix history are now
+implemented (see "Git analytics" below) but aren't yet folded into the
+health score itself — that's a natural follow-up, not done here.
 
 ## Git analytics
 

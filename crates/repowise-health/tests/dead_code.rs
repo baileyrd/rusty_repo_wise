@@ -42,6 +42,7 @@ fn file_record_full(
         symbols,
         imports,
         calls,
+        field_accesses: Vec::new(),
     }
 }
 

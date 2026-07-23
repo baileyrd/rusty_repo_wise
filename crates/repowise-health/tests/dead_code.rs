@@ -19,6 +19,7 @@ fn symbol(file: &str, name: &str, kind: SymbolKind, start_line: usize, end_line:
         end_line,
         parent: None,
         complexity: 1,
+        max_nesting_depth: 0,
         param_count: 0,
         body_hash: None,
     }

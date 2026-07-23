@@ -19,6 +19,7 @@ fn build_index(root: &std::path::Path) -> RepoIndex {
         end_line: 1,
         parent: None,
         complexity: 1,
+        max_nesting_depth: 0,
         param_count: 0,
         body_hash: None,
     };

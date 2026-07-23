@@ -75,6 +75,7 @@ impl<'a> Walker<'a> {
                         end_line,
                         parent: None,
                         complexity: 0,
+                        max_nesting_depth: 0,
                         param_count: 0,
                         body_hash: None,
                     });
@@ -100,6 +101,15 @@ impl<'a> Walker<'a> {
                                     )
                                 })
                                 .unwrap_or(0);
+                            let max_nesting_depth = body
+                                .map(|b| {
+                                    metrics::max_nesting_depth(
+                                        b,
+                                        |n| is_decision(n, self.source),
+                                        is_nested_function,
+                                    )
+                                })
+                                .unwrap_or(0);
                             let param_count = metrics::count_params(
                                 func_declarator.child_by_field_name("parameters"),
                             );
@@ -113,6 +123,7 @@ impl<'a> Walker<'a> {
                                 end_line,
                                 parent: None,
                                 complexity,
+                                max_nesting_depth,
                                 param_count,
                                 body_hash,
                             });

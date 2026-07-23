@@ -188,6 +188,7 @@ mod tests {
             end_line: start_line + 1,
             parent: Some(class.to_string()),
             complexity: 1,
+            max_nesting_depth: 0,
             param_count: 0,
             body_hash: None,
         }
@@ -204,6 +205,7 @@ mod tests {
             end_line: start_line + 20,
             parent: None,
             complexity: 0,
+            max_nesting_depth: 0,
             param_count: 0,
             body_hash: None,
         }

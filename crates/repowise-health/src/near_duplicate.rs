@@ -288,6 +288,7 @@ mod tests {
             end_line,
             parent: None,
             complexity: 1,
+            max_nesting_depth: 0,
             param_count: 1,
             // Distinct per symbol (keyed off start_line) so two
             // different symbols never accidentally look like an

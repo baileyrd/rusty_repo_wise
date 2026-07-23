@@ -81,6 +81,13 @@ impl<'a> Walker<'a> {
                             })
                         })
                         .unwrap_or(0);
+                    let max_nesting_depth = body
+                        .map(|b| {
+                            metrics::max_nesting_depth(b, is_decision, |n| {
+                                n.kind() == "function_definition"
+                            })
+                        })
+                        .unwrap_or(0);
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -92,6 +99,7 @@ impl<'a> Walker<'a> {
                         end_line,
                         parent,
                         complexity,
+                        max_nesting_depth,
                         param_count,
                         body_hash,
                     });
@@ -115,6 +123,7 @@ impl<'a> Walker<'a> {
                         end_line,
                         parent: None,
                         complexity: 0,
+                        max_nesting_depth: 0,
                         param_count: 0,
                         body_hash: None,
                     });
@@ -339,6 +348,23 @@ mod tests {
         // base(1) + if(1) + and(1) + elif(1) + for(1) + if(1) = 6
         assert_eq!(branchy.complexity, 6);
         assert_eq!(branchy.param_count, 3);
+    }
+
+    #[test]
+    fn measures_nesting_depth_independently_of_cyclomatic_complexity() {
+        // Same cyclomatic complexity (base + 3 ifs = 4) either way, but
+        // one nests the ifs inside each other and the other keeps them
+        // sequential -- nesting depth should tell them apart even though
+        // complexity alone can't.
+        let rec = extract_str(
+            "def sequential(x):\n    if x == 1:\n        return 1\n    if x == 2:\n        return 2\n    if x == 3:\n        return 3\n    return 0\n\ndef nested(x):\n    if x > 0:\n        if x > 10:\n            if x > 100:\n                return 3\n            return 2\n        return 1\n    return 0\n",
+        );
+        let sequential = rec.symbols.iter().find(|s| s.name == "sequential").unwrap();
+        let nested = rec.symbols.iter().find(|s| s.name == "nested").unwrap();
+
+        assert_eq!(sequential.complexity, nested.complexity);
+        assert_eq!(sequential.max_nesting_depth, 1);
+        assert_eq!(nested.max_nesting_depth, 3);
     }
 
     #[test]

@@ -2,18 +2,19 @@
 //! dependency graph, and health scoring as agent-facing tools over
 //! stdio, using the official `rmcp` SDK.
 //!
-//! Implements 6 of the original repowise's ~10 MCP tools —
+//! Implements 7 of the original repowise's ~10 MCP tools —
 //! `get_overview`, `search_codebase`, `get_context`, `get_risk`,
-//! `get_change_risk`, `get_symbol` — the ones whose backing data (the
-//! index, the resolved dependency graph, health findings,
-//! `repowise-git`'s hotspot/churn/bug-fix and diff-shape data, or raw
-//! source on disk) already exists in this port. `get_change_risk`'s
-//! score is a documented fixed-weight heuristic over diff-shape metrics
-//! (files/lines touched, subsystems affected, change concentration,
-//! author experience) — the original feeds the same kind of metrics
-//! into a pre-trained ML model, which this port has no labeled corpus or
-//! training pipeline to reproduce (see issue #42 and the category-A
-//! "ML-calibrated scoring" issue).
+//! `get_change_risk`, `get_symbol`, `get_why` — the ones whose backing
+//! data (the index, the resolved dependency graph, health findings,
+//! `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
+//! `repowise-adr`'s mined decisions, or raw source on disk) already
+//! exists in this port. `get_change_risk`'s score is a documented
+//! fixed-weight heuristic over diff-shape metrics (files/lines touched,
+//! subsystems affected, change concentration, author experience) — the
+//! original feeds the same kind of metrics into a pre-trained ML model,
+//! which this port has no labeled corpus or training pipeline to
+//! reproduce (see issue #42 and the category-A "ML-calibrated scoring"
+//! issue).
 //!
 //! Every tool call re-loads `.repowise/index.json` and rebuilds the
 //! dependency graph fresh — no in-memory caching across calls. Simple
@@ -66,6 +67,19 @@ impl RepowiseServer {
         };
         target.canonicalize().unwrap_or(target)
     }
+
+    /// Resolve a `get_why` target to a file path: if it exactly matches
+    /// an indexed symbol's id, that symbol's own file; otherwise treated
+    /// as a file path (same rules as `resolve_file`).
+    fn resolve_target(&self, target: &str, index: &RepoIndex) -> PathBuf {
+        index
+            .files
+            .iter()
+            .flat_map(|f| &f.symbols)
+            .find(|s| s.id == target)
+            .map(|s| s.file.clone())
+            .unwrap_or_else(|| self.resolve_file(target))
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
@@ -115,6 +129,16 @@ struct GetSymbolParams {
     /// `0` (just the symbol's own span).
     #[serde(default)]
     context_lines: usize,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+struct WhyParams {
+    /// File paths (absolute or relative to the indexed root) or symbol
+    /// ids (as returned by `search_codebase`/`get_context`) to filter
+    /// mined decisions by. A decision matches if its body links to any
+    /// target's file. Omit or leave empty to return every mined decision.
+    #[serde(default)]
+    targets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
@@ -247,6 +271,26 @@ struct GetSymbolOutput {
     start_line: usize,
     end_line: usize,
     source: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct DecisionOutput {
+    id: String,
+    title: String,
+    /// `"adr:<file>"` or `"commit:<short hash> by <author>"`.
+    source: String,
+    /// Raw `Status:` line value (ADR source only).
+    status: Option<String>,
+    /// Normalized `ADR-XXXX` this decision is superseded by, if any.
+    superseded_by: Option<String>,
+    /// Raw `Date:` line value (ADR source only).
+    date: Option<String>,
+    linked_files: Vec<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct WhyOutput {
+    decisions: Vec<DecisionOutput>,
 }
 
 fn display_rel(path: &Path, root: &Path) -> String {
@@ -514,6 +558,57 @@ impl RepowiseServer {
             end_line,
             source: snippet,
         }))
+    }
+
+    #[tool(
+        name = "get_why",
+        description = "Architectural decisions mined from docs/adr/*.md and decision-like commit messages (via repowise-adr), same data as `repowise decisions --for-file`. Given `targets` (file paths or symbol ids), returns only decisions whose body links to at least one target's file. Given no targets (or an empty list), returns every mined decision."
+    )]
+    fn get_why(
+        &self,
+        Parameters(WhyParams { targets }): Parameters<WhyParams>,
+    ) -> Result<Json<WhyOutput>, ErrorData> {
+        let (index, _graph) = self.load()?;
+        let mut decisions = repowise_adr::mine(&index).map_err(|e| {
+            ErrorData::internal_error(format!("failed to mine decisions: {e}"), None)
+        })?;
+
+        if !targets.is_empty() {
+            let target_files: Vec<PathBuf> = targets
+                .iter()
+                .map(|t| self.resolve_target(t, &index))
+                .collect();
+            decisions.retain(|d| d.linked_files.iter().any(|f| target_files.contains(f)));
+        }
+
+        let decisions = decisions
+            .into_iter()
+            .map(|d| {
+                let source = match &d.source {
+                    repowise_adr::DecisionSource::Adr { file } => {
+                        format!("adr:{}", display_rel(file, &index.root))
+                    }
+                    repowise_adr::DecisionSource::CommitMessage { hash, author } => {
+                        format!("commit:{} by {author}", &hash[..hash.len().min(7)])
+                    }
+                };
+                DecisionOutput {
+                    id: d.id,
+                    title: d.title,
+                    source,
+                    status: d.status,
+                    superseded_by: d.superseded_by,
+                    date: d.date,
+                    linked_files: d
+                        .linked_files
+                        .iter()
+                        .map(|f| display_rel(f, &index.root))
+                        .collect(),
+                }
+            })
+            .collect();
+
+        Ok(Json(WhyOutput { decisions }))
     }
 }
 
@@ -970,5 +1065,100 @@ mod tests {
             panic!("expected an error for an unknown symbol id");
         };
         assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    /// Two ADRs, each linking to a different indexed file via a mentioned
+    /// symbol name (see `repowise_adr::link_to_index`) — no git repo
+    /// needed, since ADR-file mining doesn't depend on commit history and
+    /// `repowise_adr::mine` degrades commit-mining to empty when the root
+    /// isn't a git repository.
+    fn build_two_decision_fixture(root: &Path) {
+        std::fs::create_dir_all(root.join("docs/adr")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/queue.rs"), "pub struct TaskQueue;\n").unwrap();
+        std::fs::write(root.join("src/other.rs"), "pub struct OtherThing;\n").unwrap();
+        std::fs::write(
+            root.join("docs/adr/0001-queue.md"),
+            "# ADR-0001: Use TaskQueue\n\nStatus: Accepted\nDate: 2026-01-01\n\n## Decision\nIntroduce TaskQueue for job scheduling.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/adr/0002-other.md"),
+            "# ADR-0002: Use OtherThing\n\nStatus: Accepted\nDate: 2026-02-01\n\n## Decision\nIntroduce OtherThing for config loading.\n",
+        )
+        .unwrap();
+        build_and_save_index(root);
+    }
+
+    #[test]
+    fn get_why_with_no_targets_returns_every_mined_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_two_decision_fixture(&root);
+
+        let server = RepowiseServer { root };
+        let Json(why) = server
+            .get_why(Parameters(WhyParams { targets: vec![] }))
+            .unwrap();
+
+        assert_eq!(why.decisions.len(), 2);
+    }
+
+    #[test]
+    fn get_why_filters_by_file_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_two_decision_fixture(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(why) = server
+            .get_why(Parameters(WhyParams {
+                targets: vec!["src/queue.rs".to_string()],
+            }))
+            .unwrap();
+
+        assert_eq!(why.decisions.len(), 1);
+        assert_eq!(why.decisions[0].title, "Use TaskQueue");
+        assert_eq!(why.decisions[0].linked_files, vec!["src/queue.rs"]);
+    }
+
+    #[test]
+    fn get_why_filters_by_symbol_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_two_decision_fixture(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(search) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "OtherThing".to_string(),
+            }))
+            .unwrap();
+        let symbol_id = search.matches[0].id.clone();
+
+        let Json(why) = server
+            .get_why(Parameters(WhyParams {
+                targets: vec![symbol_id],
+            }))
+            .unwrap();
+
+        assert_eq!(why.decisions.len(), 1);
+        assert_eq!(why.decisions[0].title, "Use OtherThing");
+    }
+
+    #[test]
+    fn get_why_with_unmatched_target_returns_no_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_two_decision_fixture(&root);
+
+        let server = RepowiseServer { root };
+        let Json(why) = server
+            .get_why(Parameters(WhyParams {
+                targets: vec!["src/nonexistent.rs".to_string()],
+            }))
+            .unwrap();
+
+        assert_eq!(why.decisions.len(), 0);
     }
 }

@@ -38,14 +38,17 @@ since git-history analysis doesn't need the dependency graph at all.
 than duplicating it), but not `repowise-graph`/`repowise-health` — decision
 mining doesn't need the resolved dependency graph or health scores, just
 the raw index and commit history. `repowise-mcp` depends on
-`repowise-core`/`repowise-graph`/`repowise-health`/`repowise-git` (it's a
-thin transport layer wrapping their existing query functions as MCP
-tools — `get_risk` and `get_change_risk` are the two tools that need
-`repowise-git`'s data. `get_risk` degrades to zero/empty hotspot/churn/
-bug-fix data rather than erroring when the indexed root isn't a git
-repository; `get_change_risk` is pure diff-shape analysis with no index
-dependency at all — it errors instead, since there's no diff to compute
-without a git repository) plus `rmcp` (the official
+`repowise-core`/`repowise-graph`/`repowise-health`/`repowise-git`/
+`repowise-adr` (it's a thin transport layer wrapping their existing query
+functions as MCP tools — `get_risk` and `get_change_risk` are the two
+tools that need `repowise-git`'s data. `get_risk` degrades to zero/empty
+hotspot/churn/bug-fix data rather than erroring when the indexed root
+isn't a git repository; `get_change_risk` is pure diff-shape analysis
+with no index dependency at all — it errors instead, since there's no
+diff to compute without a git repository. `get_why` is the one tool that
+needs `repowise-adr`'s mined-decision data, calling `repowise_adr::mine`
+fresh on every call just like every other tool re-loads the index fresh)
+plus `rmcp` (the official
 Rust MCP SDK) and `tokio` — the only crates in this workspace with an
 async runtime dependency; `repowise-cli` builds a
 `tokio::runtime::Runtime` manually just for the `serve` subcommand rather
@@ -94,6 +97,11 @@ into `repowise-git`'s diff-shape analysis (`git diff`/`git show`/
 file's source fresh from disk to slice out the snippet — the same
 "don't trust the index's own copy of file content, only its line
 metadata" tradeoff `repowise-docs`'s freshness tracking already makes.
+`get_why` calls `repowise_adr::mine` fresh on every call, the same
+independent path `decisions` already uses, then filters the result by
+whether each decision's `linked_files` intersects the requested targets'
+resolved files — no new mining logic, purely a filter over existing
+output.
 `dashboard` composes all of the above into one static page: `repowise-dashboard`
 calls the same `overview`/`analyze` functions, tries `repowise-git::GitAnalytics::collect`
 and `repowise-adr::mine` (both degrading to `None`/empty on failure rather

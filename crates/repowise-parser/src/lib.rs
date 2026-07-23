@@ -6,6 +6,7 @@
 //! none of the semantic-analysis machinery a real compiler front-end has.
 
 mod cpp;
+mod csharp;
 mod go;
 mod java;
 mod javascript;
@@ -33,6 +34,7 @@ pub fn parse_file(
         Language::Kotlin => Ok(Some(kotlin::extract(path, source)?)),
         Language::Go => Ok(Some(go::extract(path, source)?)),
         Language::Cpp => Ok(Some(cpp::extract(path, source)?)),
+        Language::CSharp => Ok(Some(csharp::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

@@ -22,6 +22,7 @@ pub enum Language {
     Kotlin,
     Go,
     Cpp,
+    CSharp,
     Other,
 }
 
@@ -36,6 +37,7 @@ impl Language {
             "kt" | "kts" => Language::Kotlin,
             "go" => Language::Go,
             "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Language::Cpp,
+            "cs" => Language::CSharp,
             _ => Language::Other,
         }
     }
@@ -50,6 +52,7 @@ impl Language {
             Language::Kotlin => "Kotlin",
             Language::Go => "Go",
             Language::Cpp => "C++",
+            Language::CSharp => "C#",
             Language::Other => "Other",
         }
     }

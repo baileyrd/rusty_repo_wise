@@ -50,6 +50,7 @@ impl RepoGraph {
         // reasonably import one from the other.
         let mut jvm_modules = HashMap::new();
         let mut go_modules = HashMap::new();
+        let mut csharp_modules = HashMap::new();
 
         for file in &index.files {
             let fnode = graph.add_node(Node::File(file.path.clone()));
@@ -84,11 +85,16 @@ impl RepoGraph {
                         go_modules.insert(mp, file.path.clone());
                     }
                 }
+                Language::CSharp => {
+                    if let Some(mp) = modpath::csharp_namespace_path(&file.path, &index.root) {
+                        csharp_modules.insert(mp, file.path.clone());
+                    }
+                }
                 // TypeScript/JavaScript/C++ relative (quote-form)
                 // imports are resolved directly at parse time (see
                 // `resolve_relative_import`/`resolve_include` in
                 // `repowise-parser`), so there's no module-path index to
-                // build here, unlike Rust/Python/Java/Kotlin/Go's
+                // build here, unlike Rust/Python/Java/Kotlin/Go/C#'s
                 // dotted/`::`/`/`-separated paths.
                 Language::TypeScript | Language::JavaScript | Language::Cpp | Language::Other => {}
             }
@@ -105,6 +111,7 @@ impl RepoGraph {
                 Language::Python => (".", &python_modules),
                 Language::Java | Language::Kotlin => (".", &jvm_modules),
                 Language::Go => ("/", &go_modules),
+                Language::CSharp => (".", &csharp_modules),
                 Language::TypeScript | Language::JavaScript | Language::Cpp => ("", &no_modules),
                 Language::Other => continue,
             };

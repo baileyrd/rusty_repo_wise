@@ -6,6 +6,39 @@ repo routing work through PRs).
 
 ---
 
+## PR #135 — Add linked-issue-reference bug-fix heuristic
+**2026-07-23** · [#135](https://github.com/baileyrd/rusty_repo_wise/pull/135) · closes [#60](https://github.com/baileyrd/rusty_repo_wise/issues/60)
+
+- **Added:** a GitHub-issue-reference-based bug-fix heuristic,
+  complementing (not replacing) the existing message-keyword one. A
+  commit now counts as a bug fix if its message contains a keyword
+  (`fix`/`bug`/`hotfix`/`patch`) **or** references a GitHub issue
+  (`#123`) that's closed with a bug-like label — a union.
+- **New `repowise-git::issue_refs` module:** `parse_issue_refs` extracts
+  `#N` references from a commit message (rejecting markdown headers,
+  hex-color-like tokens, and `#` glued onto a preceding identifier);
+  `is_closed_bug_issue` queries the GitHub API for an issue's
+  closed/label state; `parse_github_owner_repo` parses a git remote URL
+  (a near-duplicate of `repowise-adr`'s own copy — not shared
+  cross-crate since `repowise-adr` already depends on `repowise-git`,
+  not the reverse).
+- **Opt-in, same pattern as `repowise-adr`'s PR-body decision source:**
+  the linked-issue check only runs behind a `REPOWISE_GITHUB_TOKEN`
+  environment variable; no token, no GitHub-hosted `origin` remote, or
+  a failed lookup all degrade to keyword-only detection rather than
+  failing `GitAnalytics::collect()`.
+- `repowise-git` gains `ureq`/`serde`/`serde_json` dependencies (same
+  versions `repowise-adr` already pins).
+- Tests: `parse_issue_refs` edge cases, `is_closed_bug_issue` against a
+  real HTTP/JSON fixture server (same hand-rolled approach
+  `repowise-adr`'s `pull_requests` tests use), and
+  `linked_bugfix_issue_numbers`'s degradation paths (no token / no
+  remote / non-GitHub remote) against real disposable git repos.
+- This closes out the git-analytics parity-gap issue (#60), the last
+  known mechanical (non-`needs-human`) issue in the current backlog.
+
+---
+
 ## PR #133 — Add dashboard symbols index section with a kind filter
 **2026-07-23** · [#133](https://github.com/baileyrd/rusty_repo_wise/pull/133) · closes [#58](https://github.com/baileyrd/rusty_repo_wise/issues/58)
 

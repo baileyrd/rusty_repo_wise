@@ -1,13 +1,14 @@
 //! Best-effort architectural-decision mining: extracts decisions from
-//! five sources — `docs/adr/*.md` files, commit messages, merged PR
-//! bodies, decision-like code comments, and explicit inline decision
-//! markers (`WHY:`, `DECISION:`, etc.) — links each to the indexed
-//! files/symbols its body mentions (or, for PRs, the files the GitHub
-//! API reports it actually touched; or, for code comments/inline
-//! markers, the file the comment sits in), and tracks supersession via
-//! an ADR's `Status: ... Superseded by ADR-XXXX` line.
+//! six sources — `docs/adr/*.md` files, commit messages, merged PR
+//! bodies, decision-like code comments, explicit inline decision markers
+//! (`WHY:`, `DECISION:`, etc.), and keep-a-changelog-style CHANGELOG
+//! sections — links each to the indexed files/symbols its body mentions
+//! (or, for PRs, the files the GitHub API reports it actually touched;
+//! or, for code comments/inline markers, the file the comment sits in),
+//! and tracks supersession via an ADR's
+//! `Status: ... Superseded by ADR-XXXX` line.
 //!
-//! Only 5 of the original repowise's 8 decision sources are implemented
+//! Only 6 of the original repowise's 8 decision sources are implemented
 //! here — a focused subset, not a shallow stub of all 8 (see the README
 //! for which are deferred and why). The PR-body source is the one place
 //! this crate makes a network call at all, and only when a
@@ -16,6 +17,7 @@
 //! unauthenticated fallback.
 
 mod adr_files;
+mod changelog;
 mod code_comments;
 mod commits;
 mod inline_markers;
@@ -49,6 +51,10 @@ pub enum DecisionSource {
         line: usize,
         marker: String,
     },
+    Changelog {
+        file: PathBuf,
+        section: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -76,12 +82,13 @@ impl DecisionRecord {
 }
 
 /// Mine decisions from `docs/adr/*.md`, decision-like commit messages,
-/// decision-like merged PR bodies, decision-like code comments, and
-/// inline decision markers under `index.root`, linking each to the
-/// files/symbols its body mentions. Missing `docs/adr/`, an unreadable
-/// git history, or an unavailable/unauthenticated GitHub API each
+/// decision-like merged PR bodies, decision-like code comments, inline
+/// decision markers, and keep-a-changelog-style CHANGELOG sections under
+/// `index.root`, linking each to the files/symbols its body mentions.
+/// Missing `docs/adr/`, an unreadable git history, an
+/// unavailable/unauthenticated GitHub API, or no changelog file each
 /// degrade to an empty result for that source rather than failing the
-/// whole call — all five sources are independent.
+/// whole call — all six sources are independent.
 pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
     let mut records = adr_files::mine_adr_files(&index.root)?;
 
@@ -95,14 +102,19 @@ pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
 
     records.extend(code_comments::mine_code_comment_decisions(index));
     records.extend(inline_markers::mine_inline_marker_decisions(index));
+    records.extend(changelog::mine_changelog_decisions(&index.root));
 
     for record in &mut records {
         // PR, code-comment, and inline-marker decisions are already
         // linked to their real file (the PR's GitHub-reported file
         // list, or the file the comment/marker sits in, set above) —
         // text-matching would only throw that away, so only the
-        // text-linked sources (ADR files, commit messages) get run
-        // through the linker here.
+        // text-linked sources (ADR files, commit messages, changelog
+        // entries) get run through the linker here. A changelog entry
+        // isn't "about" the changelog file itself the way a PR's diff
+        // or a comment's enclosing file is, so it gets the same
+        // text-matching treatment as ADR files/commit messages instead
+        // of an authoritative self-link.
         if matches!(
             record.source,
             DecisionSource::PullRequest { .. }

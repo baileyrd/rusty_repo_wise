@@ -101,7 +101,7 @@ tracking/discussion issue on extending language support. The health scorer cover
 Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
-mining (only 5 of the original's 8 decision sources are implemented —
+mining (only 6 of the original's 8 decision sources are implemented —
 see "Architectural decision mining" below). The MCP server covers 8 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
@@ -128,8 +128,8 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-adr` — architectural-decision mining from ADR files,
   decision-like commit messages, decision-like merged PR bodies (via the
   GitHub API, opt-in behind a token env var), decision-like code
-  comments, and inline decision markers, linked to the files/symbols
-  they mention.
+  comments, inline decision markers, and keep-a-changelog-style
+  CHANGELOG sections, linked to the files/symbols they mention.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
   the index/graph/health/git-analytics/mined-decisions data, plus a
   deterministic per-commit change-risk score and confidence-tiered
@@ -252,7 +252,7 @@ these pages (`repowise generate`), and the dashboard's doc browser.
 
 ## Architectural decision mining
 
-`repowise decisions` mines five of the original's eight decision sources:
+`repowise decisions` mines six of the original's eight decision sources:
 
 - **`docs/adr/*.md` files**, parsed against this repo's own ADR template
   (`# ADR-XXXX: Title`, then `Status:`/`Date:` lines). An unfilled
@@ -296,21 +296,35 @@ these pages (`repowise generate`), and the dashboard's doc browser.
   text scan (not language-specific parsing), same "pure filesystem work,
   no new dependency" framing as the code-comment source. Linked to the
   file the marker sits in.
+- **Keep-a-changelog-style CHANGELOG sections** — `CHANGELOG.md`/
+  `HISTORY.md`/`NEWS.md`/`CHANGES.md` at the repo root (whichever is
+  found first, case-insensitive), scanning for `### Changed`/
+  `### Removed`/`### Deprecated`/`### Security` section headings (a
+  heading-text match, not a full keep-a-changelog spec parser).
+  `### Added`/`### Fixed` are deliberately excluded — purely additive or
+  bug-fix entries aren't architectural decisions the way a
+  change/removal/deprecation/security call generally is. Pure
+  filesystem/parsing, no new dependency. Unlike the PR-body/code-comment/
+  inline-marker sources, a changelog entry is linked the same way
+  ADR-file/commit-message decisions are (text-matched against the
+  index) rather than an authoritative self-link to the changelog file:
+  the changelog file itself isn't what the decision is *about*, unlike a
+  PR's diff or the file a comment sits in.
 
-Each ADR-file/commit-message decision is linked to the indexed files it
-mentions: either the file's own relative path appearing verbatim in the
-decision's body text, or one of its non-module symbol names (4+
-characters, to cut down on false positives from short identifiers)
-appearing as a whole word. Matching text, not meaning — a decision that
-only refers to a file descriptively ("the queue module") won't be
-linked. Supersession is read directly from an ADR's `Status: Superseded
-by ADR-XXXX` line — no new front-matter convention was needed since the
+Each ADR-file/commit-message/changelog decision is linked to the indexed
+files it mentions: either the file's own relative path appearing
+verbatim in the decision's body text, or one of its non-module symbol
+names (4+ characters, to cut down on false positives from short
+identifiers) appearing as a whole word. Matching text, not meaning — a
+decision that only refers to a file descriptively ("the queue module")
+won't be linked. Supersession is read directly from an ADR's
+`Status: Superseded by ADR-XXXX` line — no new front-matter convention
+was needed since the
 existing template already has one.
 
-Not implemented from the original's eight sources: CHANGELOG mining,
-Slack, and issue trackers — this repo doesn't have integrations for the
-latter two anyway. Recency/confidence scoring on mined decisions is also
-not implemented.
+Not implemented from the original's eight sources: Slack and issue
+trackers — this repo doesn't have integrations for either anyway.
+Recency/confidence scoring on mined decisions is also not implemented.
 
 ## MCP server
 
@@ -361,9 +375,9 @@ a prior `repowise init`/`update`. Eight tools are implemented:
   the returned span possibly being off if line numbers have since shifted.
 - **`get_why(targets?)`** — architectural decisions mined from
   `docs/adr/*.md`, decision-like commit messages, decision-like merged PR
-  bodies, decision-like code comments, and inline decision markers (via
-  `repowise-adr`), the same data as `repowise decisions --for-file`.
-  `targets` is a list
+  bodies, decision-like code comments, inline decision markers, and
+  keep-a-changelog-style CHANGELOG sections (via `repowise-adr`), the
+  same data as `repowise decisions --for-file`. `targets` is a list
   of file paths or symbol ids (mixing both is fine — a symbol id resolves
   to its own file); a decision is returned if its body links to at least
   one target's file. Omit `targets` (or pass an empty list) to get every

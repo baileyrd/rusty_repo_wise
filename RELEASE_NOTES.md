@@ -6,6 +6,37 @@ repo routing work through PRs).
 
 ---
 
+## PR #103 — Add get_symbol MCP tool
+**2026-07-23** · [#103](https://github.com/baileyrd/rusty_repo_wise/pull/103) · closes [#43](https://github.com/baileyrd/rusty_repo_wise/issues/43)
+
+- **Added:** a sixth MCP tool, `get_symbol(symbol_id, context_lines?)`,
+  returning one indexed symbol's raw source text. All the data needed
+  (file, `start_line`/`end_line`) already lived in `RepoIndex` — this
+  just slices the file's source at that span. `context_lines` (default
+  `0`) pads the span by the same number of lines on each side, clamped to
+  the file's real bounds rather than erroring on an out-of-range request.
+- **`SymbolMatch` now includes each symbol's `id`.** Neither
+  `search_codebase` nor `get_context` previously exposed a symbol's id,
+  so there was no way for a caller to actually obtain one to pass to
+  `get_symbol`. Both tools share the `SymbolMatch` output shape, so
+  adding `id` there covers both call sites at once — purely additive, no
+  existing field removed or renamed.
+- **Reads the file fresh from disk on every call**, not from any content
+  cached in the index — the same "don't trust the index for content,
+  only for line metadata" tradeoff `repowise-docs`'s freshness tracking
+  already makes. This means edits since the last `init`/`update` are
+  reflected, at the cost of the returned span possibly being off if line
+  numbers have since shifted.
+- **Guards against a shrunk file.** `end_line` is clamped against the
+  freshly re-read file's actual line count first; `start_line` is then
+  clamped to never exceed that (already-clamped) `end_line`. Without the
+  second clamp, a file that shrank since indexing could produce a
+  `start_line > end_line` slice and panic.
+- 3 new tests (own span by default, context-padding clamped to file
+  bounds, unknown-id error), 140 tests passing workspace-wide (up from
+  137). Next up per the loop is issue #44, `get_why` — a thin MCP wrapper
+  over `repowise-adr`'s existing decision mining.
+
 ## PR #101 — Add get_change_risk MCP tool
 **2026-07-23** · [#101](https://github.com/baileyrd/rusty_repo_wise/pull/101) · closes [#42](https://github.com/baileyrd/rusty_repo_wise/issues/42)
 

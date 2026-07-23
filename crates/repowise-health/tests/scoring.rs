@@ -38,9 +38,18 @@ fn symbol(
 }
 
 fn file_record(path: &str, symbols: Vec<Symbol>, calls: Vec<CallRef>) -> FileRecord {
+    file_record_with_language(path, Language::Other, symbols, calls)
+}
+
+fn file_record_with_language(
+    path: &str,
+    language: Language,
+    symbols: Vec<Symbol>,
+    calls: Vec<CallRef>,
+) -> FileRecord {
     FileRecord {
         path: PathBuf::from(path),
-        language: Language::Other,
+        language,
         lines: 1000,
         symbols,
         imports: Vec::new(),
@@ -248,6 +257,35 @@ fn dead_code_is_only_flagged_when_uncalled() {
         findings_for(&report, "unused", FindingKind::PossiblyDeadCode).len(),
         1
     );
+}
+
+#[test]
+fn shell_functions_are_never_flagged_as_dead_code() {
+    // Per repowise's own documented scope for the shell tier, an
+    // uncalled shell function must never be flagged -- it's routinely
+    // invoked only from the command line, another script, or a cron
+    // job, none of which this port's call graph can see.
+    let uncalled = symbol(
+        "script.sh",
+        "uncalled",
+        SymbolKind::Function,
+        1,
+        3,
+        None,
+        1,
+        0,
+        None,
+    );
+    let idx = index(vec![file_record_with_language(
+        "script.sh",
+        Language::Shell,
+        vec![uncalled],
+        vec![],
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    assert!(findings_for(&report, "uncalled", FindingKind::PossiblyDeadCode).is_empty());
 }
 
 #[test]

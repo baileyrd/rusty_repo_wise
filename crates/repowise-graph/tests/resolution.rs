@@ -573,3 +573,38 @@ fn resolves_dart_relative_import_but_not_a_package_import() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, helper_dart);
 }
+
+#[test]
+fn resolves_shell_source_via_script_dir_idiom_and_plain_relative_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(
+        root.join("helper.sh"),
+        "compute() {\n  echo $(( $1 + 1 ))\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.sh"),
+        "SCRIPT_DIR=\"$(dirname \"$0\")\"\nsource \"$SCRIPT_DIR/helper.sh\"\n\nrun() {\n  compute 1\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_sh = find_file(&index, "main.sh").path.clone();
+    let helper_sh = find_file(&index, "helper.sh").path.clone();
+
+    // The `$SCRIPT_DIR/helper.sh` idiom resolves the same as a plain
+    // relative `source`, since $SCRIPT_DIR is (by its own convention)
+    // main.sh's own directory.
+    let deps = graph.dependencies_of(&main_sh);
+    assert!(
+        deps.contains(&helper_sh),
+        "expected main.sh to depend on helper.sh, got {deps:?}"
+    );
+
+    let matches = graph.search("compute");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_sh);
+}

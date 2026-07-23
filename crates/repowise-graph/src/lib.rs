@@ -117,6 +117,12 @@ impl RepoGraph {
                 // `package:x/y.dart` imports have no pub-package registry
                 // here to resolve against and are always left unresolved,
                 // the same "no index needed" bucket as Swift's imports.
+                // Shell's `source`/`.` (including the `$SCRIPT_DIR`
+                // self-relative idiom) is likewise resolved directly at
+                // parse time (see `resolve_relative` in
+                // `repowise-parser`); any other expansion has no static
+                // value to resolve, joining the same "no index needed"
+                // bucket.
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C
@@ -124,6 +130,7 @@ impl RepoGraph {
                 | Language::Ruby
                 | Language::Swift
                 | Language::Dart
+                | Language::Shell
                 | Language::Other => {}
             }
         }
@@ -147,7 +154,8 @@ impl RepoGraph {
                 | Language::Cpp
                 | Language::Ruby
                 | Language::Swift
-                | Language::Dart => ("", &no_modules),
+                | Language::Dart
+                | Language::Shell => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

@@ -12,7 +12,8 @@ license with the original (AGPL-3.0) repowise.
 
 repowise is a large product with five "intelligence layers," an MCP
 server, and a web dashboard. So far this port builds the **core CLI, the
-dependency-graph layer, and the code-health-scoring layer**, end to end:
+dependency-graph layer, the code-health-scoring layer, and the
+git-analytics layer**, end to end:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust and Python files.
 - Parse each file with tree-sitter, extracting function/method/class/struct
@@ -27,14 +28,17 @@ dependency-graph layer, and the code-health-scoring layer**, end to end:
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, and possibly-dead code
   (zero resolved callers).
+- Derive git-history analytics — churn, hotspot score (churn × complexity),
+  bug-fix commit frequency, co-change coupling, and per-author line
+  ownership — by shelling out to `git log`/`git blame`, joined against the
+  index for complexity data.
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
-Not yet built: git analytics/hotspots, doc generation, ADR mining, the
-MCP server, and the web dashboard. Only Rust and Python are parsed;
-repowise's other 14 languages aren't implemented. The health scorer
-covers 6 of repowise's ~25 markers — see "Health scoring" below for which
-ones and why the rest (mostly git-history-based, like churn/hotspots, and
-LCOM4 cohesion) are deferred.
+Not yet built: doc generation, ADR mining, the MCP server, and the web
+dashboard. Only Rust and Python are parsed; repowise's other 14 languages
+aren't implemented. The health scorer covers 6 of repowise's ~25 markers
+— see "Health scoring" below for which ones and why the rest (LCOM4
+cohesion, Rabin-Karp substring clone detection) are deferred.
 
 ## Crates
 
@@ -46,6 +50,9 @@ LCOM4 cohesion) are deferred.
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
   the parsed metrics and the call graph.
+- `repowise-git` — git-history analytics (churn, hotspots, bug-fix
+  frequency, co-change coupling, ownership), computed fresh from `git
+  log`/`git blame` each time it's queried rather than cached in the index.
 - `repowise-cli` — the `repowise` binary tying it together.
 
 ## Usage
@@ -59,6 +66,9 @@ repowise overview [PATH]           # summary stats: languages, symbols, edges
 repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
+repowise hotspots [PATH]           # files ranked by churn × complexity
+repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
+repowise coupled <FILE> [PATH]     # files that most often change alongside it
 ```
 
 ## Health scoring
@@ -85,12 +95,39 @@ best-effort call/import resolution: a symbol can look uncalled just
 because a call site couldn't be resolved (trait dispatch, dynamic
 dispatch, an external caller), not because it's truly unused.
 
-Deferred markers from the original repowise (not implemented): churn ×
-complexity hotspots, ownership/co-change coupling, and bug-fix history
-(all need git-log analysis — a separate "git analytics" layer); LCOM4
+Deferred markers from the original repowise (not implemented): LCOM4
 cohesion (needs field-level access tracking per method); Rabin-Karp
 substring clone detection (this port only detects whole-body duplicates
-via exact hash match, not partial/near-duplicate code).
+via exact hash match, not partial/near-duplicate code). Hotspots and
+bug-fix history are now implemented (see "Git analytics" below) but
+aren't yet folded into the health score itself — that's a natural
+follow-up, not done here.
+
+## Git analytics
+
+`repowise hotspots`/`ownership`/`coupled` shell out to `git log`/`git
+blame` under the hood — no persistence, no caching, just re-run each
+time against the repo's real history:
+
+- **Churn**: number of commits touching a file, from a single `git log
+  --name-only` walk of the whole history.
+- **Hotspot score**: `churn × total cyclomatic complexity` of the file's
+  symbols (complexity already computed by `repowise-parser`). Simple and
+  legible by design — no recency weighting or decay.
+- **Bug-fix commits**: commits whose message contains a fix-like keyword
+  (`fix`, `bug`, `hotfix`, `patch`) touching the file. A heuristic, not
+  ground truth — a fix described without one of these words won't be
+  counted, and an unrelated commit that happens to mention one will be.
+- **Co-change coupling**: files that appear together in the same commit,
+  counted per pair. Commits touching more than 50 files are skipped when
+  building this (a rename sweep or vendor bump would otherwise flood
+  every touched file's coupling list with noise).
+- **Ownership**: per-author share of a file's lines from `git blame
+  --line-porcelain`.
+
+Not implemented from the original's git-analytics scope: recency-weighted
+or decayed hotspot scoring, and a bug-fix heuristic based on linked-issue
+references rather than just message keywords.
 
 ## Testing
 
@@ -102,6 +139,9 @@ Includes parser unit tests (function/class/import/call/complexity/
 param-count/duplicate-hash extraction on inline source snippets), graph
 integration tests that write real fixture files to a temp directory to
 exercise Rust's `mod`/crate-root resolution and Python's package-relative
-import resolution end to end, and health-scoring tests that build
+import resolution end to end, health-scoring tests that build
 `RepoIndex` fixtures directly to exercise each marker (and the resulting
-score) in isolation.
+score) in isolation, and git-analytics tests that build real disposable
+git repos (via the `git` CLI) to exercise churn/bug-fix/co-change/
+ownership/hotspot computation against actual `git log`/`git blame`
+output rather than a mock of it.

@@ -6,6 +6,31 @@ repo routing work through PRs).
 
 ---
 
+## PR #133 — Add dashboard symbols index section with a kind filter
+**2026-07-23** · [#133](https://github.com/baileyrd/rusty_repo_wise/pull/133) · closes [#58](https://github.com/baileyrd/rusty_repo_wise/issues/58)
+
+- **Added:** a new "Symbols" section in the dashboard — a table of every
+  indexed symbol (name, kind, file, line), with a small embedded-JS
+  dropdown that filters the table by kind (function/method/class/etc.)
+  client-side.
+- No external requests, no build step: the whole table is embedded once
+  in the page; the dropdown just toggles row visibility via a
+  `data-kind` attribute per row. This is the only JS anywhere in the
+  dashboard.
+- File cells reuse the drill-down linking added in #57 (`file_cell()`),
+  so a symbol's file links to its wiki page when one exists on disk.
+- `render()` gains a `RepoIndex` parameter (all call sites updated)
+  since per-symbol data lives on `Symbol`/`FileRecord`, not the
+  `Overview`/`HealthReport` data the other sections already consume.
+- Tests: a render-level unit test covering the table/filter markup and
+  wiki-page linking, plus an end-to-end `generate()` assertion that the
+  real pipeline's indexed symbol shows up in the rendered table.
+- This is the second of the three dashboard parity-gap issues (#57-59);
+  #59 (live/instant search) is `needs-human` since it needs a design
+  decision before it's implementable.
+
+---
+
 ## PR #131 — Add dashboard per-file drill-down links to wiki pages
 **2026-07-23** · [#131](https://github.com/baileyrd/rusty_repo_wise/pull/131) · closes [#57](https://github.com/baileyrd/rusty_repo_wise/issues/57)
 

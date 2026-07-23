@@ -6,6 +6,48 @@ repo routing work through PRs).
 
 ---
 
+## PR #125 — Add bumpy_road nesting-bumps health marker
+**2026-07-23** · [#125](https://github.com/baileyrd/rusty_repo_wise/pull/125) · closes [#54](https://github.com/baileyrd/rusty_repo_wise/issues/54)
+
+- **Added:** `bumpy_road`, a structural-complexity marker complementing
+  `nested_complexity` (#53): rather than the single deepest point
+  reached, it counts how many *separate* nested-block regions occur
+  within one function. Three separate two-level-deep blocks read worse
+  than one two-level-deep block, even at the same max nesting depth — a
+  case `max_nesting_depth` alone can't distinguish.
+- **New `repowise-parser::metrics::bumpy_road_bumps`**, computed
+  alongside `cyclomatic_complexity`/`max_nesting_depth` in one
+  post-order AST pass. **Counting rule** (documented and tested): only
+  *leaf* decision nodes count — a decision node with no further decision
+  node nested inside it (before hitting a nested-function boundary) —
+  reaching a nesting depth of at least 2. A linear chain (`if`
+  containing `if` containing `if`) has exactly one leaf and counts as a
+  single bump, not three, since it's one deep block rather than several
+  scattered ones; three separate sibling `if`s each with one level of
+  nesting inside have three leaves and count as three bumps.
+- **`Symbol` gains `bumpy_road_bumps: usize`**, wired into all 16
+  already-supported languages' function/method extraction — same
+  scope/shape as `nested_complexity`: reuses each language's existing
+  `is_decision`/`is_nested_function` closures, so no new per-language
+  AST classification was needed.
+- **New `FindingKind::BumpyRoad`** (threshold `>= 3` bumps, penalty
+  −0.5, lighter than `NestedComplexity`'s −1.0 since it's a
+  complementary signal on the same underlying data, not an independent
+  problem worth double-weighting).
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-docs`/`repowise-git`/`repowise-health` that
+  build `Symbol` directly.
+- 3 new tests (a dedicated bumps-vs-depth test in both `rust.rs` and
+  `python.rs` — two functions at identical max nesting depth, one with
+  three scattered two-level blocks and one with a single two-level
+  block, confirming `bumpy_road_bumps` tells them apart; a
+  `repowise-health` test confirming a function at/above the bump
+  threshold is flagged and one below it isn't), 200 tests passing
+  workspace-wide (up from 197). Next up per the loop is issue #55
+  (`complex_conditional` — boolean operator count per condition), the
+  fifth of six filed health-marker issues.
+
 ## PR #123 — Add nested_complexity max-nesting-depth health marker
 **2026-07-23** · [#123](https://github.com/baileyrd/rusty_repo_wise/pull/123) · closes [#53](https://github.com/baileyrd/rusty_repo_wise/issues/53)
 

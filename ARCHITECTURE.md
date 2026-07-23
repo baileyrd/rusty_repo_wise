@@ -93,14 +93,23 @@ messages (not `RepoIndex`, which only has complexity metrics, not commit
 history) — only when a `REPOWISE_GITHUB_TOKEN` env var is set — calls
 the GitHub API for merged PR bodies (the one network call anywhere in
 this port's non-MCP command paths), and re-reads each indexed file's
-source fresh from disk to mine decision-like comments sitting directly
-above a symbol (comment text isn't kept in `RepoIndex` any more than a
-symbol's own source is — the same tradeoff `get_symbol`/`repowise-docs`
-already make). ADR-file and commit-message decisions then get linked to
-files/symbols in the same `RepoIndex` the other commands use; PR and
-code-comment decisions skip that step, already linked to the files the
-GitHub API reports that PR touched, or the file the comment sits in,
-respectively.
+source fresh from disk twice more: once to mine decision-like comments
+sitting directly above a symbol (`code_comments.rs`), and once to scan
+every comment line in the file for an inline decision marker
+(`inline_markers.rs`) — comment text isn't kept in `RepoIndex` any more
+than a symbol's own source is, the same tradeoff `get_symbol`/
+`repowise-docs` already make. The two comment-mining modules solve
+different problems on purpose rather than sharing one scanner:
+`code_comments::comment_block_above` answers "what's the comment block
+directly above this specific symbol", while `inline_markers::comment_lines`
+answers "every comment line in the file, wherever it sits" — forcing the
+inline-marker source through the former would mean calling it once per
+symbol and still needing a separate whole-file scan for markers that
+aren't adjacent to a declaration at all. ADR-file and commit-message
+decisions get linked to files/symbols in the same `RepoIndex` the other
+commands use; PR, code-comment, and inline-marker decisions skip that
+step, already linked to the files the GitHub API reports that PR
+touched, or the file the comment/marker sits in, respectively.
 `serve` is a thin wrapper over the same `overview`/`search`/`deps`/`health`
 data paths, re-exposed as MCP tools: `repowise-mcp` loads `RepoIndex`,
 builds a `RepoGraph`, and (for `get_context`/`get_risk`) runs

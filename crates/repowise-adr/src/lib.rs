@@ -1,13 +1,13 @@
 //! Best-effort architectural-decision mining: extracts decisions from
-//! four sources — `docs/adr/*.md` files, commit messages, merged PR
-//! bodies, and decision-like code comments — each matching a
-//! decision-like keyword heuristic — links each to the indexed
+//! five sources — `docs/adr/*.md` files, commit messages, merged PR
+//! bodies, decision-like code comments, and explicit inline decision
+//! markers (`WHY:`, `DECISION:`, etc.) — links each to the indexed
 //! files/symbols its body mentions (or, for PRs, the files the GitHub
-//! API reports it actually touched; or, for code comments, the file the
-//! comment sits in), and tracks supersession via an ADR's
-//! `Status: ... Superseded by ADR-XXXX` line.
+//! API reports it actually touched; or, for code comments/inline
+//! markers, the file the comment sits in), and tracks supersession via
+//! an ADR's `Status: ... Superseded by ADR-XXXX` line.
 //!
-//! Only 4 of the original repowise's 8 decision sources are implemented
+//! Only 5 of the original repowise's 8 decision sources are implemented
 //! here — a focused subset, not a shallow stub of all 8 (see the README
 //! for which are deferred and why). The PR-body source is the one place
 //! this crate makes a network call at all, and only when a
@@ -18,6 +18,7 @@
 mod adr_files;
 mod code_comments;
 mod commits;
+mod inline_markers;
 mod linking;
 mod pull_requests;
 
@@ -28,10 +29,26 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionSource {
-    Adr { file: PathBuf },
-    CommitMessage { hash: String, author: String },
-    PullRequest { number: u64, author: String },
-    CodeComment { file: PathBuf, line: usize },
+    Adr {
+        file: PathBuf,
+    },
+    CommitMessage {
+        hash: String,
+        author: String,
+    },
+    PullRequest {
+        number: u64,
+        author: String,
+    },
+    CodeComment {
+        file: PathBuf,
+        line: usize,
+    },
+    InlineMarker {
+        file: PathBuf,
+        line: usize,
+        marker: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -59,12 +76,12 @@ impl DecisionRecord {
 }
 
 /// Mine decisions from `docs/adr/*.md`, decision-like commit messages,
-/// decision-like merged PR bodies, and decision-like code comments under
-/// `index.root`, linking each to the files/symbols its body mentions.
-/// Missing `docs/adr/`, an unreadable git history, or an
-/// unavailable/unauthenticated GitHub API each degrade to an empty
-/// result for that source rather than failing the whole call — all four
-/// sources are independent.
+/// decision-like merged PR bodies, decision-like code comments, and
+/// inline decision markers under `index.root`, linking each to the
+/// files/symbols its body mentions. Missing `docs/adr/`, an unreadable
+/// git history, or an unavailable/unauthenticated GitHub API each
+/// degrade to an empty result for that source rather than failing the
+/// whole call — all five sources are independent.
 pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
     let mut records = adr_files::mine_adr_files(&index.root)?;
 
@@ -77,16 +94,20 @@ pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
     records.extend(mine_pull_requests(&index.root, token.as_deref()).unwrap_or_default());
 
     records.extend(code_comments::mine_code_comment_decisions(index));
+    records.extend(inline_markers::mine_inline_marker_decisions(index));
 
     for record in &mut records {
-        // PR and code-comment decisions are already linked to their
-        // real file (the PR's GitHub-reported file list, or the file
-        // the comment sits in, set above) — text-matching would only
-        // throw that away, so only the text-linked sources (ADR files,
-        // commit messages) get run through the linker here.
+        // PR, code-comment, and inline-marker decisions are already
+        // linked to their real file (the PR's GitHub-reported file
+        // list, or the file the comment/marker sits in, set above) —
+        // text-matching would only throw that away, so only the
+        // text-linked sources (ADR files, commit messages) get run
+        // through the linker here.
         if matches!(
             record.source,
-            DecisionSource::PullRequest { .. } | DecisionSource::CodeComment { .. }
+            DecisionSource::PullRequest { .. }
+                | DecisionSource::CodeComment { .. }
+                | DecisionSource::InlineMarker { .. }
         ) {
             continue;
         }

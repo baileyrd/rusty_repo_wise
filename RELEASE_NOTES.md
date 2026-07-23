@@ -6,6 +6,28 @@ repo routing work through PRs).
 
 ---
 
+## PR #18 — Add MCP server: get_overview, search_codebase, get_context
+**2026-07-22** · [#18](https://github.com/baileyrd/rusty_repo_wise/pull/18) · closes [#9](https://github.com/baileyrd/rusty_repo_wise/issues/9)
+
+- **Added:** a new `repowise-mcp` crate exposing `get_overview`,
+  `search_codebase`, and `get_context` as MCP tools over stdio via the
+  official `rmcp` SDK, wired up as `repowise serve [PATH]`. `get_context`
+  bundles a file's symbols, resolved deps/dependents, and health
+  score/findings into one call — the tool that matters most for the
+  original's "cut agent token spend on context-loading" goal.
+- **Known limitation, stated plainly:** `get_risk`/`get_change_risk` are
+  deferred to a follow-up rather than bundled in — they'd read naturally
+  on `repowise-git`'s hotspot data. No caching across tool calls (same
+  choice already made for `hotspots`/`ownership`/`coupled`/`decisions`).
+- Verified the `rmcp` API against the actual installed crate's own
+  doctests before writing real code — a fetched README described an
+  older major version that didn't match what `cargo add` resolves.
+- 5 new tests calling each tool method against a real index built by the
+  actual indexing pipeline; 32 tests passing workspace-wide. With this,
+  all five of repowise's original "intelligence layers" plus its MCP
+  server have at least partial implementations in this port — only the
+  web dashboard remains unstarted.
+
 ## PR #16 — Add architectural-decision (ADR) mining layer
 **2026-07-22** · [#16](https://github.com/baileyrd/rusty_repo_wise/pull/16) · closes [#8](https://github.com/baileyrd/rusty_repo_wise/issues/8)
 

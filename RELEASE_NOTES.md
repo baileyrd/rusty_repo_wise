@@ -6,6 +6,28 @@ repo routing work through PRs).
 
 ---
 
+## PR #16 — Add architectural-decision (ADR) mining layer
+**2026-07-22** · [#16](https://github.com/baileyrd/rusty_repo_wise/pull/16) · closes [#8](https://github.com/baileyrd/rusty_repo_wise/issues/8)
+
+- **Added:** a new `repowise-adr` crate mining decisions from `docs/adr/*.md`
+  files and decision-like commit messages (keyword heuristic), linking each
+  to the files/symbols its body mentions, and tracking supersession via an
+  ADR's existing `Status: Superseded by ADR-XXXX` line (no new front-matter
+  convention needed). Wired up as `repowise decisions [PATH] [--for-file <FILE>]`.
+  `repowise-git` gained `collect_commits()` so this reuses its git-log
+  parsing instead of duplicating it.
+- **Known limitation, stated plainly:** only 2 of the original repowise's 8
+  decision sources are implemented (ADR files, commit messages) — PR
+  descriptions, code comments, and integrations this repo doesn't have
+  (Slack, issue trackers) are not mined. Linking is text matching, not
+  semantic — a decision that only refers to a file descriptively won't
+  be linked.
+- 6 new tests (ADR parsing, unfilled-template skip, decision-commit
+  detection, file/symbol linking, an end-to-end real-git-repo test); 27
+  tests passing workspace-wide. With this, all five of repowise's
+  original "intelligence layers" have CLI-facing implementations in this
+  port (each covering a subset of the original's scope per layer).
+
 ## PR #14 — Add auto-generated documentation layer: per-file wiki pages
 **2026-07-22** · [#14](https://github.com/baileyrd/rusty_repo_wise/pull/14) · closes [#7](https://github.com/baileyrd/rusty_repo_wise/issues/7)
 

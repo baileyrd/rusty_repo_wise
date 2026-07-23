@@ -6,6 +6,36 @@ repo routing work through PRs).
 
 ---
 
+## PR #75 — Add Java language support
+**2026-07-23** · [#75](https://github.com/baileyrd/rusty_repo_wise/pull/75) · closes [#29](https://github.com/baileyrd/rusty_repo_wise/issues/29)
+
+- **Added:** a `repowise-parser` extractor for Java — classes, interfaces
+  (mapped to `Trait`), enums, records, methods, and constructors (recorded
+  as methods). Interface method signatures with no body are still
+  recorded as symbols (0 complexity), same treatment as Rust's
+  trait-method signatures. `import`/`import static`/wildcard imports are
+  resolved via a new `java_module_path` convention anchored on the
+  conventional Maven/Gradle `src/main/java`/`src/test/java` source root
+  when present (falling back to repo-root-relative otherwise, same
+  heuristic tradeoff as Python's dotted-path resolution). `new Type(...)`
+  is recorded as a call to the constructed class, matching TS/JS's
+  `new_expression` treatment, so instantiated classes don't read as dead
+  code.
+- **Known limitation, stated plainly:** no classpath/JAR-dependency
+  resolution — bare (non-source-tree) references are left unresolved,
+  same tradeoff already made for npm packages and Cargo dependencies. A
+  nonstandard source layout (not `src/main/java`-anchored) falls back to
+  a repo-root-relative package path, which may not match the file's real
+  package declaration.
+- 6 new tests (class/interface/method/constructor extraction, plain/
+  static/wildcard imports, `new`-expression call tracking, cyclomatic
+  complexity, duplicate-body hashing, interface-method-signature
+  handling) plus a `repowise-graph` end-to-end Maven-layout resolution
+  test; 52 tests passing workspace-wide. Second language merged out of
+  this session's `parity-loop` gap-analysis pass (after TypeScript/
+  JavaScript in #26, and hotspot scoring in #73) — next up per the loop
+  is whichever `parity-gap` issue is oldest and unblocked.
+
 ## PR #73 — Add recency-weighted hotspot scoring
 **2026-07-23** · [#73](https://github.com/baileyrd/rusty_repo_wise/pull/73) · closes [#28](https://github.com/baileyrd/rusty_repo_wise/issues/28)
 

@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 /// A Rust-native, self-hosted codebase intelligence CLI, inspired by
 /// repowise (https://github.com/repowise-dev/repowise). Implemented so
 /// far: parsing, symbol/import/call extraction, dependency-graph queries,
-/// and deterministic code-health scoring. Other layers from the original
-/// project (git analytics, doc generation, ADR mining, MCP server,
-/// dashboard) are not yet implemented.
+/// deterministic code-health scoring, and git-history analytics (churn,
+/// hotspots, ownership, co-change coupling). Other layers from the
+/// original project (doc generation, ADR mining, MCP server, dashboard)
+/// are not yet implemented.
 #[derive(Parser)]
 #[command(name = "repowise", version, about)]
 struct Cli {
@@ -56,6 +57,29 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         worst: usize,
     },
+    /// Rank files by hotspot score (git churn × cyclomatic complexity).
+    Hotspots {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many of the highest-scoring files to list.
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+    },
+    /// Show per-author line ownership for a file, from `git blame`.
+    Ownership {
+        file: PathBuf,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Show the files that most often change alongside a given file.
+    Coupled {
+        file: PathBuf,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many co-changing files to list.
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -67,6 +91,9 @@ fn main() -> anyhow::Result<()> {
         Command::Search { query, path } => cmd_search(&query, &path),
         Command::Deps { file, path } => cmd_deps(&file, &path),
         Command::Health { path, worst } => cmd_health(&path, worst),
+        Command::Hotspots { path, top } => cmd_hotspots(&path, top),
+        Command::Ownership { file, path } => cmd_ownership(&file, &path),
+        Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
     }
 }
 
@@ -230,6 +257,88 @@ fn cmd_health(path: &Path, worst: usize) -> anyhow::Result<()> {
                 display_path(&f.file, &index.root)
             );
         }
+    }
+    Ok(())
+}
+
+fn cmd_hotspots(path: &Path, top: usize) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let analytics = repowise_git::GitAnalytics::collect(&root)?;
+    let hotspots = repowise_git::hotspots(&index, &analytics);
+
+    println!(
+        "Repowise hotspots for {} ({} commit(s) analyzed)",
+        index.root.display(),
+        analytics.commit_count
+    );
+    if hotspots.is_empty() {
+        println!("  No indexed file has git history under this root.");
+        return Ok(());
+    }
+    println!(
+        "  {:<8} {:<6} {:<11} {:<8} {:<10} file (last touched by)",
+        "score", "churn", "complexity", "bugfixes", "last"
+    );
+    for h in hotspots.iter().take(top) {
+        let last = h
+            .last_touch
+            .as_ref()
+            .map(|(hash, author)| format!("{hash} {author}"))
+            .unwrap_or_default();
+        println!(
+            "  {:<8} {:<6} {:<11} {:<8} {:<10} {}",
+            h.score,
+            h.churn,
+            h.total_complexity,
+            h.bugfix_commits,
+            last,
+            display_path(&h.file, &index.root)
+        );
+    }
+    Ok(())
+}
+
+fn cmd_ownership(file: &Path, path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let target = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        root.join(file)
+    };
+    let target = target.canonicalize().unwrap_or(target);
+
+    let ownership = repowise_git::ownership_of(&root, &target)?;
+    println!("{}", display_path(&target, &root));
+    for o in &ownership {
+        println!(
+            "  {:>5.1}%  ({} line(s))  {}",
+            o.percentage, o.lines, o.author
+        );
+    }
+    Ok(())
+}
+
+fn cmd_coupled(file: &Path, path: &Path, top: usize) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let target = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        root.join(file)
+    };
+    let target = target.canonicalize().unwrap_or(target);
+
+    let analytics = repowise_git::GitAnalytics::collect(&root)?;
+    let coupled = analytics.coupled_files(&target, top);
+
+    println!("{}", display_path(&target, &root));
+    if coupled.is_empty() {
+        println!("  No co-change coupling found (or too little history).");
+        return Ok(());
+    }
+    println!("  Most often changed alongside:");
+    for (f, count) in &coupled {
+        println!("    {:<4} {}", count, display_path(f, &root));
     }
     Ok(())
 }

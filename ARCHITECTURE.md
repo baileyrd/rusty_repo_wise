@@ -20,13 +20,17 @@ today:
 | Index persistence (`RepoIndex::save`/`load`) | JSON on disk (`.repowise/index.json`) | the one and only backing store so far |
 
 ## Structure
-Modular monolith: one Cargo workspace, five crates, each a layer over the one
-below it — `repowise-core` (data model, file discovery, index persistence) →
-`repowise-parser` (tree-sitter extraction) → `repowise-graph` (dependency
-graph + queries) → `repowise-health` (deterministic scoring on top of the
-graph) → `repowise-cli` (binary tying it together). No crate has been split
-out as a separate service or process; there's no forcing function (scaling,
-team boundary, fault isolation) that would justify it yet.
+Modular monolith: one Cargo workspace, six crates. Most are a layer over the
+one below it — `repowise-core` (data model, file discovery, index
+persistence) → `repowise-parser` (tree-sitter extraction) → `repowise-graph`
+(dependency graph + queries) → `repowise-health` (deterministic scoring on
+top of the graph) — all tied together by `repowise-cli` (the binary).
+`repowise-git` is the one exception to the strict pipeline: it depends only
+on `repowise-core` (for `RepoIndex`'s per-symbol complexity) and the `git`
+CLI directly, not on `repowise-graph`, since git-history analysis doesn't
+need the dependency graph at all. No crate has been split out as a separate
+service or process; there's no forcing function (scaling, team boundary,
+fault isolation) that would justify it yet.
 
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`
@@ -35,6 +39,12 @@ extracts symbols/imports/calls per file into a `RepoIndex` → saved to
 `health`) loads that index, builds a `RepoGraph` (resolves imports/calls into
 `Contains`/`Imports`/`Calls` edges), and queries it — `repowise-health` adds
 one more pass over the graph's symbols and call-in-degrees to score files.
+`hotspots`/`ownership`/`coupled` are a separate path: they load the same
+`RepoIndex` for complexity data, but get their git-history data by shelling
+out to `git log`/`git blame` fresh on every invocation rather than reading
+anything cached in `.repowise/index.json` — see ARCHITECTURE's "Non-goals"
+and the README's "Git analytics" section for why (staleness/invalidation
+complexity not worth taking on yet).
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their

@@ -5,6 +5,7 @@ members = [
     "crates/repowise-parser",
     "crates/repowise-graph",
     "crates/repowise-health",
+    "crates/repowise-git",
     "crates/repowise-cli",
 ]
 

@@ -384,6 +384,7 @@ dependencies = [
  "anyhow",
  "clap",
  "repowise-core",
+ "repowise-git",
  "repowise-graph",
  "repowise-health",
  "repowise-parser",
@@ -397,6 +398,15 @@ dependencies = [
  "ignore",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "repowise-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "repowise-core",
+ "tempfile",
 ]
 
 [[package]]

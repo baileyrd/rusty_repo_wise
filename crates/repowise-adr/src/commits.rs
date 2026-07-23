@@ -5,6 +5,15 @@ use repowise_git::CommitInfo;
 /// treated as recording a decision. A heuristic, not ground truth: a
 /// real decision described without one of these words won't be picked
 /// up, and an unrelated commit that happens to mention one will be.
+///
+/// Widened from the original 7 (`decide` through `instead of`) toward
+/// the reference's documented ~19-verb "git archaeology" set (see issue
+/// #50): `migrate`/`replace`/`deprecate`/`drop`/`rewrite`/`split`/
+/// `revert` are named explicitly in that issue; `opt for`/`in favor
+/// of`/`settle on`/`consolidate`/`standardize on` round the list out to
+/// 19 from common decision-language vocabulary, since the reference
+/// repo wasn't reachable from this session to confirm its exact
+/// remaining entries.
 const DECISION_KEYWORDS: &[&str] = &[
     "decide",
     "decision",
@@ -13,6 +22,18 @@ const DECISION_KEYWORDS: &[&str] = &[
     "switch to",
     "adopt",
     "instead of",
+    "migrate",
+    "replace",
+    "deprecate",
+    "drop",
+    "rewrite",
+    "split",
+    "revert",
+    "opt for",
+    "in favor of",
+    "settle on",
+    "consolidate",
+    "standardize on",
 ];
 
 /// Mine decision-like commits (by message keyword) into `DecisionRecord`s.
@@ -72,5 +93,34 @@ mod tests {
             &records[0].source,
             DecisionSource::CommitMessage { author, .. } if author == "A. Uthor"
         ));
+    }
+
+    #[test]
+    fn flags_messages_using_the_newly_widened_keyword_set() {
+        let decision_like = [
+            "Migrate the queue backend to sled",
+            "Replace the legacy config loader",
+            "Deprecate the old v1 API",
+            "Drop support for the ancient client protocol",
+            "Rewrite the parser from scratch",
+            "Split the monolithic service into two crates",
+            "Revert to the previous retry strategy",
+            "Opt for a simpler polling loop over webhooks",
+            "In favor of composition over inheritance here",
+            "Settle on sled as the index store",
+            "Consolidate the two config-loading paths",
+            "Standardize on snake_case for module names",
+        ];
+        for message in decision_like {
+            assert!(
+                is_decision_message(message),
+                "expected {message:?} to be flagged as decision-like"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_flag_an_unrelated_message() {
+        assert!(!is_decision_message("Fix off-by-one in pagination"));
     }
 }

@@ -258,10 +258,12 @@ these pages (`repowise generate`), and the dashboard's doc browser.
   (`# ADR-XXXX: Title`, then `Status:`/`Date:` lines). An unfilled
   template (title still literally `<Title>`) is skipped rather than mined
   as a real decision.
-- **Decision-like commit messages** — a message containing one of a small
-  keyword set (`decide`, `decision`, `chose`, `chosen`, `switch to`,
-  `adopt`, `instead of`). A heuristic, not ground truth, same framing as
-  the bug-fix-commit detection in git analytics.
+- **Decision-like commit messages** — a message containing one of a
+  19-verb keyword set (`decide`, `decision`, `chose`, `chosen`,
+  `switch to`, `adopt`, `instead of`, `migrate`, `replace`, `deprecate`,
+  `drop`, `rewrite`, `split`, `revert`, `opt for`, `in favor of`,
+  `settle on`, `consolidate`, `standardize on`). A heuristic, not ground
+  truth, same framing as the bug-fix-commit detection in git analytics.
 - **Decision-like merged PR bodies** — the same keyword heuristic as
   commit messages, applied to a merged PR's title/body via the GitHub
   API. This is the one decision source (and the one place in

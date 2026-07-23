@@ -38,10 +38,13 @@ since git-history analysis doesn't need the dependency graph at all.
 than duplicating it), but not `repowise-graph`/`repowise-health` — decision
 mining doesn't need the resolved dependency graph or health scores, just
 the raw index and commit history. `repowise-mcp` depends on
-`repowise-core`/`repowise-graph`/`repowise-health` (it's a thin transport
-layer wrapping their existing query functions as MCP tools) plus `rmcp`
-(the official Rust MCP SDK) and `tokio` — the only crates in this
-workspace with an async runtime dependency; `repowise-cli` builds a
+`repowise-core`/`repowise-graph`/`repowise-health`/`repowise-git` (it's a
+thin transport layer wrapping their existing query functions as MCP
+tools — `get_risk` is the one tool that needs `repowise-git`'s
+hotspot/churn/bug-fix data, degrading to zero/empty rather than erroring
+when the indexed root isn't a git repository) plus `rmcp` (the official
+Rust MCP SDK) and `tokio` — the only crates in this workspace with an
+async runtime dependency; `repowise-cli` builds a
 `tokio::runtime::Runtime` manually just for the `serve` subcommand rather
 than making the whole synchronous CLI async. `repowise-dashboard` sits at
 the top of the pipeline, depending on `repowise-core`/`repowise-graph`/

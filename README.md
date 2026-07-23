@@ -80,9 +80,10 @@ specifics per layer), not full feature parity:
 - Mine architectural decisions from `docs/adr/*.md` files and decision-like
   commit messages, link each to the files/symbols it mentions, and track
   supersession via an ADR's `Status: Superseded by ADR-XXXX` line.
-- Expose `get_overview`/`search_codebase`/`get_context` as MCP tools over
-  stdio (the official `rmcp` SDK), so an agent can pull complete context
-  for a file in one round-trip instead of piecing it together itself.
+- Expose `get_overview`/`search_codebase`/`get_context`/`get_risk` as MCP
+  tools over stdio (the official `rmcp` SDK), so an agent can pull
+  complete context (including git-history risk data) for a file in one
+  round-trip instead of piecing it together itself.
 - Generate a static-site dashboard (one self-contained HTML page, no
   server, no JS build step) covering overview stats, code health,
   hotspots, and mined decisions — regenerate by re-running the command.
@@ -97,7 +98,7 @@ Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
 mining (only 2 of the original's 8 decision sources are implemented —
-see "Architectural decision mining" below). The MCP server covers 3 of
+see "Architectural decision mining" below). The MCP server covers 4 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
 — see "Dashboard" below for what a richer version would need.
@@ -123,7 +124,8 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-adr` — architectural-decision mining from ADR files and
   decision-like commit messages, linked to the files/symbols they mention.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
-  the index/graph/health data as agent-facing tools over stdio.
+  the index/graph/health/git-analytics data as agent-facing tools over
+  stdio.
 - `repowise-dashboard` — a static-site dashboard rendered from the
   overview/health/hotspot/decision data the other layers compute.
 - `repowise-cli` — the `repowise` binary tying it together.
@@ -145,7 +147,7 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 ```
 
@@ -272,7 +274,7 @@ also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Three tools are implemented:
+a prior `repowise init`/`update`. Four tools are implemented:
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
@@ -282,15 +284,21 @@ a prior `repowise init`/`update`. Three tools are implemented:
   most for the original's stated goal (cutting an agent's token spend on
   context-loading): one round-trip instead of separate search/deps/health
   reads pieced together by the caller.
+- **`get_risk(file?, top_n?)`** — `get_context` plus git-history risk
+  data: hotspot score, churn, and bug-fix-commit count from
+  `repowise-git`. Given `file`, returns that file's risk profile alone;
+  given no `file`, returns the `top_n` riskiest files repo-wide, ranked
+  by (recency-weighted) hotspot score. Degrades to zero/empty git data
+  (rather than erroring) when the indexed root isn't a git repository —
+  same tradeoff `repowise-dashboard`'s hotspots section already makes.
 
 Every call re-loads `.repowise/index.json` and rebuilds the dependency
 graph fresh — no caching across calls, consistent with how `hotspots`/
 `ownership`/`coupled`/`decisions` already work in this port.
 
-Not implemented from the original's ~10 tools: `get_risk`/`get_change_risk`
-(these would read naturally on `repowise-git`'s hotspot data, now that
-git analytics exists — a well-scoped next addition, deliberately left out
-of this first pass rather than bundled in) and the rest of the original's
+Not implemented from the original's ~10 tools: `get_change_risk` (the
+original feeds diff-shape metrics into a pre-trained ML model this port
+has no equivalent for — see issue #42) and the rest of the original's
 tool surface beyond what this port's other layers currently support.
 
 ## Dashboard

@@ -745,6 +745,7 @@ name = "repowise-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "repowise-adr",
  "repowise-core",
  "repowise-git",
  "repowise-graph",

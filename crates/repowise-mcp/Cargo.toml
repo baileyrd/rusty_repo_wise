@@ -9,6 +9,7 @@ repowise-core = { path = "../repowise-core" }
 repowise-graph = { path = "../repowise-graph" }
 repowise-health = { path = "../repowise-health" }
 repowise-git = { path = "../repowise-git" }
+repowise-adr = { path = "../repowise-adr" }
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 schemars = "1"

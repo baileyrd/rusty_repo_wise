@@ -81,11 +81,12 @@ specifics per layer), not full feature parity:
   commit messages, link each to the files/symbols it mentions, and track
   supersession via an ADR's `Status: Superseded by ADR-XXXX` line.
 - Expose `get_overview`/`search_codebase`/`get_context`/`get_risk`/
-  `get_change_risk`/`get_symbol` as MCP tools over stdio (the official
-  `rmcp` SDK), so an agent can pull complete context (including
-  git-history risk data, a deterministic per-commit risk score, and a
-  symbol's raw source) for a file, a change, or a single symbol in one
-  round-trip instead of piecing it together itself.
+  `get_change_risk`/`get_symbol`/`get_why` as MCP tools over stdio (the
+  official `rmcp` SDK), so an agent can pull complete context (including
+  git-history risk data, a deterministic per-commit risk score, a
+  symbol's raw source, and the architectural decisions behind a file) for
+  a file, a change, a single symbol, or "why was this built this way" in
+  one round-trip instead of piecing it together itself.
 - Generate a static-site dashboard (one self-contained HTML page, no
   server, no JS build step) covering overview stats, code health,
   hotspots, and mined decisions — regenerate by re-running the command.
@@ -100,7 +101,7 @@ Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
 mining (only 2 of the original's 8 decision sources are implemented —
-see "Architectural decision mining" below). The MCP server covers 6 of
+see "Architectural decision mining" below). The MCP server covers 7 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
 — see "Dashboard" below for what a richer version would need.
@@ -126,8 +127,9 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-adr` — architectural-decision mining from ADR files and
   decision-like commit messages, linked to the files/symbols they mention.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
-  the index/graph/health/git-analytics data, plus a deterministic
-  per-commit change-risk score, as agent-facing tools over stdio.
+  the index/graph/health/git-analytics/mined-decisions data, plus a
+  deterministic per-commit change-risk score, as agent-facing tools over
+  stdio.
 - `repowise-dashboard` — a static-site dashboard rendered from the
   overview/health/hotspot/decision data the other layers compute.
 - `repowise-cli` — the `repowise` binary tying it together.
@@ -149,7 +151,7 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 ```
 
@@ -276,7 +278,7 @@ also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Six tools are implemented:
+a prior `repowise init`/`update`. Seven tools are implemented:
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
@@ -319,6 +321,15 @@ a prior `repowise init`/`update`. Six tools are implemented:
   numbers" tradeoff `repowise-docs`'s freshness tracking already makes —
   so edits since the last `init`/`update` are reflected, at the cost of
   the returned span possibly being off if line numbers have since shifted.
+- **`get_why(targets?)`** — architectural decisions mined from
+  `docs/adr/*.md` and decision-like commit messages (via `repowise-adr`),
+  the same data as `repowise decisions --for-file`. `targets` is a list
+  of file paths or symbol ids (mixing both is fine — a symbol id resolves
+  to its own file); a decision is returned if its body links to at least
+  one target's file. Omit `targets` (or pass an empty list) to get every
+  mined decision. A thin wrapper with no new mining logic of its own —
+  the same "reuse an existing library call" shape as `get_overview`/
+  `search_codebase`.
 
 Every call re-loads `.repowise/index.json` and rebuilds the dependency
 graph fresh — no caching across calls, consistent with how `hotspots`/

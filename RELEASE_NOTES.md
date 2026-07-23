@@ -6,6 +6,44 @@ repo routing work through PRs).
 
 ---
 
+## PR #123 — Add nested_complexity max-nesting-depth health marker
+**2026-07-23** · [#123](https://github.com/baileyrd/rusty_repo_wise/pull/123) · closes [#53](https://github.com/baileyrd/rusty_repo_wise/issues/53)
+
+- **Added:** `nested_complexity`, a structural-complexity marker
+  measuring maximum control-flow nesting depth per function/method —
+  complements cyclomatic complexity, which counts decision points flat:
+  a function with 10 sequential ifs and one with the same 10 ifs nested
+  inside each other score identically on cyclomatic complexity but read
+  very differently, and only nesting depth tells them apart.
+- **New `repowise-parser::metrics::max_nesting_depth`**, a recursive AST
+  walk alongside the existing `cyclomatic_complexity` — reuses the exact
+  same per-language `is_decision`/`is_nested_function` classification,
+  just tracking how deep decision-classified nodes nest inside each
+  other (incrementing depth only when descending into one) rather than
+  counting them flat.
+- **`Symbol` gains `max_nesting_depth: usize`**, wired into all 16
+  already-supported languages' function/method extraction in this one
+  PR. Unlike LCOM4 (#51), which needed genuinely new per-language
+  field-access extraction and was deliberately scoped to 3 languages,
+  this marker needed no new AST classification logic — every language's
+  `is_decision` already existed for `cyclomatic_complexity` — so there
+  was no scoping decision to make here.
+- **New `FindingKind::NestedComplexity`** (threshold `> 4` levels,
+  penalty −1.0, matching `HighComplexity`'s weight since both are cheap
+  AST-derived structural signals of comparable severity).
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-docs`/`repowise-git`/`repowise-health` that
+  build `Symbol` directly.
+- 3 new tests (a dedicated nesting-depth-vs-complexity test in both
+  `rust.rs` and `python.rs` — two functions with identical cyclomatic
+  complexity, one sequential and one nested, confirming
+  `max_nesting_depth` tells them apart; a `repowise-health` test
+  confirming a function above the threshold is flagged and one exactly
+  at the threshold isn't), 197 tests passing workspace-wide (up from
+  194). Next up per the loop is issue #54 (`bumpy_road` — nesting
+  "bumps" per method), the fourth of six filed health-marker issues.
+
 ## PR #121 — Add dry_violation near-duplicate code health marker
 **2026-07-23** · [#121](https://github.com/baileyrd/rusty_repo_wise/pull/121) · closes [#52](https://github.com/baileyrd/rusty_repo_wise/issues/52)
 

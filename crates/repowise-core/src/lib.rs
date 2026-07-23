@@ -135,6 +135,13 @@ pub struct Symbol {
     /// `0` for symbols with no body to analyze (e.g. trait method
     /// signatures, structs/enums/traits/modules).
     pub complexity: usize,
+    /// Maximum nesting depth of control-flow blocks (if/for/while/etc.)
+    /// within the body (0 = no nested blocks at all). `0` for symbols
+    /// with no body to analyze, same as `complexity`. Complements
+    /// `complexity`: a function with 10 sequential ifs and one with the
+    /// same 10 ifs nested inside each other score identically on
+    /// cyclomatic complexity but read very differently.
+    pub max_nesting_depth: usize,
     /// Number of declared parameters. `0` for symbols without a
     /// parameter list.
     pub param_count: usize,

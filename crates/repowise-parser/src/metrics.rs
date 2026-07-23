@@ -37,6 +37,43 @@ pub fn cyclomatic_complexity(
     count
 }
 
+/// Maximum nesting depth of decision-classified blocks within `body`
+/// (0 = no nested blocks at all). Unlike `cyclomatic_complexity` (which
+/// counts *how many* decision points there are, flat), this tracks *how
+/// deep* they're nested: a recursive walk that increments depth only
+/// when descending into a child classified by `is_decision`, and
+/// returns the maximum depth reached anywhere in the subtree. Recursion
+/// stops at `is_nested_function`-matched nodes, same as
+/// `cyclomatic_complexity`, so a nested function/closure's own nesting
+/// doesn't inflate the enclosing symbol's depth.
+pub fn max_nesting_depth(
+    body: Node,
+    is_decision: impl Fn(Node) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> usize {
+    fn walk(
+        node: Node,
+        depth: usize,
+        is_decision: &dyn Fn(Node) -> bool,
+        is_nested_function: &dyn Fn(Node) -> bool,
+    ) -> usize {
+        let mut max_depth = depth;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            let child_depth = if is_decision(child) { depth + 1 } else { depth };
+            let reached = walk(child, child_depth, is_decision, is_nested_function);
+            if reached > max_depth {
+                max_depth = reached;
+            }
+        }
+        max_depth
+    }
+    walk(body, 0, &is_decision, &is_nested_function)
+}
+
 /// Best-effort parameter count: the number of named children of a
 /// parameter-list node (may include `self`/`cls`).
 pub fn count_params(params: Option<Node>) -> usize {

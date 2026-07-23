@@ -6,7 +6,8 @@
 use repowise_core::{CallRef, FileRecord, Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
 use repowise_health::{
-    analyze, FindingKind, GOD_CLASS_METHODS, HIGH_COMPLEXITY, LONG_FUNCTION_LINES, TOO_MANY_PARAMS,
+    analyze, FindingKind, GOD_CLASS_METHODS, HIGH_COMPLEXITY, HIGH_NESTING_DEPTH,
+    LONG_FUNCTION_LINES, TOO_MANY_PARAMS,
 };
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,7 @@ fn symbol(
         end_line,
         parent: parent.map(str::to_string),
         complexity,
+        max_nesting_depth: 0,
         param_count,
         body_hash,
     }
@@ -112,6 +114,49 @@ fn flags_long_high_complexity_and_too_many_params() {
         findings_for(&report, "big", FindingKind::PossiblyDeadCode).len(),
         1
     );
+}
+
+#[test]
+fn flags_deeply_nested_functions_but_not_shallow_ones() {
+    let mut deep = symbol(
+        "deep.rs",
+        "deep",
+        SymbolKind::Function,
+        1,
+        20,
+        None,
+        5,
+        1,
+        None,
+    );
+    deep.max_nesting_depth = HIGH_NESTING_DEPTH + 2;
+    let mut shallow = symbol(
+        "deep.rs",
+        "shallow",
+        SymbolKind::Function,
+        22,
+        30,
+        None,
+        3,
+        1,
+        None,
+    );
+    shallow.max_nesting_depth = HIGH_NESTING_DEPTH;
+
+    let idx = index(vec![file_record(
+        "deep.rs",
+        vec![deep, shallow],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    assert_eq!(
+        findings_for(&report, "deep", FindingKind::NestedComplexity).len(),
+        1
+    );
+    // At the threshold, not above it -- not flagged.
+    assert!(findings_for(&report, "shallow", FindingKind::NestedComplexity).is_empty());
 }
 
 #[test]

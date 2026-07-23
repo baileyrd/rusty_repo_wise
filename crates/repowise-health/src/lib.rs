@@ -5,11 +5,12 @@
 //! parameter lists, god classes (too many methods), duplicate code
 //! (identical function/method bodies), near-duplicate code (Rabin-Karp
 //! rolling-hash overlap — see the `near_duplicate` module doc comment),
-//! possibly-dead code (zero resolved callers), and low cohesion (LCOM4 —
+//! possibly-dead code (zero resolved callers), low cohesion (LCOM4 —
 //! see the `lcom4` module doc comment for its Rust/Python/TS+JS-only
-//! scope). Git-history-based markers (churn, hotspots, bug-fix history)
-//! aren't implemented yet — that needs the git-analytics layer, which is
-//! a separate phase.
+//! scope), and nested complexity (max control-flow nesting depth — see
+//! `repowise_core::Symbol::max_nesting_depth`). Git-history-based
+//! markers (churn, hotspots, bug-fix history) aren't implemented yet —
+//! that needs the git-analytics layer, which is a separate phase.
 //!
 //! Every marker here is a plain threshold over data `repowise-parser`/
 //! `repowise-graph` already computed; nothing is inferred or guessed.
@@ -39,6 +40,9 @@ pub const HIGH_COMPLEXITY: usize = 10;
 pub const TOO_MANY_PARAMS: usize = 6;
 /// A struct/class with more than this many methods is flagged ("god class").
 pub const GOD_CLASS_METHODS: usize = 15;
+/// A function/method with control-flow nested deeper than this is flagged.
+/// E.g. an `if` inside a `for` inside an `if` is depth 3.
+pub const HIGH_NESTING_DEPTH: usize = 4;
 
 const PENALTY_LONG_FUNCTION: f64 = 0.5;
 const PENALTY_HIGH_COMPLEXITY: f64 = 1.0;
@@ -50,6 +54,10 @@ const PENALTY_LOW_COHESION: f64 = 1.0;
 // Weaker signal than an exact-hash `DuplicateCode` match (a heuristic
 // overlap ratio, not a byte-for-byte match), so it's penalized less.
 const PENALTY_NEAR_DUPLICATE: f64 = 0.3;
+// Same weight as `HighComplexity`: both are cheap AST-derived structural
+// signals of the same rough severity, just measuring different things
+// (branch count vs. nesting depth).
+const PENALTY_NESTED_COMPLEXITY: f64 = 1.0;
 
 const MAX_SCORE: f64 = 10.0;
 
@@ -63,6 +71,7 @@ pub enum FindingKind {
     NearDuplicateCode,
     PossiblyDeadCode,
     LowCohesion,
+    NestedComplexity,
 }
 
 impl FindingKind {
@@ -76,6 +85,7 @@ impl FindingKind {
             FindingKind::NearDuplicateCode => "near-duplicate-code",
             FindingKind::PossiblyDeadCode => "possibly-dead-code",
             FindingKind::LowCohesion => "low-cohesion",
+            FindingKind::NestedComplexity => "nested-complexity",
         }
     }
 
@@ -89,6 +99,7 @@ impl FindingKind {
             FindingKind::NearDuplicateCode => PENALTY_NEAR_DUPLICATE,
             FindingKind::PossiblyDeadCode => PENALTY_DEAD_CODE,
             FindingKind::LowCohesion => PENALTY_LOW_COHESION,
+            FindingKind::NestedComplexity => PENALTY_NESTED_COMPLEXITY,
         }
     }
 }
@@ -192,6 +203,18 @@ fn check_function_markers(
             detail: format!(
                 "cyclomatic complexity {} (> {HIGH_COMPLEXITY})",
                 sym.complexity
+            ),
+        });
+    }
+    if sym.max_nesting_depth > HIGH_NESTING_DEPTH {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(sym.start_line),
+            kind: FindingKind::NestedComplexity,
+            detail: format!(
+                "control flow nested {} levels deep (> {HIGH_NESTING_DEPTH})",
+                sym.max_nesting_depth
             ),
         });
     }

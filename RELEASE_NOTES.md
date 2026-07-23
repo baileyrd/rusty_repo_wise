@@ -6,6 +6,49 @@ repo routing work through PRs).
 
 ---
 
+## PR #115 — Add CHANGELOG decision source to repowise-adr
+**2026-07-23** · [#115](https://github.com/baileyrd/rusty_repo_wise/pull/115) · closes [#49](https://github.com/baileyrd/rusty_repo_wise/issues/49)
+
+- **Added:** a sixth architectural-decision source — keep-a-changelog-
+  style CHANGELOG sections. A new `DecisionSource::Changelog { file,
+  section }` variant, and a new `repowise-adr::changelog` module that
+  finds whichever of `CHANGELOG.md`/`HISTORY.md`/`NEWS.md`/`CHANGES.md`
+  exists at the repo root first (checked in that priority order,
+  case-insensitive, so the result is deterministic even if more than one
+  happens to exist) and scans it for `### Changed`/`### Removed`/
+  `### Deprecated`/`### Security` section headings — a heading-text
+  match, not a full keep-a-changelog spec parser, per this issue's own
+  acceptance criteria.
+- **`### Added`/`### Fixed` are deliberately excluded** — purely
+  additive or bug-fix entries aren't architectural decisions the way a
+  change/removal/deprecation/security call generally is.
+- **Linking treatment differs from the last three sources.** A
+  changelog entry's `linked_files` goes through the same text-matching
+  linker ADR files and commit messages already use in `mine()`, rather
+  than the authoritative self-link PR/code-comment/inline-marker
+  decisions get. A changelog entry isn't "about" the changelog file
+  itself — it's prose describing a change made somewhere else in the
+  codebase — unlike a PR's diff or the file a comment sits in, which
+  genuinely are the thing the decision is about.
+- **Pure filesystem/parsing, no new dependency** — this repo's own
+  `RELEASE_NOTES.md` was a reasonable first fixture to think through per
+  the issue's own note, but the tests use a proper keep-a-changelog-
+  shaped fixture, since the source itself needs to support the standard
+  convention generically, not just this repo's own format.
+- `DecisionSource` gaining a variant is a breaking change for any
+  exhaustive match over it, same as the three decision-source PRs before
+  this one — updated `repowise-cli::cmd_decisions` and
+  `repowise-mcp::get_why` accordingly, verified via a full workspace
+  build.
+- 5 new tests (each recognized section mined from a keep-a-changelog
+  fixture, case-insensitive filename matching, falling back to
+  `HISTORY.md` when no `CHANGELOG.md` exists, no changelog file at all
+  degrades to empty, `### Added`/`### Fixed` correctly ignored), 179
+  tests passing workspace-wide (up from 174). Next up per the loop is
+  issue #50 — a small, low-risk enhancement to the *existing*
+  commit-message source rather than a new one: widening
+  `DECISION_KEYWORDS` toward the reference's fuller ~19-verb list.
+
 ## PR #113 — Add inline decision marker mining to repowise-adr
 **2026-07-23** · [#113](https://github.com/baileyrd/rusty_repo_wise/pull/113) · closes [#48](https://github.com/baileyrd/rusty_repo_wise/issues/48)
 

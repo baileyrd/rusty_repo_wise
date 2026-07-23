@@ -6,6 +6,44 @@ repo routing work through PRs).
 
 ---
 
+## PR #85 — Add Scala language support
+**2026-07-23** · [#85](https://github.com/baileyrd/rusty_repo_wise/pull/85) · closes [#34](https://github.com/baileyrd/rusty_repo_wise/issues/34)
+
+- **Added:** a `repowise-parser` extractor for Scala — classes, objects,
+  and traits (mapped to `Class`/`Class`/`Trait`), plus `def` methods.
+  Like Java/Kotlin (and unlike Go/C++), Scala methods are always
+  declared directly inside their type's `template_body`, so scoping
+  uses the same `class_stack` push/pop pattern. Bodiless `def`
+  signatures (abstract methods in traits) parse as a distinct
+  `function_declaration` node rather than `function_definition` with an
+  absent body — both are handled and recorded as symbols with 0
+  complexity, same treatment as Java/Kotlin's bodiless methods. `import`
+  declarations are extracted (plain and wildcard `_` forms); call and
+  `new`-style instance expressions are tracked as calls.
+- **Known limitation, stated plainly:** grouped selector imports
+  (`import foo.{Bar, Baz}`) resolve to the enclosing package (`foo`)
+  rather than being expanded into one entry per selector — an accepted
+  simplification, same tradeoff already made for other languages'
+  wildcard imports. Curried multi-parameter-list `def`s
+  (`def f(a: Int)(b: Int)`) only have their first parameter list
+  counted toward `param_count`.
+- **Dependency note:** `tree-sitter-scala = "0.23"` turned out to be
+  ABI-compatible with this workspace's tree-sitter 0.24 core without
+  any downgrade — unlike `tree-sitter-c-sharp`, which needed pinning to
+  0.21 (see the #83 entry below).
+- Reuses the shared `jvm_module_path` convention from Java/Kotlin for
+  import resolution, extended with `src/main/scala`/`src/test/scala` as
+  recognized sbt source roots — a mixed Java/Kotlin/Scala project
+  resolves imports across all three.
+- 6 new tests (class/trait/object/method extraction, plain/wildcard
+  imports, object-creation calls, cyclomatic complexity, duplicate-body
+  hashing, trait-method-signature handling) plus a `repowise-graph`
+  end-to-end test proving sbt-layout package resolution; 84 tests
+  passing workspace-wide. Seventh language merged out of this session's
+  `parity-loop` gap-analysis pass (after TypeScript/JavaScript in #26,
+  Java in #75, Kotlin in #77, Go in #79, C++ in #81, and C# in #83) —
+  next up per the loop is Ruby (#35).
+
 ## PR #83 — Add C# language support
 **2026-07-23** · [#83](https://github.com/baileyrd/rusty_repo_wise/pull/83) · closes [#33](https://github.com/baileyrd/rusty_repo_wise/issues/33)
 

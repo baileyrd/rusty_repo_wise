@@ -6,6 +6,34 @@ repo routing work through PRs).
 
 ---
 
+## PR #77 — Add Kotlin language support
+**2026-07-23** · [#77](https://github.com/baileyrd/rusty_repo_wise/pull/77) · closes [#30](https://github.com/baileyrd/rusty_repo_wise/issues/30)
+
+- **Added:** a `repowise-parser` extractor for Kotlin — classes,
+  interfaces (mapped to `Trait`), objects, and functions/methods.
+  `repowise-graph`'s Java-only `java_module_path` was generalized to
+  `jvm_module_path`, now recognizing both `src/main/java`/`src/test/java`
+  and `src/main/kotlin`/`src/test/kotlin` source roots with both
+  languages sharing one module-path index, so a mixed Java/Kotlin project
+  resolves imports across both. Kotlin has no `new` keyword, so class
+  instantiation (`Widget()`) is already covered by ordinary
+  call-expression handling — no separate node-kind handler needed, unlike
+  Java/TS/JS.
+- **Known limitation, stated plainly:** secondary constructors aren't
+  extracted as symbols (only the primary constructor's parameters,
+  captured implicitly as part of the class symbol's span) — a narrower
+  scope than Java's explicit constructor-declaration handling, accepted
+  to keep this PR's scope reasonable.
+- 6 new tests (class/interface/object/method extraction, plain/aliased/
+  wildcard imports, bare-invocation-as-class-call tracking, cyclomatic
+  complexity, duplicate-body hashing, interface-method-signature
+  handling) plus a `repowise-graph` end-to-end test proving cross-language
+  resolution (a Kotlin file importing a Java class in the same project);
+  59 tests passing workspace-wide. Third language merged out of this
+  session's `parity-loop` gap-analysis pass (after TypeScript/JavaScript
+  in #26 and Java in #75) — next up per the loop is whichever
+  `parity-gap` issue is oldest and unblocked (Go, per the filing order).
+
 ## PR #75 — Add Java language support
 **2026-07-23** · [#75](https://github.com/baileyrd/rusty_repo_wise/pull/75) · closes [#29](https://github.com/baileyrd/rusty_repo_wise/issues/29)
 

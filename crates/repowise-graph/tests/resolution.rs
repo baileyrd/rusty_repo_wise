@@ -155,3 +155,42 @@ fn resolves_typescript_relative_imports_across_files() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, utils_ts);
 }
+
+#[test]
+fn resolves_java_package_imports_via_maven_source_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let src_root = root.join("src/main/java/com/example/util");
+    fs::create_dir_all(&src_root).unwrap();
+    fs::write(
+        src_root.join("Helper.java"),
+        "package com.example.util;\n\npublic class Helper {\n  public static int compute(int x) {\n    return x + 1;\n  }\n}\n",
+    )
+    .unwrap();
+    let app_root = root.join("src/main/java/com/example/app");
+    fs::create_dir_all(&app_root).unwrap();
+    fs::write(
+        app_root.join("Main.java"),
+        "package com.example.app;\n\nimport com.example.util.Helper;\n\npublic class Main {\n  public int run() {\n    return Helper.compute(1);\n  }\n}\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_java = find_file(&index, "Main.java").path.clone();
+    let helper_java = find_file(&index, "Helper.java").path.clone();
+
+    // Resolved via the `src/main/java`-anchored package path, not a
+    // repo-root-relative one (which would incorrectly require
+    // `src.main.java.com.example.util.Helper`).
+    let deps = graph.dependencies_of(&main_java);
+    assert!(
+        deps.contains(&helper_java),
+        "expected Main.java to depend on Helper.java, got {deps:?}"
+    );
+
+    let matches = graph.search("compute");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file, helper_java);
+}

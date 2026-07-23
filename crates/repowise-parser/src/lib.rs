@@ -5,6 +5,7 @@
 //! the same spirit as repowise's own tree-sitter-driven approach, but with
 //! none of the semantic-analysis machinery a real compiler front-end has.
 
+mod java;
 mod javascript;
 mod metrics;
 mod python;
@@ -25,6 +26,7 @@ pub fn parse_file(
         Language::Python => Ok(Some(python::extract(path, source)?)),
         Language::TypeScript => Ok(Some(javascript::extract_typescript(path, source)?)),
         Language::JavaScript => Ok(Some(javascript::extract_javascript(path, source)?)),
+        Language::Java => Ok(Some(java::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

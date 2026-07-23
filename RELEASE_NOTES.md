@@ -6,6 +6,51 @@ repo routing work through PRs).
 
 ---
 
+## PR #91 — Add Swift language support
+**2026-07-23** · [#91](https://github.com/baileyrd/rusty_repo_wise/pull/91) · closes [#37](https://github.com/baileyrd/rusty_repo_wise/issues/37)
+
+- **Added:** a `repowise-parser` extractor for Swift — classes/structs/
+  enums/actors (all share one `class_declaration` grammar node,
+  distinguished by its `declaration_kind` field) map to
+  `Class`/`Struct`/`Enum`/`Class`; protocols map to `Trait`. Extensions
+  re-open an existing type rather than declaring a new one, so they
+  don't get their own symbol, but their name is still pushed onto the
+  `class_stack` so extension methods are correctly attributed to the
+  extended type. Protocol method requirements have no body at all (a
+  distinct `protocol_function_declaration` node, not
+  `function_declaration` with an absent body) — recorded as symbols
+  with 0 complexity, same treatment as Java/Kotlin/Scala's bodiless
+  methods.
+- **Import resolution, by design:** Swift's `import` is module-level
+  (`import Foundation`), not file-level — there's no per-file
+  relative-import syntax and a module name has no file mapping without
+  a full build graph. Imports are recorded (for visibility/stats) but
+  always left unresolved by design, asserted directly by this PR's own
+  graph-layer test rather than treated as a "resolves" case that
+  happens to fail.
+- **Notable grammar quirk:** unlike every other language done so far,
+  Swift's `function_declaration` has no wrapping parameters-list node
+  at all — `parameter` nodes are direct children of the function
+  declaration itself, interspersed with its name/return-type/body.
+  `param_count` is counted directly rather than via the shared
+  `metrics::count_params` helper, which assumes a dedicated list node
+  (using that helper here would have silently counted every child, not
+  just parameters).
+- **Dependency note:** pins `tree-sitter-swift = "0.6"` rather than the
+  newer 0.7.x release — 0.7.3's grammar targets ABI 15, incompatible
+  with this workspace's tree-sitter 0.24 core (ABI 13–14 only). 0.6.0
+  is ABI-compatible, the same fix already applied to
+  `tree-sitter-c-sharp`/`tree-sitter-c`.
+- 6 new tests (class/struct/protocol/method extraction, extension-
+  attribution-without-duplicate-symbol, module-import-stays-unresolved,
+  bare/member call tracking, cyclomatic complexity, duplicate-body
+  hashing) plus a `repowise-graph` end-to-end test proving module
+  imports correctly stay unresolved; 100 tests passing workspace-wide.
+  Tenth language merged out of this session's `parity-loop`
+  gap-analysis pass (after TypeScript/JavaScript in #26, Java in #75,
+  Kotlin in #77, Go in #79, C++ in #81, C# in #83, Scala in #85, Ruby
+  in #87, and C in #89) — next up per the loop is PHP (#38).
+
 ## PR #89 — Add C language support
 **2026-07-23** · [#89](https://github.com/baileyrd/rusty_repo_wise/pull/89) · closes [#36](https://github.com/baileyrd/rusty_repo_wise/issues/36)
 

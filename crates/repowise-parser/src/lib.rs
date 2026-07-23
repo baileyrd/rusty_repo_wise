@@ -5,6 +5,7 @@
 //! the same spirit as repowise's own tree-sitter-driven approach, but with
 //! none of the semantic-analysis machinery a real compiler front-end has.
 
+mod go;
 mod java;
 mod javascript;
 mod kotlin;
@@ -29,6 +30,7 @@ pub fn parse_file(
         Language::JavaScript => Ok(Some(javascript::extract_javascript(path, source)?)),
         Language::Java => Ok(Some(java::extract(path, source)?)),
         Language::Kotlin => Ok(Some(kotlin::extract(path, source)?)),
+        Language::Go => Ok(Some(go::extract(path, source)?)),
         Language::Other => Ok(None),
     }
 }

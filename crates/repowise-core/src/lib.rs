@@ -20,6 +20,7 @@ pub enum Language {
     JavaScript,
     Java,
     Kotlin,
+    Go,
     Other,
 }
 
@@ -32,6 +33,7 @@ impl Language {
             "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
             "java" => Language::Java,
             "kt" | "kts" => Language::Kotlin,
+            "go" => Language::Go,
             _ => Language::Other,
         }
     }
@@ -44,6 +46,7 @@ impl Language {
             Language::JavaScript => "JavaScript",
             Language::Java => "Java",
             Language::Kotlin => "Kotlin",
+            Language::Go => "Go",
             Language::Other => "Other",
         }
     }

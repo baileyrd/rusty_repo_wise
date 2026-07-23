@@ -148,6 +148,62 @@ pub fn jvm_module_path(file: &Path, root: &Path) -> Option<String> {
     }
 }
 
+/// Read a `go.mod`'s `module <path>` declaration.
+fn read_go_module_name(go_mod: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(go_mod).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("module") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Find the nearest ancestor directory containing a `go.mod` and return
+/// `(module_path, module_root_dir)`.
+fn find_go_module_root(file: &Path) -> Option<(String, PathBuf)> {
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        let candidate = d.join("go.mod");
+        if candidate.is_file() {
+            let name = read_go_module_name(&candidate)?;
+            return Some((name, d.to_path_buf()));
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// Import path for a Go source file's *package* (not the file itself —
+/// Go packages are directories, so every file in the same directory
+/// shares one import path), e.g. `example.com/mymod/util`. Anchored on
+/// the nearest `go.mod`'s `module` declaration, mirroring
+/// `rust_module_path`'s `Cargo.toml`-anchoring.
+///
+/// **Known limitation:** since the module-path index this feeds
+/// (`repowise_graph::RepoGraph::build`) is one file per dotted/slashed
+/// path, a package with more than one file only keeps the *last* file
+/// processed as that package's resolved target — import edges still
+/// land in the right package, just not necessarily the exact file a
+/// symbol is defined in.
+pub fn go_module_path(file: &Path) -> Option<String> {
+    let (module_name, mod_root) = find_go_module_root(file)?;
+    let dir = file.parent()?;
+    let rel = dir.strip_prefix(&mod_root).ok()?;
+    let segments: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if segments.is_empty() {
+        Some(module_name)
+    } else {
+        Some(format!("{module_name}/{}", segments.join("/")))
+    }
+}
+
 /// Resolve an import path string against a module index by progressively
 /// stripping trailing segments (so importing a specific item from a
 /// module still resolves to that module's file).

@@ -376,3 +376,35 @@ fn resolves_scala_package_imports_via_sbt_source_root() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, helper_scala);
 }
+
+#[test]
+fn resolves_ruby_require_relative_but_not_plain_require() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(
+        root.join("helper.rb"),
+        "class Helper\n  def self.compute(x)\n    x + 1\n  end\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.rb"),
+        "require_relative \"helper\"\nrequire \"json\"\n\ndef run\n  Helper.compute(1)\nend\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let main_rb = find_file(&index, "main.rb").path.clone();
+    let helper_rb = find_file(&index, "helper.rb").path.clone();
+
+    let deps = graph.dependencies_of(&main_rb);
+    assert!(
+        deps.contains(&helper_rb),
+        "expected main.rb to depend on helper.rb, got {deps:?}"
+    );
+
+    // `require "json"` is gem-based ($LOAD_PATH-relative) with no static
+    // equivalent to resolve against, so it must count as unresolved.
+    assert!(graph.unresolved_imports >= 1);
+}

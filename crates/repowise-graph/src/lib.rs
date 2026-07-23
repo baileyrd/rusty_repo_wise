@@ -90,13 +90,18 @@ impl RepoGraph {
                         csharp_modules.insert(mp, file.path.clone());
                     }
                 }
-                // TypeScript/JavaScript/C++ relative (quote-form)
-                // imports are resolved directly at parse time (see
-                // `resolve_relative_import`/`resolve_include` in
+                // TypeScript/JavaScript/C++/Ruby relative (quote-form/
+                // `require_relative`) imports are resolved directly at
+                // parse time (see `resolve_relative_import`/
+                // `resolve_include`/`resolve_require_relative` in
                 // `repowise-parser`), so there's no module-path index to
                 // build here, unlike Rust/Python/Java/Kotlin/Go/C#/Scala's
                 // dotted/`::`/`/`-separated paths.
-                Language::TypeScript | Language::JavaScript | Language::Cpp | Language::Other => {}
+                Language::TypeScript
+                | Language::JavaScript
+                | Language::Cpp
+                | Language::Ruby
+                | Language::Other => {}
             }
         }
 
@@ -112,7 +117,9 @@ impl RepoGraph {
                 Language::Java | Language::Kotlin | Language::Scala => (".", &jvm_modules),
                 Language::Go => ("/", &go_modules),
                 Language::CSharp => (".", &csharp_modules),
-                Language::TypeScript | Language::JavaScript | Language::Cpp => ("", &no_modules),
+                Language::TypeScript | Language::JavaScript | Language::Cpp | Language::Ruby => {
+                    ("", &no_modules)
+                }
                 Language::Other => continue,
             };
             for imp in &file.imports {

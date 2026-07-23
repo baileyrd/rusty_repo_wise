@@ -18,7 +18,7 @@ today:
 
 | Seam | Implementation(s) | Notes |
 | ---- | ------------------ | ----- |
-| Per-language extraction (`repowise_parser::parse_file`) | `rust::extract`, `python::extract`, `javascript::extract_typescript`, `javascript::extract_javascript`, `java::extract`, `kotlin::extract`, `go::extract`, `cpp::extract`, `csharp::extract`, `scala::extract` | callers match on `Language` and never touch per-language internals directly; adding a language means adding a match arm, not implementing a trait |
+| Per-language extraction (`repowise_parser::parse_file`) | `rust::extract`, `python::extract`, `javascript::extract_typescript`, `javascript::extract_javascript`, `java::extract`, `kotlin::extract`, `go::extract`, `cpp::extract`, `csharp::extract`, `scala::extract`, `ruby::extract` | callers match on `Language` and never touch per-language internals directly; adding a language means adding a match arm, not implementing a trait |
 | File discovery (`repowise_core::discover_files`) | wraps the `ignore` crate | `.gitignore`-aware; the walker itself isn't swappable yet |
 | Index persistence (`RepoIndex::save`/`load`) | JSON on disk (`.repowise/index.json`) | the one and only backing store so far |
 

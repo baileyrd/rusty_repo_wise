@@ -6,6 +6,48 @@ repo routing work through PRs).
 
 ---
 
+## PR #95 — Add Dart language support
+**2026-07-23** · [#95](https://github.com/baileyrd/rusty_repo_wise/pull/95) · closes [#39](https://github.com/baileyrd/rusty_repo_wise/issues/39)
+
+- **Added:** a `repowise-parser` extractor for Dart — classes/mixins map
+  to `Class`/`Mixin` (reusing the `SymbolKind::Mixin` added for PHP —
+  Dart's own `mixin` keyword is the same genuine-mixin concept),
+  methods/functions nest via a `class_stack` the same way
+  Java/Kotlin/Scala/PHP do. A method's `signature` field wraps a
+  `method_signature`, itself wrapping the actual `function_signature`
+  (name/parameters/return-type); bodiless abstract/interface method
+  signatures use a shallower `declaration` node wrapping
+  `function_signature` directly — both handled, recorded as symbols
+  with 0 complexity for the bodiless case, same treatment as
+  Java/Kotlin/Scala/PHP's bodiless methods.
+- Relative `import 'local.dart'` resolves directly against the
+  filesystem at parse time (mirroring TS/JS/C/C++/Ruby); `import
+  'package:x/y.dart'` (a pub package) has no package registry here to
+  resolve against, left unresolved by design, same tradeoff as bare npm
+  specifiers.
+- **Notable: bumped the shared `tree-sitter` core (0.24 → 0.25).**
+  `tree-sitter-dart`'s only two published crates.io versions (`0.1.0`,
+  `0.2.0`) both target grammar ABI 15, which `tree-sitter` 0.24's core
+  doesn't support (max ABI 14) — unlike every previous ABI mismatch
+  this session (C#, C, Swift, PHP), there was no older, ABI-14-compatible
+  `tree-sitter-dart` release to pin instead. `tree-sitter` 0.25 widens
+  its supported range to include ABI 15 while staying backward-compatible
+  with the already-pinned older-ABI grammars (`tree-sitter-c-sharp`
+  0.21, `tree-sitter-c` 0.21, `tree-sitter-swift` 0.6, `tree-sitter-php`
+  0.23) — verified explicitly by bumping just the core version and
+  re-running the full existing 106-test suite (all 11 other languages)
+  before writing any Dart-specific code, confirming zero regressions
+  from the core bump alone.
+- 5 new tests (class/mixin/method extraction, relative/`package:`
+  import handling, member/bare/constructor call tracking, cyclomatic
+  complexity, duplicate-body hashing) plus a `repowise-graph` end-to-end
+  test proving relative imports resolve while `package:` imports stay
+  unresolved; 111 tests passing workspace-wide. Twelfth language merged
+  out of this session's `parity-loop` gap-analysis pass (after
+  TypeScript/JavaScript in #26, Java in #75, Kotlin in #77, Go in #79,
+  C++ in #81, C# in #83, Scala in #85, Ruby in #87, C in #89, Swift in
+  #91, and PHP in #93) — next up per the loop is Shell (#40).
+
 ## PR #93 — Add PHP language support
 **2026-07-23** · [#93](https://github.com/baileyrd/rusty_repo_wise/pull/93) · closes [#38](https://github.com/baileyrd/rusty_repo_wise/issues/38)
 

@@ -6,6 +6,25 @@ repo routing work through PRs).
 
 ---
 
+## PR #14 — Add auto-generated documentation layer: per-file wiki pages
+**2026-07-22** · [#14](https://github.com/baileyrd/rusty_repo_wise/pull/14) · closes [#7](https://github.com/baileyrd/rusty_repo_wise/issues/7)
+
+- **Added:** a new `repowise-docs` crate rendering one deterministic
+  markdown page per indexed file under `.repowise/wiki/`: symbol list,
+  resolved dependencies/dependents (`repowise-graph`), and health
+  findings (`repowise-health`). No LLM involved. Wired up as
+  `repowise docs [PATH]`.
+- **Known limitation, stated plainly:** freshness (new/changed/unchanged)
+  is tracked via a hash of each file's *own* source only — a page can
+  report "unchanged" while its rendered content actually differs, if
+  what changed was cross-file data (a new caller, a health finding from
+  another file). Pages are always rewritten with current data regardless
+  of the reported status, so content itself is never stale, only the
+  status label can undersell how much changed.
+- 2 new tests (a `render_page` unit test, a real-directory integration
+  test for the New/Changed/Unchanged transitions); 21 tests passing
+  workspace-wide.
+
 ## PR #12 — Add git-analytics layer: churn, hotspots, ownership, co-change coupling
 **2026-07-22** · [#12](https://github.com/baileyrd/rusty_repo_wise/pull/12) · closes [#6](https://github.com/baileyrd/rusty_repo_wise/issues/6)
 

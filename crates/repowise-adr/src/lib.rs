@@ -1,11 +1,13 @@
 //! Best-effort architectural-decision mining: extracts decisions from
-//! three sources — `docs/adr/*.md` files, commit messages, and merged PR
-//! bodies, each matching a decision-like keyword heuristic — links each
-//! to the indexed files/symbols its body mentions (or, for PRs, the
-//! files the GitHub API reports it actually touched), and tracks
-//! supersession via an ADR's `Status: ... Superseded by ADR-XXXX` line.
+//! four sources — `docs/adr/*.md` files, commit messages, merged PR
+//! bodies, and decision-like code comments — each matching a
+//! decision-like keyword heuristic — links each to the indexed
+//! files/symbols its body mentions (or, for PRs, the files the GitHub
+//! API reports it actually touched; or, for code comments, the file the
+//! comment sits in), and tracks supersession via an ADR's
+//! `Status: ... Superseded by ADR-XXXX` line.
 //!
-//! Only 3 of the original repowise's 8 decision sources are implemented
+//! Only 4 of the original repowise's 8 decision sources are implemented
 //! here — a focused subset, not a shallow stub of all 8 (see the README
 //! for which are deferred and why). The PR-body source is the one place
 //! this crate makes a network call at all, and only when a
@@ -14,6 +16,7 @@
 //! unauthenticated fallback.
 
 mod adr_files;
+mod code_comments;
 mod commits;
 mod linking;
 mod pull_requests;
@@ -28,6 +31,7 @@ pub enum DecisionSource {
     Adr { file: PathBuf },
     CommitMessage { hash: String, author: String },
     PullRequest { number: u64, author: String },
+    CodeComment { file: PathBuf, line: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -55,11 +59,12 @@ impl DecisionRecord {
 }
 
 /// Mine decisions from `docs/adr/*.md`, decision-like commit messages,
-/// and decision-like merged PR bodies under `index.root`, linking each
-/// to the files/symbols its body mentions. Missing `docs/adr/`, an
-/// unreadable git history, or an unavailable/unauthenticated GitHub API
-/// each degrade to an empty result for that source rather than failing
-/// the whole call — all three sources are independent.
+/// decision-like merged PR bodies, and decision-like code comments under
+/// `index.root`, linking each to the files/symbols its body mentions.
+/// Missing `docs/adr/`, an unreadable git history, or an
+/// unavailable/unauthenticated GitHub API each degrade to an empty
+/// result for that source rather than failing the whole call — all four
+/// sources are independent.
 pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
     let mut records = adr_files::mine_adr_files(&index.root)?;
 
@@ -71,12 +76,18 @@ pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
         .filter(|t| !t.is_empty());
     records.extend(mine_pull_requests(&index.root, token.as_deref()).unwrap_or_default());
 
+    records.extend(code_comments::mine_code_comment_decisions(index));
+
     for record in &mut records {
-        // PR decisions are already linked to their real, GitHub-reported
-        // file list (set above) — text-matching would only throw that
-        // away, so only the text-linked sources (ADR files, commit
-        // messages) get run through the linker here.
-        if matches!(record.source, DecisionSource::PullRequest { .. }) {
+        // PR and code-comment decisions are already linked to their
+        // real file (the PR's GitHub-reported file list, or the file
+        // the comment sits in, set above) — text-matching would only
+        // throw that away, so only the text-linked sources (ADR files,
+        // commit messages) get run through the linker here.
+        if matches!(
+            record.source,
+            DecisionSource::PullRequest { .. } | DecisionSource::CodeComment { .. }
+        ) {
             continue;
         }
         record.linked_files = linking::link_to_index(&record.body, index);

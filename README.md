@@ -101,7 +101,7 @@ tracking/discussion issue on extending language support. The health scorer cover
 Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
-mining (only 3 of the original's 8 decision sources are implemented —
+mining (only 4 of the original's 8 decision sources are implemented —
 see "Architectural decision mining" below). The MCP server covers 8 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
@@ -126,9 +126,9 @@ dashboard is one static page with no per-file drill-down or live search
   rendered from the index/graph/health data, with content-hash-based
   freshness tracking.
 - `repowise-adr` — architectural-decision mining from ADR files,
-  decision-like commit messages, and decision-like merged PR bodies (via
-  the GitHub API, opt-in behind a token env var), linked to the
-  files/symbols they mention.
+  decision-like commit messages, decision-like merged PR bodies (via the
+  GitHub API, opt-in behind a token env var), and decision-like code
+  comments, linked to the files/symbols they mention.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
   the index/graph/health/git-analytics/mined-decisions data, plus a
   deterministic per-commit change-risk score and confidence-tiered
@@ -251,7 +251,7 @@ these pages (`repowise generate`), and the dashboard's doc browser.
 
 ## Architectural decision mining
 
-`repowise decisions` mines three of the original's eight decision sources:
+`repowise decisions` mines four of the original's eight decision sources:
 
 - **`docs/adr/*.md` files**, parsed against this repo's own ADR template
   (`# ADR-XXXX: Title`, then `Status:`/`Date:` lines). An unfilled
@@ -275,6 +275,16 @@ these pages (`repowise generate`), and the dashboard's doc browser.
   history. Unlike the other two sources, a PR decision links to the
   files that PR actually touched (already reported by the GitHub API)
   rather than falling back to text-matching.
+- **Decision-like code comments** — the same keyword heuristic again,
+  applied to the comment/docstring block sitting *directly above* an
+  indexed symbol's declaration (`///`/`/** */` above a Rust/Java/
+  C-family declaration, `#`-prefixed lines above a Python/Ruby function).
+  Pure filesystem/parsing, no new dependency, unlike the PR-body source.
+  Deliberately scoped to that one convention — Python/JavaScript's
+  alternative of a docstring as the function body's first statement
+  isn't handled, a documented gap rather than a silent one. Linked to
+  the file the comment sits in, the same "authoritative, not
+  text-matched" treatment PR decisions get.
 
 Each ADR-file/commit-message decision is linked to the indexed files it
 mentions: either the file's own relative path appearing verbatim in the
@@ -286,9 +296,9 @@ linked. Supersession is read directly from an ADR's `Status: Superseded
 by ADR-XXXX` line — no new front-matter convention was needed since the
 existing template already has one.
 
-Not implemented from the original's eight sources: code comments, inline
-decision markers (`# WHY:`, `# DECISION:`, etc.), CHANGELOG mining,
-Slack, and issue trackers — this repo doesn't have integrations for the
+Not implemented from the original's eight sources: inline decision
+markers (`# WHY:`, `# DECISION:`, etc.), CHANGELOG mining, Slack, and
+issue trackers — this repo doesn't have integrations for the
 latter two anyway. Recency/confidence scoring on mined decisions is also
 not implemented.
 
@@ -340,9 +350,9 @@ a prior `repowise init`/`update`. Eight tools are implemented:
   so edits since the last `init`/`update` are reflected, at the cost of
   the returned span possibly being off if line numbers have since shifted.
 - **`get_why(targets?)`** — architectural decisions mined from
-  `docs/adr/*.md`, decision-like commit messages, and decision-like
-  merged PR bodies (via `repowise-adr`), the same data as `repowise
-  decisions --for-file`. `targets` is a list
+  `docs/adr/*.md`, decision-like commit messages, decision-like merged PR
+  bodies, and decision-like code comments (via `repowise-adr`), the same
+  data as `repowise decisions --for-file`. `targets` is a list
   of file paths or symbol ids (mixing both is fine — a symbol id resolves
   to its own file); a decision is returned if its body links to at least
   one target's file. Omit `targets` (or pass an empty list) to get every

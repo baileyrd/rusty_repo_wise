@@ -86,6 +86,14 @@ doesn't need the call graph at all — see `repowise-health::lcom4`), and
 `repowise-docs` renders one markdown page per file from the index/graph/
 health data, tracking freshness via a hash of each file's own source
 re-read from disk (not the index) at generation time.
+`repowise-health::near_duplicate` is the one marker in that crate that
+isn't a pure function of already-computed data: `Symbol` doesn't carry
+raw body text, so its Rabin-Karp near-duplicate scan re-reads each
+candidate symbol's file fresh from disk at `health`-time — the same
+"re-read from disk when real text is needed" tradeoff `get_symbol`/
+`repowise-docs`/the ADR code-comment and inline-marker sources already
+make, rather than growing `Symbol`/`FileRecord` with a text/hash-list
+field just for this one marker.
 `hotspots`/`ownership`/`coupled` are a separate path: they load the same
 `RepoIndex` for complexity data, but get their git-history data by shelling
 out to `git log`/`git blame` fresh on every invocation rather than reading

@@ -931,6 +931,7 @@ version = "0.1.0"
 dependencies = [
  "repowise-core",
  "repowise-graph",
+ "tempfile",
 ]
 
 [[package]]

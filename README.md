@@ -62,15 +62,17 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from seven
+- Score every file's health deterministically (0–10, no LLM/ML) from eight
   rule-based markers: long functions, high cyclomatic complexity, oversized
-  parameter lists, god classes, duplicate code, possibly-dead code
-  (zero resolved callers), and low cohesion (LCOM4 — Rust/Python/TS+JS
-  only, see "Health scoring" below) — except for shell scripts, which are
-  deliberately exempt from the dead-code marker: a shell function is
-  routinely invoked only from the command line, another script, or a
-  cron job, none of which this port's call graph can see, making the
-  signal too unreliable to report for that language.
+  parameter lists, god classes, duplicate code, near-duplicate code
+  (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
+  text), possibly-dead code (zero resolved callers), and low cohesion
+  (LCOM4 — Rust/Python/TS+JS only, see "Health scoring" below) — except
+  for shell scripts, which are deliberately exempt from the dead-code
+  marker: a shell function is routinely invoked only from the command
+  line, another script, or a cron job, none of which this port's call
+  graph can see, making the signal too unreliable to report for that
+  language.
 - Derive git-history analytics — churn, hotspot score (churn × complexity),
   bug-fix commit frequency, co-change coupling, and per-author line
   ownership — by shelling out to `git log`/`git blame`, joined against the
@@ -97,10 +99,9 @@ specifics per layer), not full feature parity:
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
 Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
 other languages aren't implemented — see issue #11 for the
-tracking/discussion issue on extending language support. The health scorer covers 7 of repowise's ~25 markers — see
-"Health scoring" below for which ones and why the rest (Rabin-Karp
-substring clone detection, the ML-calibrated organizational-signal
-markers) are deferred. LLM-written prose on
+tracking/discussion issue on extending language support. The health scorer covers 8 of repowise's ~25 markers — see
+"Health scoring" below for which ones and why the rest (the
+ML-calibrated organizational-signal markers) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
 mining (only 6 of the original's 8 decision sources are implemented —
@@ -122,7 +123,8 @@ dashboard is one static page with no per-file drill-down or live search
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
   the parsed metrics and the call graph, including LCOM4 low-cohesion
-  detection over per-class field-access data.
+  detection over per-class field-access data and Rabin-Karp near-duplicate
+  detection over source text re-read from disk.
 - `repowise-git` — git-history analytics (churn, hotspots, bug-fix
   frequency, co-change coupling, ownership), computed fresh from `git
   log`/`git blame` each time it's queried rather than cached in the index.
@@ -176,6 +178,7 @@ to `[0, 10]`:
 | Too many parameters | > 6 | −0.3 |
 | God class | > 15 methods | −1.5 |
 | Duplicate code | body hash matches another symbol's | −0.5 |
+| Near-duplicate code (`dry_violation`) | >= 50% tokenized-window overlap with another symbol | −0.3 |
 | Possibly dead code | 0 resolved callers | −0.2 |
 | Low cohesion (LCOM4) | >= 2 disjoint field-access groups | −1.0 |
 
@@ -210,9 +213,30 @@ own singleton component — otherwise nearly any real-world class would
 trip this marker. Extending field-access tracking to the remaining
 languages is a natural follow-up, not done here.
 
-Deferred markers from the original repowise (not implemented): Rabin-Karp
-substring clone detection (this port only detects whole-body duplicates
-via exact hash match, not partial/near-duplicate code); the
+**Near-duplicate code (`dry_violation`)** catches *partial* duplicates
+the exact-hash `Duplicate code` marker misses entirely — a function
+that's mostly identical to another with a few renamed variables or a
+tweaked constant, where even one differing character breaks a hash
+match. Rather than growing `Symbol`/`FileRecord` with raw body text just
+for this, it re-reads each candidate symbol's source fresh from disk
+(the same tradeoff `get_symbol` and the ADR code-comment/inline-marker
+sources already make elsewhere in this port) and tokenizes it
+(identifier/number runs plus single-character punctuation), then splits
+each symbol's token sequence into overlapping 3-token windows, hashed
+with an incremental Rabin-Karp rolling hash. Windowing over *tokens*
+rather than raw characters matters because a renamed identifier changes
+length — `total` -> `sum` shifts every subsequent character position,
+which would misalign every raw-character window from that point on even
+though the code is otherwise identical; a token-level window only loses
+the windows actually touching the renamed token. Two symbols become a
+candidate pair the moment they share one window hash (avoiding
+brute-force all-pairs comparison), then are flagged once their shared
+window count reaches 50% of the smaller symbol's total — pairs already
+caught by the exact-hash `Duplicate code` marker (identical `body_hash`)
+are explicitly excluded so a pair is never reported under both finding
+kinds at once.
+
+Deferred markers from the original repowise (not implemented): the
 ML-calibrated organizational-signal markers (`churn_risk`,
 `co_change_scatter`, etc. — see issue #62, a design-level "needs-human"
 question, not a mechanical gap). Hotspots and bug-fix history are now

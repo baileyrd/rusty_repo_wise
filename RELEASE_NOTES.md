@@ -6,6 +6,50 @@ repo routing work through PRs).
 
 ---
 
+## PR #111 — Add code-comment decision source to repowise-adr
+**2026-07-23** · [#111](https://github.com/baileyrd/rusty_repo_wise/pull/111) · closes [#47](https://github.com/baileyrd/rusty_repo_wise/issues/47)
+
+- **Added:** a fourth architectural-decision source — decision-like
+  comments/docstrings sitting directly above an indexed symbol's
+  declaration. A new `DecisionSource::CodeComment { file, line }`
+  variant, and a new `repowise-adr::code_comments` module applying the
+  same decision-keyword heuristic `commits.rs`/`pull_requests.rs`
+  already use to whatever comment block sits immediately above each
+  symbol's `start_line`. Pure filesystem/parsing — no new dependency,
+  unlike the PR-body source before it.
+- **`comment_block_above` handles two comment shapes**: a contiguous run
+  of `//`- or `#`-prefixed lines, or a `/* ... */` block, walked upward
+  from its closing `*/` to the matching opening `/*` so a multi-line
+  JavaDoc/rustdoc-style comment is captured whole rather than just its
+  last line.
+- **Deliberately scoped to "immediately above, no blank-line gap"** — the
+  common doc-comment convention across most languages this port parses.
+  Python/JavaScript's alternative convention (a docstring as the
+  function body's first statement) isn't handled; a documented gap, not
+  a silent one, called out in the module doc comment and README.
+- **Linked to the file the comment sits in directly** — the same
+  "authoritative, not text-matched" treatment PR decisions already get
+  in `mine()`'s linking pass, for the same reason: text-matching could
+  only ever throw away information this source already knows for
+  certain.
+- **Groundwork left for issue #48** (inline decision markers — `# WHY:`,
+  `# DECISION:`, etc.): `comment_block_above` is written as its own
+  reusable unit specifically so that source can reuse the
+  "find-the-comment-block-above-a-symbol" half of the work and add only
+  its own marker-tag matching on top, rather than duplicating comment
+  discovery. Issue #48 hadn't landed yet when this PR was written, so
+  there was nothing to deduplicate against yet — checked per issue #47's
+  own note about overlapping logic.
+- `DecisionSource` gaining a variant is a breaking change for any
+  exhaustive match over it, same as the PR-body PR before this one —
+  updated `repowise-cli::cmd_decisions` and `repowise-mcp::get_why`
+  accordingly, verified via a full workspace build.
+- 4 new tests (a decision-like line comment, a decision-like block
+  comment, a non-decision comment correctly ignored, a comment separated
+  from its symbol by a blank line correctly not mined), 168 tests
+  passing workspace-wide (up from 164). Next up per the loop is issue
+  #48, inline decision markers.
+
 ## PR #109 — Add PR-body decision source to repowise-adr
 **2026-07-23** · [#109](https://github.com/baileyrd/rusty_repo_wise/pull/109) · closes [#46](https://github.com/baileyrd/rusty_repo_wise/issues/46)
 

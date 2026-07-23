@@ -81,9 +81,10 @@ specifics per layer), not full feature parity:
   commit messages, link each to the files/symbols it mentions, and track
   supersession via an ADR's `Status: Superseded by ADR-XXXX` line.
 - Expose `get_overview`/`search_codebase`/`get_context`/`get_risk`/
-  `get_change_risk` as MCP tools over stdio (the official `rmcp` SDK), so
-  an agent can pull complete context (including git-history risk data and
-  a deterministic per-commit risk score) for a file or a change in one
+  `get_change_risk`/`get_symbol` as MCP tools over stdio (the official
+  `rmcp` SDK), so an agent can pull complete context (including
+  git-history risk data, a deterministic per-commit risk score, and a
+  symbol's raw source) for a file, a change, or a single symbol in one
   round-trip instead of piecing it together itself.
 - Generate a static-site dashboard (one self-contained HTML page, no
   server, no JS build step) covering overview stats, code health,
@@ -99,7 +100,7 @@ Rabin-Karp substring clone detection) are deferred. LLM-written prose on
 top of the wiki (`repowise generate` in the original) is also deferred —
 this port's `docs` layer is deliberately deterministic-only, as is ADR
 mining (only 2 of the original's 8 decision sources are implemented —
-see "Architectural decision mining" below). The MCP server covers 5 of
+see "Architectural decision mining" below). The MCP server covers 6 of
 the original's ~10 tools — see "MCP server" below for which and why. The
 dashboard is one static page with no per-file drill-down or live search
 — see "Dashboard" below for what a richer version would need.
@@ -148,7 +149,7 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 ```
 
@@ -275,7 +276,7 @@ also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Five tools are implemented:
+a prior `repowise init`/`update`. Six tools are implemented:
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
@@ -308,6 +309,16 @@ a prior `repowise init`/`update`. Five tools are implemented:
   a deliberately simple heuristic approximation, not a calibrated
   probability. Errors (rather than degrading to zero) when the indexed
   root isn't a git repository, since there's no diff to compute at all.
+- **`get_symbol(symbol_id, context_lines?)`** — a symbol's raw source
+  text, sliced from its own file at the `start_line..end_line` span
+  `search_codebase`/`get_context` report (both now include each symbol's
+  `id`). `context_lines` (default 0) pads that span by the same number of
+  lines on each side, clamped to the file's actual bounds rather than
+  erroring on an out-of-range request. Re-reads the file fresh from disk
+  each call, the same "don't trust the index for content, only for line
+  numbers" tradeoff `repowise-docs`'s freshness tracking already makes —
+  so edits since the last `init`/`update` are reflected, at the cost of
+  the returned span possibly being off if line numbers have since shifted.
 
 Every call re-loads `.repowise/index.json` and rebuilds the dependency
 graph fresh — no caching across calls, consistent with how `hotspots`/

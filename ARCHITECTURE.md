@@ -89,7 +89,11 @@ builds a `RepoGraph`, and (for `get_context`/`get_risk`) runs
 across calls, no caching. `get_change_risk` is the one tool that bypasses
 this path entirely: it never loads the index or graph, calling straight
 into `repowise-git`'s diff-shape analysis (`git diff`/`git show`/
-`git rev-list`) against the indexed root.
+`git rev-list`) against the indexed root. `get_symbol` loads `RepoIndex`
+(to look up the requested symbol's file and line span) but re-reads that
+file's source fresh from disk to slice out the snippet — the same
+"don't trust the index's own copy of file content, only its line
+metadata" tradeoff `repowise-docs`'s freshness tracking already makes.
 `dashboard` composes all of the above into one static page: `repowise-dashboard`
 calls the same `overview`/`analyze` functions, tries `repowise-git::GitAnalytics::collect`
 and `repowise-adr::mine` (both degrading to `None`/empty on failure rather

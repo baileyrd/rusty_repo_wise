@@ -2,14 +2,13 @@
 //! dependency graph, and health scoring as agent-facing tools over
 //! stdio, using the official `rmcp` SDK.
 //!
-//! Implements 3 of the original repowise's ~10 MCP tools —
-//! `get_overview`, `search_codebase`, `get_context` — the ones whose
-//! backing data (the index, the resolved dependency graph, health
-//! findings) already exists in this port. Tools like `get_risk`/
-//! `get_change_risk` that the original scopes to this layer are left for
-//! a follow-up: they'd read naturally on `repowise-git`'s hotspot data,
-//! but wiring that in is a deliberate, separate addition rather than
-//! bundled into this first pass.
+//! Implements 4 of the original repowise's ~10 MCP tools —
+//! `get_overview`, `search_codebase`, `get_context`, `get_risk` — the
+//! ones whose backing data (the index, the resolved dependency graph,
+//! health findings, `repowise-git`'s hotspot/churn/bug-fix data) already
+//! exists in this port. `get_change_risk` is a separate, deliberately
+//! deferred addition (see issue #42): the original feeds diff-shape
+//! metrics into a pre-trained ML model this port has no equivalent for.
 //!
 //! Every tool call re-loads `.repowise/index.json` and rebuilds the
 //! dependency graph fresh — no in-memory caching across calls. Simple
@@ -76,6 +75,32 @@ struct ContextParams {
     file: String,
 }
 
+fn default_top_n() -> usize {
+    10
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RiskParams {
+    /// Path to a specific file to assess, absolute or relative to the
+    /// indexed root. If omitted, returns the riskiest files repo-wide
+    /// instead (ranked by hotspot score).
+    #[serde(default)]
+    file: Option<String>,
+    /// How many files to return when `file` is omitted. Ignored when
+    /// `file` is set (exactly one result either way).
+    #[serde(default = "default_top_n")]
+    top_n: usize,
+}
+
+impl Default for RiskParams {
+    fn default() -> Self {
+        RiskParams {
+            file: None,
+            top_n: default_top_n(),
+        }
+    }
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 struct LanguageCount {
     language: String,
@@ -137,6 +162,30 @@ struct ContextOutput {
     dependents: Vec<String>,
     health_score: f64,
     health_findings: Vec<HealthFindingOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct FileRisk {
+    file: String,
+    /// churn × total cyclomatic complexity of the file's symbols (see
+    /// `repowise_git::Hotspot`) — 0 for a file with no git history
+    /// (unborn repo, uncommitted file, or `repowise-git` unavailable).
+    hotspot_score: usize,
+    /// Raw commit count touching this file. 0 under the same conditions
+    /// as `hotspot_score`.
+    churn: usize,
+    /// Commits touching this file whose message matched a bug-fix
+    /// keyword (see `repowise-git`). 0 under the same conditions.
+    bugfix_commits: usize,
+    health_score: f64,
+    health_findings: Vec<HealthFindingOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct RiskOutput {
+    /// One entry when `file` was given in the request; up to `top_n`
+    /// entries (highest hotspot score first) when it was omitted.
+    files: Vec<FileRisk>,
 }
 
 fn display_rel(path: &Path, root: &Path) -> String {
@@ -286,6 +335,93 @@ impl RepowiseServer {
             health_findings,
         }))
     }
+
+    #[tool(
+        name = "get_risk",
+        description = "Risk assessment from git-history analytics and health findings, essentially `get_context` plus hotspot data. Given `file`, returns that file's hotspot score, churn, bug-fix-commit count, and health findings. Given no `file`, returns the `top_n` riskiest files repo-wide, ranked by (recency-weighted) hotspot score. Git data degrades to zero/empty when the indexed root isn't a git repository, rather than erroring."
+    )]
+    fn get_risk(
+        &self,
+        Parameters(RiskParams { file, top_n }): Parameters<RiskParams>,
+    ) -> Result<Json<RiskOutput>, ErrorData> {
+        let (index, graph) = self.load()?;
+        let health = repowise_health::analyze(&index, &graph);
+        // Not every indexed root is a git repository (or has git
+        // available at all) — degrade to "no git data" rather than
+        // failing the whole call, same tradeoff `repowise-dashboard`
+        // already makes for its hotspots section.
+        let analytics = repowise_git::GitAnalytics::collect(&self.root).ok();
+
+        if let Some(file) = file {
+            let target = self.resolve_file(&file);
+            if !index.files.iter().any(|f| f.path == target) {
+                return Err(ErrorData::resource_not_found(
+                    format!(
+                        "{file} is not an indexed file under {}",
+                        index.root.display()
+                    ),
+                    None,
+                ));
+            }
+            let risk = file_risk(&target, &index, analytics.as_ref(), &health);
+            return Ok(Json(RiskOutput { files: vec![risk] }));
+        }
+
+        let files = analytics
+            .as_ref()
+            .map(|a| repowise_git::hotspots(&index, a))
+            .unwrap_or_default()
+            .into_iter()
+            .take(top_n)
+            .map(|h| file_risk(&h.file, &index, analytics.as_ref(), &health))
+            .collect();
+        Ok(Json(RiskOutput { files }))
+    }
+}
+
+/// One file's risk profile: hotspot/churn/bug-fix data from `analytics`
+/// (`None` when git data isn't available, reading as all-zero rather
+/// than erroring) plus its health score/findings.
+fn file_risk(
+    file: &Path,
+    index: &RepoIndex,
+    analytics: Option<&repowise_git::GitAnalytics>,
+    health: &repowise_health::HealthReport,
+) -> FileRisk {
+    let total_complexity: usize = index
+        .files
+        .iter()
+        .find(|f| f.path == file)
+        .map(|f| f.symbols.iter().map(|s| s.complexity).sum())
+        .unwrap_or(0);
+    let churn = analytics.map(|a| a.churn_of(file)).unwrap_or(0);
+    let bugfix_commits = analytics.map(|a| a.bugfix_commits_of(file)).unwrap_or(0);
+    let health_score = health
+        .file_scores
+        .iter()
+        .find(|f| f.file == file)
+        .map(|f| f.score)
+        .unwrap_or(10.0);
+    let health_findings = health
+        .findings
+        .iter()
+        .filter(|f| f.file == file)
+        .map(|f| HealthFindingOutput {
+            kind: f.kind.label().to_string(),
+            symbol: f.symbol.clone(),
+            line: f.line,
+            detail: f.detail.clone(),
+        })
+        .collect();
+
+    FileRisk {
+        file: display_rel(file, &index.root),
+        hotspot_score: churn * total_complexity,
+        churn,
+        bugfix_commits,
+        health_score,
+        health_findings,
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +547,136 @@ mod tests {
         let server = RepowiseServer { root };
         let result = server.get_context(Parameters(ContextParams {
             file: "missing.rs".to_string(),
+        }));
+        let Err(err) = result else {
+            panic!("expected an error for an unindexed file");
+        };
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    /// Runs `git`, clearing the sandbox's own commit-identity env vars so
+    /// they can't leak into these disposable test repos and override the
+    /// local `user.name`/`user.email` set by `git_init`.
+    fn git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_init(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.name", "Default Author"]);
+        git(dir, &["config", "user.email", "default@example.com"]);
+    }
+
+    #[test]
+    fn get_risk_for_a_specific_file_reports_hotspot_and_health_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+
+        std::fs::write(root.join("lib.rs"), "fn caller() { 1; }\n").unwrap();
+        git(&root, &["add", "lib.rs"]);
+        git(&root, &["commit", "-q", "-m", "Add lib"]);
+        std::fs::write(
+            root.join("lib.rs"),
+            "fn caller() { 1; }\nfn caller2() { 2; }\n",
+        )
+        .unwrap();
+        git(&root, &["commit", "-q", "-am", "Fix a bug in lib"]);
+
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(risk) = server
+            .get_risk(Parameters(RiskParams {
+                file: Some("lib.rs".to_string()),
+                top_n: 10,
+            }))
+            .unwrap();
+
+        assert_eq!(risk.files.len(), 1);
+        let file_risk = &risk.files[0];
+        assert_eq!(file_risk.file, "lib.rs");
+        assert_eq!(file_risk.churn, 2);
+        assert_eq!(file_risk.bugfix_commits, 1);
+        // hotspot_score = churn * total_complexity, and both functions
+        // contribute complexity 1 each (no branches) -> 2 * 2 = 4.
+        assert_eq!(file_risk.hotspot_score, 4);
+        // Both functions are uncalled -> 2 possibly-dead-code findings.
+        assert_eq!(file_risk.health_findings.len(), 2);
+    }
+
+    #[test]
+    fn get_risk_without_a_file_returns_top_hotspots_repo_wide() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+
+        std::fs::write(root.join("hot.rs"), "fn a() { 1; }\n").unwrap();
+        std::fs::write(root.join("cold.rs"), "fn b() { 1; }\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "Add files"]);
+        std::fs::write(root.join("hot.rs"), "fn a() { 1; }\nfn a2() { 2; }\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "Touch hot.rs again"]);
+
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(risk) = server
+            .get_risk(Parameters(RiskParams {
+                file: None,
+                top_n: 1,
+            }))
+            .unwrap();
+
+        assert_eq!(risk.files.len(), 1);
+        assert_eq!(risk.files[0].file, "hot.rs");
+        assert_eq!(risk.files[0].churn, 2);
+    }
+
+    #[test]
+    fn get_risk_degrades_gracefully_when_not_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root: root.clone() };
+        let Json(risk) = server
+            .get_risk(Parameters(RiskParams {
+                file: Some("lib.rs".to_string()),
+                top_n: 10,
+            }))
+            .unwrap();
+
+        assert_eq!(risk.files.len(), 1);
+        assert_eq!(risk.files[0].churn, 0);
+        assert_eq!(risk.files[0].hotspot_score, 0);
+    }
+
+    #[test]
+    fn get_risk_errors_on_unindexed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer { root };
+        let result = server.get_risk(Parameters(RiskParams {
+            file: Some("missing.rs".to_string()),
+            top_n: 10,
         }));
         let Err(err) = result else {
             panic!("expected an error for an unindexed file");

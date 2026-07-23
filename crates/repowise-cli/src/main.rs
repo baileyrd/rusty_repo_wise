@@ -433,6 +433,12 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             repowise_adr::DecisionSource::CodeComment { file, line } => {
                 format!("comment ({}:{line})", display_path(file, &index.root))
             }
+            repowise_adr::DecisionSource::InlineMarker { file, line, marker } => {
+                format!(
+                    "{marker} marker ({}:{line})",
+                    display_path(file, &index.root)
+                )
+            }
         };
         let status = d.status.as_deref().unwrap_or("-");
         println!("  {:<10} {:<10} {}", d.id, status, d.title);

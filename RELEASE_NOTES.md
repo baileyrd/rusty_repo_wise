@@ -6,6 +6,27 @@ repo routing work through PRs).
 
 ---
 
+## PR #20 — Add static-site dashboard
+**2026-07-23** · [#20](https://github.com/baileyrd/rusty_repo_wise/pull/20) · closes [#10](https://github.com/baileyrd/rusty_repo_wise/issues/10)
+
+- **Added:** a new `repowise-dashboard` crate rendering a single
+  self-contained HTML page — overview, code health, hotspots, and
+  architectural decisions — from data the other layers already compute.
+  No server, no JS build step, no templating engine; regenerate with
+  `repowise dashboard [PATH]` and open `.repowise/dashboard/index.html`
+  in a browser. All user-controlled text (language labels, file paths,
+  decision titles) is HTML-escaped.
+- **Known limitation, stated plainly:** static only — no live search,
+  no per-file drill-down, no auto-refresh; re-run the command after the
+  repo changes. Git-history and ADR/decision data degrade gracefully to
+  explicit "not available" placeholders when a root has no git history
+  or no ADRs, rather than failing the whole generation.
+- 4 new tests (escaping, relative-path rendering with placeholders,
+  hotspots/decisions rendering, an end-to-end real-index integration
+  test); 36 tests passing workspace-wide. With this, all five of
+  repowise's original "intelligence layers," its MCP server, and a
+  dashboard have at least partial implementations in this port.
+
 ## PR #18 — Add MCP server: get_overview, search_codebase, get_context
 **2026-07-22** · [#18](https://github.com/baileyrd/rusty_repo_wise/pull/18) · closes [#9](https://github.com/baileyrd/rusty_repo_wise/issues/9)
 

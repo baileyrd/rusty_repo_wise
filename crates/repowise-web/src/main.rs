@@ -1,11 +1,16 @@
 //! Issue #65 (live-server-dependent dashboard features) also tracks a
-//! live job banner: a "Reindex" button (`JobBanner`) that triggers the
-//! server's `POST /api/reindex` and polls `GET /api/reindex` (via
-//! `gloo-timers`) until the background job leaves `Running`, picking up
-//! an already-in-flight job on page load too. Cost tracking and
-//! Settings, #65's other two remaining bundled features, are not done
-//! here; each needs its own design pass (persistence for cost history, a
-//! write-capable settings API).
+//! read-only Settings view (`SettingsSection`, over `GET
+//! /api/settings`): repo root, indexed file counts, and whether git
+//! history/wiki pages/an LLM are available. No edit form -- this port
+//! has no persisted config to write to yet, so it's a status view, not
+//! a settings *editor*. Cost tracking, #65's one remaining bundled
+//! feature, is not done here; it needs its own design pass
+//! (persistence for cost history).
+//!
+//! It also tracks a live job banner: a "Reindex" button (`JobBanner`)
+//! that triggers the server's `POST /api/reindex` and polls `GET
+//! /api/reindex` (via `gloo-timers`) until the background job leaves
+//! `Running`, picking up an already-in-flight job on page load too.
 //!
 //! It also tracks Present Mode: a full-screen, keyboard-driven step-
 //! through of Overview/Health/Hotspots/Decisions/Graph, with the current
@@ -180,6 +185,18 @@ struct ChatRequest {
 struct ChatResponse {
     available: bool,
     reply: Option<String>,
+}
+
+/// Mirrors `repowise-server`'s `SettingsDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct Settings {
+    root: String,
+    file_count: usize,
+    other_file_count: usize,
+    git_available: bool,
+    wiki_pages_available: bool,
+    llm_configured: bool,
+    llm_model: Option<String>,
 }
 
 /// Mirrors `repowise-server`'s `ReindexStatusDto` wire shape.
@@ -1143,6 +1160,59 @@ fn JobBanner() -> impl IntoView {
     }
 }
 
+/// A read-only Settings view over `/api/settings`: repo root, indexed
+/// file counts, and whether git history / wiki pages / an LLM are
+/// available -- this port has no persisted config to write to yet, so
+/// there's no edit form here, just the server's current status.
+#[component]
+fn SettingsSection() -> impl IntoView {
+    let settings = LocalResource::new(|| fetch_json::<Settings>("/api/settings"));
+
+    view! {
+        <h2>"Settings"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                settings
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(s) => view! {
+                            <ul>
+                                <li>{format!("Root: {}", s.root)}</li>
+                                <li>
+                                    {format!(
+                                        "{} indexed file(s), {} other file(s)",
+                                        s.file_count, s.other_file_count,
+                                    )}
+                                </li>
+                                <li>
+                                    {format!(
+                                        "Git history: {}",
+                                        if s.git_available { "available" } else { "not available" },
+                                    )}
+                                </li>
+                                <li>
+                                    {format!(
+                                        "Wiki pages: {}",
+                                        if s.wiki_pages_available { "available" } else { "not generated" },
+                                    )}
+                                </li>
+                                <li>
+                                    {match (s.llm_configured, s.llm_model) {
+                                        (true, Some(model)) => format!("LLM: configured ({model})"),
+                                        (true, None) => "LLM: configured".to_string(),
+                                        (false, _) => "LLM: not configured".to_string(),
+                                    }}
+                                </li>
+                            </ul>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// A chat interface over `/api/chat`. Renders a plain explanatory
 /// message instead of a chat box when the server reports the LLM
 /// feature isn't configured, rather than a confusing empty/broken UI.
@@ -1408,6 +1478,7 @@ fn App() -> impl IntoView {
         <GraphSection selected=selected />
         <DeadCodeSection selected=selected />
         <ChatSection />
+        <SettingsSection />
     }
 }
 

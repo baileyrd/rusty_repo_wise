@@ -718,6 +718,12 @@ FastAPI-backend architecture, minus the Node.js dependency.
   — `{"status": "idle" | "running"}` or `{"status": "completed",
   "file_count", "other_file_count", "duration_ms"}` or `{"status":
   "failed", "error"}`. A bad root surfaces as `failed`, never a 500.
+  `GET /api/settings` (issue #65's Settings view, read-only) returns
+  `{"root", "file_count", "other_file_count", "git_available",
+  "wiki_pages_available", "llm_configured", "llm_model"}` — a status
+  snapshot, not a config editor: this port has no persisted repo-level
+  exclusion/generation config or global server/webhook/MCP config to
+  write to yet, so there's no write endpoint here.
 - **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
   renders every section the static dashboard has — overview, code
   health, hotspots, architectural decisions, and a symbols table with a
@@ -750,7 +756,11 @@ FastAPI-backend architecture, minus the Node.js dependency.
   to `/api/reindex` and polls it (via `gloo-timers`, every 500ms) until
   the background job finishes, showing "Reindexing...", a completion
   summary, or the error message on failure; it also polls once on page
-  load so a job already running from a previous visit still shows up.
+  load so a job already running from a previous visit still shows up. A
+  **Settings section** (bottom of the page) is a read-only status view
+  over `/api/settings`: repo root, indexed file counts, and whether git
+  history, wiki pages, and an LLM are available — no edit form, since
+  this port has no persisted config to write to yet.
   It's deliberately **not** a member of the root Cargo workspace (its
   own `Cargo.toml` has an empty `[workspace]` table): it only ever
   targets `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev),
@@ -785,10 +795,9 @@ search, not real embeddings-based RAG (issue #63), and this still isn't
 a byte-for-byte reproduction of real repowise's dashboard (e.g. no
 D3-identical graph rendering) — it's parity in what the dashboard
 *does*, built a different way. Issue #65 (which also tracks Present
-Mode and the live job banner) stays open for its two other bundled,
-still-undone features: cost tracking and Settings — each needs its own
-design pass (persistence for cost history, a write-capable settings
-API).
+Mode, the live job banner, and a read-only Settings view) stays open
+for its one remaining bundled, still-undone feature: cost tracking —
+it needs its own design pass (persistence for cost history).
 
 ## Testing
 

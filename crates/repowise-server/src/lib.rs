@@ -29,8 +29,14 @@
 //! shared with `repowise-cli`'s own `init`/`update` commands so there's
 //! exactly one indexing implementation) unless one's already running;
 //! `GET` reports the current job status (idle/running/completed/
-//! failed) for the dashboard to poll. Cost tracking and Settings, #65's
-//! other two remaining bundled features, are not done here.
+//! failed) for the dashboard to poll. `GET /api/settings` is a
+//! read-only Settings view: repo root, indexed file counts, whether
+//! git history/wiki pages are available, and whether an LLM is
+//! configured (and which model) -- this port has no persisted
+//! repo-level exclusion/generation config or global server/webhook/MCP
+//! config to expose a write endpoint for, so surfacing what the server
+//! already knows about itself is this slice's honest scope. Cost
+//! tracking, #65's one remaining bundled feature, is not done here.
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
@@ -368,6 +374,22 @@ struct ChatResponseDto {
     /// `reply` is `None` in that case.
     available: bool,
     reply: Option<String>,
+}
+
+/// A read-only snapshot of this server's current configuration and
+/// indexed-repo status -- the Settings view. No write endpoint exists:
+/// this port has no persisted repo-level exclusion/generation config or
+/// global server/webhook/MCP config to write to yet, so surfacing what
+/// the server already knows about itself is this slice's honest scope.
+#[derive(Serialize)]
+struct SettingsDto {
+    root: String,
+    file_count: usize,
+    other_file_count: usize,
+    git_available: bool,
+    wiki_pages_available: bool,
+    llm_configured: bool,
+    llm_model: Option<String>,
 }
 
 /// How many keyword-matched files/symbols to inject as grounding
@@ -810,6 +832,23 @@ async fn post_chat(
     }))
 }
 
+async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
+    let wiki_pages_available = !wiki_indexed_files(&state.root, &index).is_empty();
+    let llm_config = state.llm_config.as_ref().clone();
+
+    Ok(Json(SettingsDto {
+        root: state.root.display().to_string(),
+        file_count: index.files.len(),
+        other_file_count: index.other_files,
+        git_available,
+        wiki_pages_available,
+        llm_configured: llm_config.is_some(),
+        llm_model: llm_config.map(|c| c.model),
+    }))
+}
+
 /// Kick off a background reindex (`repowise_parser::build_index`, the
 /// same implementation `repowise-cli`'s `init`/`update` commands use) if
 /// one isn't already running, and return the job's current status.
@@ -876,6 +915,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/chat", post(post_chat))
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
+        .route("/api/settings", get(get_settings))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -1398,6 +1438,44 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["available"], false);
+    }
+
+    #[tokio::test]
+    async fn get_settings_reports_root_counts_and_no_llm_or_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root.clone(), "/api/settings").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["root"], root.display().to_string());
+        assert_eq!(json["file_count"], 1);
+        assert_eq!(json["git_available"], false);
+        assert_eq!(json["wiki_pages_available"], false);
+        assert_eq!(json["llm_configured"], false);
+        assert_eq!(json["llm_model"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn get_settings_reports_git_and_llm_availability_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        git_commit_all(&root, "add busy.rs");
+
+        let config = repowise_llm::LlmConfig {
+            base_url: "http://127.0.0.1:0".to_string(),
+            model: "smart".to_string(),
+            api_key: None,
+        };
+        let router = app_with_llm_config(root, Some(config));
+        let (status, json) = get_on(router, "/api/settings").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["git_available"], true);
+        assert_eq!(json["llm_configured"], true);
+        assert_eq!(json["llm_model"], "smart");
     }
 
     #[tokio::test]

@@ -6,6 +6,48 @@ repo routing work through PRs).
 
 ---
 
+## PR #173 — Add contracts view (producer/consumer API matching)
+**2026-07-24** · [#173](https://github.com/baileyrd/rusty_repo_wise/pull/173) · closes [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
+
+- **Added:** the fifth and final slice of issue #64. Producer/consumer
+  API contract matching — fully independent of the other four #64
+  slices, with no cross-repo symbol resolution involved at all. A
+  regex-based scan of each indexed file's raw text for a small, fixed
+  table of HTTP route-registration patterns (axum `.route("/path",
+  get(...))`, Flask/FastAPI `@app.get("/path")`, Express
+  `app.get("/path", ...)`) and HTTP-call patterns (JS
+  `fetch`/`axios.get`, Python `requests.get`, Rust `ureq::get`),
+  matching each consumer call against producer routes registered in
+  *other* repos (segment-wise, treating a producer path segment like
+  `:id`/`{id}` as a wildcard).
+- New `repowise-workspace::contracts` module
+  (`workspace_contracts`/`ProducerRoute`/`ConsumerCall`/
+  `ContractMatch`/`ContractsReport`), a new `GET
+  /api/workspace-contracts` endpoint, a new **Contracts** dashboard
+  section (matched pairs + unmatched consumer calls as two separate
+  lists), and a new `repowise workspace-contracts --workspace <path>`
+  CLI subcommand.
+- Uses `regex = "1"`, already fully resolved in `Cargo.lock` via
+  `tree-sitter` (a `repowise-parser` dependency) — no new crate version
+  added to the dependency tree.
+- **Coarse and heuristic by design**, the same honesty this port
+  already applies to `unresolved_import_stems`/`repowise-adr`'s
+  keyword-based commit mining: a real implementation would need to
+  parse each web framework's actual route-registration semantics per
+  language, which this port has no such capability for. False
+  negatives (an unrecognized framework idiom) and false positives (a
+  route-shaped string that isn't actually a route) are both expected.
+  An "unmatched consumer" finding is not necessarily a problem — it may
+  be a call to a genuinely external API.
+- No breaking changes — purely additive (new crate module, new route,
+  new dashboard section, new CLI subcommand).
+- **This closes #64.** All five originally bundled items are now
+  shipped: `list_repos` (PR #165), workspace co-change reporting (PR
+  #167), `get_architecture`/`get_blast_radius`/System Map (PR #169),
+  conformance (PR #171), and contracts (this PR).
+
+---
+
 ## PR #171 — Add conformance view (circular cross-repo dependencies)
 **2026-07-24** · [#171](https://github.com/baileyrd/rusty_repo_wise/pull/171) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
 

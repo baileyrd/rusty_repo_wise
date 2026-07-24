@@ -1,19 +1,31 @@
-//! Phase 5 of the #59/#65 live-dashboard pivot adds the last view: a
-//! chat section over `/api/chat`, an opt-in RAG-lite endpoint (see
-//! `repowise-server`'s own module doc for what "lite" means here --
-//! keyword search, not embeddings). Shows a plain explanatory message
-//! instead of a chat box when the server reports the feature isn't
-//! configured. Phase 4 broadened every file-path drill-down (Phase 2's
-//! wiki-only links) into a file-detail panel: wiki page, git-blame
-//! ownership breakdown, and any linked architectural decisions, each
-//! independently "not available" rather than a shared error -- so every
-//! indexed file is clickable now, not just ones with a wiki page. It
-//! also added a dead-code section (`/api/dead-code`, with a minimum-
-//! confidence filter). Phase 3 added a dependency-graph view: an SVG
-//! rendering of `/api/graph`'s file-level import graph, laid out
-//! client-side with a small force-directed simulation (no D3 or other
-//! JS graph library -- keeping the whole frontend buildable with just
-//! `cargo`/`trunk`).
+//! Issue #65 (live-server-dependent dashboard features) also tracks
+//! Present Mode: a full-screen, keyboard-driven step-through of
+//! Overview/Health/Hotspots/Decisions/Graph, with the current slide
+//! reflected in the URL hash (`#present/<n>`) so a link to a specific
+//! slide is shareable/bookmarkable, matching the issue's own framing.
+//! Purely a frontend feature -- no new server endpoints, reusing the
+//! same section components and data every other view already fetches.
+//! Cost tracking, Settings, and the live job banner (#65's other three
+//! bundled features) are not done here; each needs its own design pass
+//! (persistence for cost history, a write-capable settings API, a
+//! background-reindex-job concept the server doesn't have yet).
+//!
+//! Phase 5 of the #59/#65 dashboard-server pivot added the last
+//! *static-parity* view: a chat section over `/api/chat`, an opt-in
+//! RAG-lite endpoint (see `repowise-server`'s own module doc for what
+//! "lite" means here -- keyword search, not embeddings). Shows a plain
+//! explanatory message instead of a chat box when the server reports
+//! the feature isn't configured. Phase 4 broadened every file-path
+//! drill-down (Phase 2's wiki-only links) into a file-detail panel:
+//! wiki page, git-blame ownership breakdown, and any linked
+//! architectural decisions, each independently "not available" rather
+//! than a shared error -- so every indexed file is clickable now, not
+//! just ones with a wiki page. It also added a dead-code section
+//! (`/api/dead-code`, with a minimum-confidence filter). Phase 3 added
+//! a dependency-graph view: an SVG rendering of `/api/graph`'s
+//! file-level import graph, laid out client-side with a small
+//! force-directed simulation (no D3 or other JS graph library --
+//! keeping the whole frontend buildable with just `cargo`/`trunk`).
 
 use leptos::html;
 use leptos::prelude::*;
@@ -1128,15 +1140,153 @@ fn ChatSection() -> impl IntoView {
     }
 }
 
+/// Number of slides in Present Mode -- keep in lockstep with
+/// [`slide_title`] and the `match` in [`PresentMode`]'s view.
+const PRESENT_SLIDE_COUNT: usize = 5;
+
+fn slide_title(step: usize) -> &'static str {
+    match step {
+        0 => "Overview",
+        1 => "Code health",
+        2 => "Hotspots",
+        3 => "Architectural decisions",
+        _ => "Dependency graph",
+    }
+}
+
+/// Reads `#present/<n>` from the current URL on load, so a shared or
+/// bookmarked link opens directly into that slide -- the "shareable
+/// state via URL" issue #65 asks for.
+fn parse_present_hash() -> Option<usize> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    hash.strip_prefix("#present/")?.parse::<usize>().ok()
+}
+
+/// Updates the URL hash to reflect the current slide (or clears it on
+/// exit) via `replaceState`, not a hash assignment, so stepping through
+/// slides doesn't spam the browser's back-button history.
+fn set_present_hash(step: Option<usize>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(history) = window.history() else {
+        return;
+    };
+    let url = match step {
+        Some(n) => format!("#present/{n}"),
+        // A single space, not "", since some browsers ignore an empty
+        // `url` argument to replaceState rather than clearing the hash.
+        None => " ".to_string(),
+    };
+    let _ = history.replace_state_with_url(&leptos::wasm_bindgen::JsValue::NULL, "", Some(&url));
+}
+
+/// A full-screen, keyboard-driven step-through of the dashboard's core
+/// narrative sections -- issue #65's Present Mode. Frontend-only: every
+/// slide reuses an existing section component and the same `/api/*`
+/// data it already fetches, no new server endpoint. Renders nothing
+/// when `step` is `None` (present mode isn't active).
+#[component]
+fn PresentMode(step: RwSignal<Option<usize>>, selected: RwSignal<Option<String>>) -> impl IntoView {
+    window_event_listener_untyped("keydown", move |ev| {
+        let Some(current) = step.get_untracked() else {
+            return;
+        };
+        let Some(kb) = ev.dyn_ref::<web_sys::KeyboardEvent>() else {
+            return;
+        };
+        match kb.key().as_str() {
+            "ArrowRight" | " " => {
+                let next = (current + 1).min(PRESENT_SLIDE_COUNT - 1);
+                step.set(Some(next));
+                set_present_hash(Some(next));
+            }
+            "ArrowLeft" => {
+                let prev = current.saturating_sub(1);
+                step.set(Some(prev));
+                set_present_hash(Some(prev));
+            }
+            "Escape" => {
+                step.set(None);
+                set_present_hash(None);
+            }
+            _ => {}
+        }
+    });
+
+    view! {
+        {move || {
+            step.get().map(|current| {
+                view! {
+                    <div style="position: fixed; inset: 0; z-index: 1000; background: Canvas; \
+                                 color: CanvasText; overflow: auto; padding: 2rem;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <strong>
+                                {format!(
+                                    "{} ({} / {})",
+                                    slide_title(current),
+                                    current + 1,
+                                    PRESENT_SLIDE_COUNT,
+                                )}
+                            </strong>
+                            <button on:click=move |_| {
+                                step.set(None);
+                                set_present_hash(None);
+                            }>"Exit (Esc)"</button>
+                        </div>
+                        <div style="margin-top: 1.5rem;">
+                            {match current {
+                                0 => view! { <OverviewSection selected=selected /> }.into_any(),
+                                1 => view! { <HealthSection selected=selected /> }.into_any(),
+                                2 => view! { <HotspotsSection selected=selected /> }.into_any(),
+                                3 => view! { <DecisionsSection /> }.into_any(),
+                                _ => view! { <GraphSection selected=selected /> }.into_any(),
+                            }}
+                        </div>
+                        <div style="margin-top: 1.5rem; display: flex; gap: 0.5rem;">
+                            <button
+                                on:click=move |_| {
+                                    let prev = current.saturating_sub(1);
+                                    step.set(Some(prev));
+                                    set_present_hash(Some(prev));
+                                }
+                                prop:disabled=current == 0
+                            >
+                                "< Prev"
+                            </button>
+                            <button
+                                on:click=move |_| {
+                                    let next = (current + 1).min(PRESENT_SLIDE_COUNT - 1);
+                                    step.set(Some(next));
+                                    set_present_hash(Some(next));
+                                }
+                                prop:disabled=current == PRESENT_SLIDE_COUNT - 1
+                            >
+                                "Next >"
+                            </button>
+                        </div>
+                    </div>
+                }
+            })
+        }}
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let wiki_pages: WikiPages = LocalResource::new(|| fetch_json::<Vec<String>>("/api/wiki-pages"));
     let selected = RwSignal::new(None::<String>);
+    let present_step = RwSignal::new(parse_present_hash());
 
     view! {
         <h1>"repowise dashboard"</h1>
         <p class="subtitle">"live server"</p>
+        <button on:click=move |_| {
+            present_step.set(Some(0));
+            set_present_hash(Some(0));
+        }>"Present"</button>
         <SearchBox selected=selected />
+        <PresentMode step=present_step selected=selected />
         <FileDetailPanel wiki_pages=wiki_pages selected=selected />
         <OverviewSection selected=selected />
         <HealthSection selected=selected />

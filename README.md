@@ -168,6 +168,10 @@ dashboard is one static page with no per-file drill-down or live search
   companion) lives alongside it in `crates/` but is deliberately **not**
   a member of this repo's Cargo workspace, since it only builds for
   `wasm32-unknown-unknown`.
+- `repowise-workspace` — multi-repo workspace configuration (issue #64's
+  first slice): parses a small standalone TOML file naming a set of
+  repo roots, and reports each one's indexed status. See "Multi-repo
+  workspace support" below.
 - `repowise-cli` — the `repowise` binary tying it together.
 
 ## Usage
@@ -188,11 +192,14 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code/list_repos)
+                                     #   --workspace <FILE> to opt into list_repos (see "Multi-repo workspace support")
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
 repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
+                                     #   --workspace <FILE> to opt into the Workspace section
+repowise workspace-repos --workspace <FILE>  # list every repo in a workspace TOML file + indexed status
 ```
 
 ## Health scoring
@@ -833,6 +840,54 @@ survives a server restart). This still isn't a byte-for-byte
 reproduction of real repowise's dashboard either (e.g. no D3-identical
 graph rendering) — it's parity in what the dashboard *does*, built a
 different way.
+
+## Multi-repo workspace support
+
+Issue #64's first slice: this port is single-repo scoped throughout its
+entire architecture (`RepoIndex`, `RepoGraph`, every CLI command, and
+the MCP/dashboard servers all take one root), and this doesn't change
+that — it adds the smallest useful piece of the workspace concept on
+top: naming a set of repo roots and reporting each one's indexed
+status, via a `--workspace <path>` flag.
+
+- **`repowise-workspace`** parses a small standalone TOML file naming
+  member repos by name and path:
+  ```toml
+  [[repo]]
+  name = "rusty_repo_wise"
+  path = "/home/user/rusty_repo_wise"
+
+  [[repo]]
+  name = "some_other_repo"
+  path = "../some_other_repo"
+  ```
+  `path` may be relative to the workspace file's own directory (not the
+  process's current directory). This file is never inferred from or
+  stored inside any member repo's own `.repowise/` — a workspace spans
+  repos, so no single member repo is a sensible owner of it.
+- `repowise workspace-repos --workspace <path>` lists every configured
+  repo with its indexed status and file count if a prior `repowise
+  init`/`update` has run there.
+- `repowise serve --workspace <path>` (the MCP server) gains a
+  `list_repos` tool reporting the same thing as agent-facing JSON.
+  Omitting `--workspace` means `list_repos` returns an empty list
+  rather than erroring.
+- `repowise serve-dashboard --workspace <path>` gains `GET
+  /api/workspace-repos` (`{"available": bool, "repos": [...]}` — same
+  degrade-gracefully shape as `/api/hotspots`/`/api/chat`) and the
+  dashboard gets a **Workspace section** (repo cards: name, path,
+  indexed status, file counts).
+- **Deliberately not included in this slice**, because they all need
+  real cross-repo dependency resolution (a symbol in one repo resolving
+  as an import/call target in another) that doesn't exist anywhere in
+  this port yet: the `get_architecture`/`get_blast_radius` MCP tools,
+  and the dashboard's `/workspace/system-map` (cross-repo dependency
+  picture + design-structure matrix), `/workspace/conformance` (pattern
+  divergence), `/workspace/contracts` (producer/consumer API contract
+  matching), and `/workspace/co-changes` (cross-repo file co-change)
+  views. There's also no way to switch which repo the rest of the
+  dashboard/MCP server operates on — `root` stays fixed for the life of
+  the process, same as before this slice existed.
 
 ## Testing
 

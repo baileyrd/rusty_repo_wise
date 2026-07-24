@@ -23,7 +23,7 @@ today:
 | Index persistence (`RepoIndex::save`/`load`) | JSON on disk (`.repowise/index.json`) | the one and only backing store so far |
 
 ## Structure
-Modular monolith: one Cargo workspace, ten crates. Most are a layer over
+Modular monolith: one Cargo workspace, thirteen crates. Most are a layer over
 the one below it — `repowise-core` (data model, file discovery, index
 persistence) → `repowise-parser` (tree-sitter extraction) → `repowise-graph`
 (dependency graph + queries) → `repowise-health` (deterministic scoring on
@@ -68,7 +68,13 @@ dependency) and HTML-escaping untrusted text. No crate has been split out
 as a separate service or process (`repowise-mcp`/`repowise-dashboard` are
 libraries invoked by the CLI, not standalone binaries/servers); there's no
 forcing function (scaling, team boundary, fault isolation) that would
-justify it yet.
+justify it yet. `repowise-workspace` (issue #64's multi-repo/workspace
+support) depends only on `repowise-core` (for `RepoIndex::load`) —
+deliberately kept as its own crate rather than folded into
+`repowise-core` itself, since a future cross-repo slice of #64 will need
+it to depend on `repowise-graph`, and `repowise-core` staying
+dependency-free of every other `repowise-*` crate is a load-bearing
+invariant the rest of this port relies on.
 
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`

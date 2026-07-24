@@ -6,6 +6,34 @@ repo routing work through PRs).
 
 ---
 
+## PR #157 — Add read-only Settings view to the dashboard
+**2026-07-24** · [#157](https://github.com/baileyrd/rusty_repo_wise/pull/157) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** the third of #65's remaining bundled features — a
+  read-only Settings view. `GET /api/settings` returns the repo root,
+  indexed file counts, whether git history and wiki pages are
+  available, and whether an LLM is configured (and which model).
+- **Deliberately read-only:** this port has no persisted repo-level
+  exclusion/generation config or global server/webhook/MCP config to
+  write to yet, so a status snapshot is this slice's honest scope
+  rather than a settings editor.
+- `git_available` reuses `repowise_git::GitAnalytics::collect`;
+  `wiki_pages_available` reuses the existing `wiki_indexed_files`
+  helper — no new detection logic, just surfacing what other endpoints
+  already compute.
+- `SettingsSection`, the frontend component, renders at the bottom of
+  the dashboard as a plain list of status lines.
+- Verified end-to-end manually: a real compiled server against a
+  scratch git repo with a generated wiki page, both without and with
+  `REPOWISE_LLM_BASE_URL` set, `curl`-ing `/api/settings` through both
+  cases, then headless Chromium (Playwright) confirming the rendered
+  section (screenshot).
+- **Scope:** cost tracking (daily LLM spend, cost heatmap) remains
+  undone — it needs its own design pass (persistence for cost
+  history). This PR does not close #65.
+
+---
+
 ## PR #155 — Add live job banner (reindex) to the dashboard
 **2026-07-24** · [#155](https://github.com/baileyrd/rusty_repo_wise/pull/155) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

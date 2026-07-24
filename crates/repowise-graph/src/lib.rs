@@ -148,6 +148,11 @@ impl RepoGraph {
                 // `repowise-parser`); any other expansion has no static
                 // value to resolve, joining the same "no index needed"
                 // bucket.
+                // The 9 "Structural tier" languages (issue #70) never
+                // reach this match at all in practice -- `parse_file`
+                // gives them an empty `imports: Vec::new()`, so there's
+                // nothing to resolve -- but they still need a home in
+                // this exhaustive match; same "no index needed" bucket.
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C
@@ -156,6 +161,15 @@ impl RepoGraph {
                 | Language::Swift
                 | Language::Dart
                 | Language::Shell
+                | Language::ObjectiveC
+                | Language::R
+                | Language::Zig
+                | Language::Julia
+                | Language::Elm
+                | Language::OCaml
+                | Language::Crystal
+                | Language::Nim
+                | Language::D
                 | Language::Other => {}
             }
         }
@@ -181,7 +195,16 @@ impl RepoGraph {
                 | Language::Ruby
                 | Language::Swift
                 | Language::Dart
-                | Language::Shell => ("", &no_modules),
+                | Language::Shell
+                | Language::ObjectiveC
+                | Language::R
+                | Language::Zig
+                | Language::Julia
+                | Language::Elm
+                | Language::OCaml
+                | Language::Crystal
+                | Language::Nim
+                | Language::D => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

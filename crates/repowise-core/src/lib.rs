@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 
 /// Languages the indexer understands. Unsupported files are still walked
 /// (for stats) but are not parsed for symbols/edges.
+///
+/// The last 9 variants (ObjectiveC through D) are issue #70's
+/// "Structural tier" -- recognized by name and given a real
+/// (zero-symbol) `FileRecord` so they're visible to git-history-derived
+/// views (`hotspots`, per-language file counts, dashboard drill-down),
+/// but never parsed by tree-sitter at all: no grammar, no symbols,
+/// always a `0` hotspot score (churn × 0 complexity). `ownership`/
+/// `coupled` already work for these files today regardless of this
+/// distinction -- both take an explicit file path and read straight
+/// from `git blame`/`git log`, bypassing `RepoIndex` entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Language {
     Rust,
@@ -30,6 +40,15 @@ pub enum Language {
     Php,
     Dart,
     Shell,
+    ObjectiveC,
+    R,
+    Zig,
+    Julia,
+    Elm,
+    OCaml,
+    Crystal,
+    Nim,
+    D,
     Other,
 }
 
@@ -57,6 +76,17 @@ impl Language {
             "php" => Language::Php,
             "dart" => Language::Dart,
             "sh" | "bash" | "zsh" => Language::Shell,
+            "m" | "mm" => Language::ObjectiveC,
+            // Capital `.R` is the dominant convention for R scripts;
+            // lowercase `.r` also appears, so both are accepted.
+            "r" | "R" => Language::R,
+            "zig" => Language::Zig,
+            "jl" => Language::Julia,
+            "elm" => Language::Elm,
+            "ml" | "mli" => Language::OCaml,
+            "cr" => Language::Crystal,
+            "nim" => Language::Nim,
+            "d" => Language::D,
             _ => Language::Other,
         }
     }
@@ -79,6 +109,15 @@ impl Language {
             Language::Php => "PHP",
             Language::Dart => "Dart",
             Language::Shell => "Shell",
+            Language::ObjectiveC => "Objective-C",
+            Language::R => "R",
+            Language::Zig => "Zig",
+            Language::Julia => "Julia",
+            Language::Elm => "Elm",
+            Language::OCaml => "OCaml",
+            Language::Crystal => "Crystal",
+            Language::Nim => "Nim",
+            Language::D => "D",
             Language::Other => "Other",
         }
     }
@@ -278,5 +317,51 @@ impl RepoIndex {
             )
         })?;
         Ok(serde_json::from_reader(file)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_extension_recognizes_every_structural_tier_language() {
+        assert_eq!(Language::from_extension("m"), Language::ObjectiveC);
+        assert_eq!(Language::from_extension("mm"), Language::ObjectiveC);
+        assert_eq!(Language::from_extension("r"), Language::R);
+        assert_eq!(Language::from_extension("R"), Language::R);
+        assert_eq!(Language::from_extension("zig"), Language::Zig);
+        assert_eq!(Language::from_extension("jl"), Language::Julia);
+        assert_eq!(Language::from_extension("elm"), Language::Elm);
+        assert_eq!(Language::from_extension("ml"), Language::OCaml);
+        assert_eq!(Language::from_extension("mli"), Language::OCaml);
+        assert_eq!(Language::from_extension("cr"), Language::Crystal);
+        assert_eq!(Language::from_extension("nim"), Language::Nim);
+        assert_eq!(Language::from_extension("d"), Language::D);
+    }
+
+    #[test]
+    fn from_extension_falls_back_to_other_for_unknown_extensions() {
+        assert_eq!(Language::from_extension("xyz"), Language::Other);
+    }
+
+    #[test]
+    fn structural_tier_languages_have_distinct_labels() {
+        let labels = [
+            Language::ObjectiveC,
+            Language::R,
+            Language::Zig,
+            Language::Julia,
+            Language::Elm,
+            Language::OCaml,
+            Language::Crystal,
+            Language::Nim,
+            Language::D,
+        ]
+        .map(|l| l.label());
+        let mut sorted = labels.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), labels.len());
     }
 }

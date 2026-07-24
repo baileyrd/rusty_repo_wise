@@ -27,6 +27,19 @@ use std::path::Path;
 
 /// Parse a single file's `source` and extract its symbols/imports/calls.
 /// Returns `None` for languages we don't have an extractor for.
+///
+/// The 9 "Structural tier" languages (issue #70: Objective-C, R, Zig,
+/// Julia, Elm, OCaml, Crystal, Nim, D) get a bare, zero-symbol
+/// `FileRecord` via `structural_only` rather than `None` -- no
+/// tree-sitter grammar exists for them, but giving them a real
+/// `FileRecord` (rather than folding them into the `other_files` count
+/// like a genuinely-`Other` file) makes them visible to
+/// `RepoIndex.files`-driven views (`hotspots`, per-language file
+/// counts, dashboard drill-down). Their hotspot score is always `0`
+/// (churn × 0 complexity, since there are no symbols to sum
+/// complexity over) -- git-history signal (churn, blame, co-change) is
+/// all they get, matching repowise's own "Structural tier: git history
+/// only" framing.
 pub fn parse_file(
     path: &Path,
     language: Language,
@@ -49,7 +62,32 @@ pub fn parse_file(
         Language::Php => Ok(Some(php::extract(path, source)?)),
         Language::Dart => Ok(Some(dart::extract(path, source)?)),
         Language::Shell => Ok(Some(shell::extract(path, source)?)),
+        Language::ObjectiveC
+        | Language::R
+        | Language::Zig
+        | Language::Julia
+        | Language::Elm
+        | Language::OCaml
+        | Language::Crystal
+        | Language::Nim
+        | Language::D => Ok(Some(structural_only(path, language, source))),
         Language::Other => Ok(None),
+    }
+}
+
+/// A bare `FileRecord` for a "Structural tier" language (see
+/// `parse_file`'s own doc comment): no symbols/imports/calls/field
+/// accesses, just the file's identity and line count so it's counted
+/// and visible in `RepoIndex.files`-driven views.
+fn structural_only(path: &Path, language: Language, source: &str) -> FileRecord {
+    FileRecord {
+        path: path.to_path_buf(),
+        language,
+        lines: source.lines().count(),
+        symbols: Vec::new(),
+        imports: Vec::new(),
+        calls: Vec::new(),
+        field_accesses: Vec::new(),
     }
 }
 
@@ -97,5 +135,59 @@ pub(crate) mod util {
 
     pub fn text<'a>(node: Node, source: &'a str) -> &'a str {
         &source[node.byte_range()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_file_gives_every_structural_tier_language_a_bare_file_record() {
+        let languages = [
+            Language::ObjectiveC,
+            Language::R,
+            Language::Zig,
+            Language::Julia,
+            Language::Elm,
+            Language::OCaml,
+            Language::Crystal,
+            Language::Nim,
+            Language::D,
+        ];
+        let source = "line one\nline two\nline three\n";
+        for language in languages {
+            let path = PathBuf::from("example.src");
+            let record = parse_file(&path, language, source)
+                .unwrap()
+                .unwrap_or_else(|| panic!("expected a FileRecord for {language:?}"));
+            assert_eq!(record.language, language);
+            assert_eq!(record.lines, 3);
+            assert!(record.symbols.is_empty());
+            assert!(record.imports.is_empty());
+            assert!(record.calls.is_empty());
+            assert!(record.field_accesses.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_file_returns_none_for_a_truly_unrecognized_language() {
+        let path = PathBuf::from("example.bin");
+        let record = parse_file(&path, Language::Other, "whatever").unwrap();
+        assert!(record.is_none());
+    }
+
+    #[test]
+    fn build_index_counts_structural_tier_files_as_indexed_not_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("main.zig"), "// a zig file\nconst x = 1;\n").unwrap();
+
+        let index = build_index(&root).unwrap();
+
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].language, Language::Zig);
+        assert_eq!(index.other_files, 0);
     }
 }

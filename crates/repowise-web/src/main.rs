@@ -1028,6 +1028,15 @@ fn language_color(language: &str) -> &'static str {
         "PHP" => "#4F5D95",
         "Dart" => "#00B4AB",
         "Shell" => "#89e051",
+        "Objective-C" => "#438eff",
+        "R" => "#198CE7",
+        "Zig" => "#ec915c",
+        "Julia" => "#a270ba",
+        "Elm" => "#60B5CC",
+        "OCaml" => "#3be133",
+        "Crystal" => "#000100",
+        "Nim" => "#ffc200",
+        "D" => "#ba595e",
         _ => "#767676",
     }
 }

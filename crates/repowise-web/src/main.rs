@@ -1,14 +1,19 @@
-//! Issue #65 (live-server-dependent dashboard features) also tracks
-//! Present Mode: a full-screen, keyboard-driven step-through of
-//! Overview/Health/Hotspots/Decisions/Graph, with the current slide
-//! reflected in the URL hash (`#present/<n>`) so a link to a specific
-//! slide is shareable/bookmarkable, matching the issue's own framing.
-//! Purely a frontend feature -- no new server endpoints, reusing the
-//! same section components and data every other view already fetches.
-//! Cost tracking, Settings, and the live job banner (#65's other three
-//! bundled features) are not done here; each needs its own design pass
-//! (persistence for cost history, a write-capable settings API, a
-//! background-reindex-job concept the server doesn't have yet).
+//! Issue #65 (live-server-dependent dashboard features) also tracks a
+//! live job banner: a "Reindex" button (`JobBanner`) that triggers the
+//! server's `POST /api/reindex` and polls `GET /api/reindex` (via
+//! `gloo-timers`) until the background job leaves `Running`, picking up
+//! an already-in-flight job on page load too. Cost tracking and
+//! Settings, #65's other two remaining bundled features, are not done
+//! here; each needs its own design pass (persistence for cost history, a
+//! write-capable settings API).
+//!
+//! It also tracks Present Mode: a full-screen, keyboard-driven step-
+//! through of Overview/Health/Hotspots/Decisions/Graph, with the current
+//! slide reflected in the URL hash (`#present/<n>`) so a link to a
+//! specific slide is shareable/bookmarkable, matching the issue's own
+//! framing. Purely a frontend feature -- no new server endpoints,
+//! reusing the same section components and data every other view
+//! already fetches.
 //!
 //! Phase 5 of the #59/#65 dashboard-server pivot added the last
 //! *static-parity* view: a chat section over `/api/chat`, an opt-in
@@ -27,6 +32,7 @@
 //! force-directed simulation (no D3 or other JS graph library --
 //! keeping the whole frontend buildable with just `cargo`/`trunk`).
 
+use gloo_timers::future::TimeoutFuture;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -174,6 +180,22 @@ struct ChatRequest {
 struct ChatResponse {
     available: bool,
     reply: Option<String>,
+}
+
+/// Mirrors `repowise-server`'s `ReindexStatusDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ReindexStatus {
+    Idle,
+    Running,
+    Completed {
+        file_count: usize,
+        other_file_count: usize,
+        duration_ms: u64,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 async fn fetch_json<T>(path: &str) -> Result<T, String>
@@ -1032,6 +1054,95 @@ fn DeadCodeSection(selected: RwSignal<Option<String>>) -> impl IntoView {
     }
 }
 
+/// The live job banner (#65): a "Reindex" button plus a status line
+/// polling `GET /api/reindex`. Polling starts once on mount (to pick up
+/// a job already running from a previous page load) and again after
+/// triggering a new one, stopping as soon as the job leaves `Running`.
+#[component]
+fn JobBanner() -> impl IntoView {
+    let status = RwSignal::new(None::<ReindexStatus>);
+    let triggering = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+
+    let poll_until_done = move || {
+        spawn_local(async move {
+            loop {
+                match fetch_json::<ReindexStatus>("/api/reindex").await {
+                    Ok(s) => {
+                        let running = matches!(s, ReindexStatus::Running);
+                        status.set(Some(s));
+                        if !running {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error.set(Some(e));
+                        break;
+                    }
+                }
+                TimeoutFuture::new(500).await;
+            }
+        });
+    };
+    poll_until_done();
+
+    let do_trigger = move || {
+        if triggering.get() || matches!(status.get(), Some(ReindexStatus::Running)) {
+            return;
+        }
+        triggering.set(true);
+        error.set(None);
+        spawn_local(async move {
+            match post_json::<(), ReindexStatus>("/api/reindex", &()).await {
+                Ok(s) => {
+                    let running = matches!(s, ReindexStatus::Running);
+                    status.set(Some(s));
+                    triggering.set(false);
+                    if running {
+                        poll_until_done();
+                    }
+                }
+                Err(e) => {
+                    error.set(Some(e));
+                    triggering.set(false);
+                }
+            }
+        });
+    };
+
+    view! {
+        <div class="job-banner">
+            <button
+                on:click=move |_| do_trigger()
+                prop:disabled=move || {
+                    triggering.get() || matches!(status.get(), Some(ReindexStatus::Running))
+                }
+            >
+                "Reindex"
+            </button>
+            {move || {
+                let text = match status.get() {
+                    None => String::new(),
+                    Some(ReindexStatus::Idle) => "Idle".to_string(),
+                    Some(ReindexStatus::Running) => "Reindexing...".to_string(),
+                    Some(ReindexStatus::Completed {
+                        file_count,
+                        other_file_count,
+                        duration_ms,
+                    }) => format!(
+                        "Indexed {file_count} file(s) ({other_file_count} other) in {duration_ms}ms.",
+                    ),
+                    Some(ReindexStatus::Failed { error }) => format!("Reindex failed: {error}"),
+                };
+                view! { <span class="job-banner-status">{text}</span> }
+            }}
+            {move || {
+                error.get().map(|e| view! { <p class="error">{format!("Error: {e}")}</p> })
+            }}
+        </div>
+    }
+}
+
 /// A chat interface over `/api/chat`. Renders a plain explanatory
 /// message instead of a chat box when the server reports the LLM
 /// feature isn't configured, rather than a confusing empty/broken UI.
@@ -1281,6 +1392,7 @@ fn App() -> impl IntoView {
     view! {
         <h1>"repowise dashboard"</h1>
         <p class="subtitle">"live server"</p>
+        <JobBanner />
         <button on:click=move |_| {
             present_step.set(Some(0));
             set_present_hash(Some(0));

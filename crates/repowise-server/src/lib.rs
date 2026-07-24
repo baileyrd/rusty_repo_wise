@@ -15,12 +15,22 @@
 //! git-blame breakdown), an optional `?file=` filter on `/api/decisions`
 //! (decisions linked to one file, for a per-file decision tracker), and
 //! `/api/dead-code` (confidence-tiered dead-code candidates). Phase 5
-//! (this module now) adds `POST /api/chat`, the last view: a chat
-//! endpoint over `repowise-llm`, grounded by a lightweight keyword
-//! search over indexed files/symbols (not real embeddings-based
-//! retrieval -- see issue #63 for that). `{"available": false}` when
+//! added `POST /api/chat`, the last static-parity view: a chat endpoint
+//! over `repowise-llm`, grounded by a lightweight keyword search over
+//! indexed files/symbols (not real embeddings-based retrieval -- see
+//! issue #63 for that). `{"available": false}` when
 //! `REPOWISE_LLM_BASE_URL` isn't set, same opt-in convention every other
 //! LLM feature in this port uses.
+//!
+//! Issue #65 (the live-server-dependent dashboard features, split out
+//! after the #59/#65 pivot phases) also tracks a live job banner. `GET
+//! /api/reindex`/`POST /api/reindex` (this module now) add that: `POST`
+//! kicks off a background reindex (`repowise_parser::build_index`,
+//! shared with `repowise-cli`'s own `init`/`update` commands so there's
+//! exactly one indexing implementation) unless one's already running;
+//! `GET` reports the current job status (idle/running/completed/
+//! failed) for the dashboard to poll. Cost tracking and Settings, #65's
+//! other two remaining bundled features, are not done here.
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
@@ -34,7 +44,8 @@ use repowise_core::RepoIndex;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tower_http::services::ServeDir;
 
 /// `file`'s path relative to `root`, for JSON responses -- callers (a
@@ -56,6 +67,61 @@ struct AppState {
     /// mutating process env vars (which would race across parallel
     /// tests).
     llm_config: Arc<Option<repowise_llm::LlmConfig>>,
+    reindex_job: ReindexJob,
+}
+
+/// The live job banner's status shape, polled by the dashboard via `GET
+/// /api/reindex`. Internally tagged so the wire format is a flat
+/// `{"status": "completed", "file_count": ..., ...}` object rather than a
+/// separate boolean/variant-name split.
+#[derive(Serialize, Clone)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ReindexStatusDto {
+    Idle,
+    Running,
+    Completed {
+        file_count: usize,
+        other_file_count: usize,
+        duration_ms: u64,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+/// Shared, atomically-updated background-job state for `/api/reindex`.
+/// `try_start` is the only way to transition into `Running`, and refuses
+/// to do so if a job is already running -- the one concurrency guard the
+/// whole feature needs, since there's no job queue, just "at most one
+/// reindex in flight".
+#[derive(Clone)]
+struct ReindexJob(Arc<Mutex<ReindexStatusDto>>);
+
+impl ReindexJob {
+    fn new() -> Self {
+        ReindexJob(Arc::new(Mutex::new(ReindexStatusDto::Idle)))
+    }
+
+    fn snapshot(&self) -> ReindexStatusDto {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Returns `true` and transitions to `Running` if no job is
+    /// currently in flight; returns `false` (and leaves the state alone)
+    /// if one already is.
+    fn try_start(&self) -> bool {
+        let mut guard = self.0.lock().unwrap();
+        if matches!(*guard, ReindexStatusDto::Running) {
+            false
+        } else {
+            *guard = ReindexStatusDto::Running;
+            true
+        }
+    }
+
+    fn finish(&self, result: ReindexStatusDto) {
+        *self.0.lock().unwrap() = result;
+    }
 }
 
 /// A JSON-serializable copy of `repowise_graph::Overview` — kept as a
@@ -744,6 +810,43 @@ async fn post_chat(
     }))
 }
 
+/// Kick off a background reindex (`repowise_parser::build_index`, the
+/// same implementation `repowise-cli`'s `init`/`update` commands use) if
+/// one isn't already running, and return the job's current status.
+/// Never errors on a bad root -- a reindex failure surfaces as a
+/// `Failed` status for the dashboard to render, not a 500.
+async fn post_reindex(State(state): State<AppState>) -> Json<ReindexStatusDto> {
+    if state.reindex_job.try_start() {
+        let root = (*state.root).clone();
+        let job = state.reindex_job.clone();
+        tokio::task::spawn_blocking(move || {
+            let start = Instant::now();
+            let outcome = repowise_parser::build_index(&root).and_then(|index| {
+                index.save(&index.root)?;
+                Ok((index.files.len(), index.other_files))
+            });
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let status = match outcome {
+                Ok((file_count, other_file_count)) => ReindexStatusDto::Completed {
+                    file_count,
+                    other_file_count,
+                    duration_ms,
+                },
+                Err(e) => ReindexStatusDto::Failed {
+                    error: e.to_string(),
+                },
+            };
+            job.finish(status);
+        });
+    }
+    Json(state.reindex_job.snapshot())
+}
+
+/// The dashboard polls this to render the live job banner.
+async fn get_reindex_status(State(state): State<AppState>) -> Json<ReindexStatusDto> {
+    Json(state.reindex_job.snapshot())
+}
+
 /// Build the axum `Router` — separated from `serve` so tests can drive
 /// requests directly against it (via `tower::ServiceExt::oneshot`)
 /// without binding a real socket. `static_dir`, if given, serves the
@@ -753,6 +856,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
     let state = AppState {
         root: Arc::new(root),
         llm_config: Arc::new(repowise_llm::LlmConfig::from_env()),
+        reindex_job: ReindexJob::new(),
     };
     build_router(state, static_dir)
 }
@@ -771,6 +875,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/ownership", get(get_ownership))
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/chat", post(post_chat))
+        .route("/api/reindex", get(get_reindex_status).post(post_reindex))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -1420,6 +1525,7 @@ mod tests {
         let state = AppState {
             root: Arc::new(root),
             llm_config: Arc::new(llm_config),
+            reindex_job: ReindexJob::new(),
         };
         build_router(state, None)
     }
@@ -1496,5 +1602,110 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["available"], true);
         assert_eq!(json["reply"], "busy() lives in busy.rs.");
+    }
+
+    /// Like `get`, but drives an already-built `Router` instead of
+    /// constructing a fresh `app(root, None)` -- needed to observe a
+    /// background job's state transitions, since a fresh `app()` call
+    /// would build a brand-new `AppState` (and reindex job) each time.
+    async fn get_on(router: Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
+            })
+        };
+        (status, json)
+    }
+
+    #[test]
+    fn reindex_job_try_start_prevents_a_second_concurrent_run() {
+        let job = ReindexJob::new();
+        assert!(job.try_start());
+        assert!(!job.try_start());
+        job.finish(ReindexStatusDto::Completed {
+            file_count: 1,
+            other_file_count: 0,
+            duration_ms: 0,
+        });
+        assert!(job.try_start());
+    }
+
+    #[tokio::test]
+    async fn get_reindex_status_starts_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/reindex").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "idle");
+    }
+
+    #[tokio::test]
+    async fn post_reindex_triggers_a_background_reindex_and_reports_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app(root, None);
+        let (status, json) =
+            post_json(router.clone(), "/api/reindex", serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["status"] == "running" || json["status"] == "completed");
+
+        let mut final_json = json;
+        for _ in 0..50 {
+            if final_json["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let (status, json) = get_on(router.clone(), "/api/reindex").await;
+            assert_eq!(status, StatusCode::OK);
+            final_json = json;
+        }
+
+        assert_eq!(final_json["status"], "completed");
+        assert_eq!(final_json["file_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn post_reindex_reports_failure_when_the_root_disappears() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let router = app(root, None);
+        let (status, _json) =
+            post_json(router.clone(), "/api/reindex", serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut final_json = serde_json::Value::Null;
+        for _ in 0..50 {
+            let (status, json) = get_on(router.clone(), "/api/reindex").await;
+            assert_eq!(status, StatusCode::OK);
+            if json["status"] != "running" {
+                final_json = json;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(final_json["status"], "failed");
+        assert!(final_json["error"].is_string());
     }
 }

@@ -22,7 +22,7 @@ mod scala;
 mod shell;
 mod swift;
 
-use repowise_core::{FileRecord, Language};
+use repowise_core::{discover_files, FileRecord, Language, RepoIndex};
 use std::path::Path;
 
 /// Parse a single file's `source` and extract its symbols/imports/calls.
@@ -51,6 +51,44 @@ pub fn parse_file(
         Language::Shell => Ok(Some(shell::extract(path, source)?)),
         Language::Other => Ok(None),
     }
+}
+
+/// Walk `root`, parse every file in a supported language, and return the
+/// resulting index (not yet saved to disk). Shared by `repowise-cli`'s
+/// `init`/`update` commands and `repowise-server`'s background reindex
+/// job, so both stay in lockstep with exactly one implementation.
+pub fn build_index(root: &Path) -> anyhow::Result<RepoIndex> {
+    let root = root.canonicalize()?;
+    let discovered = discover_files(&root)?;
+
+    let mut files: Vec<FileRecord> = Vec::new();
+    let mut other_files = 0usize;
+
+    for entry in discovered {
+        if matches!(entry.language, Language::Other) {
+            other_files += 1;
+            continue;
+        }
+        let source = match std::fs::read_to_string(&entry.path) {
+            Ok(s) => s,
+            Err(_) => {
+                // Binary or unreadable file that happened to match an
+                // extension; count it and move on.
+                other_files += 1;
+                continue;
+            }
+        };
+        match parse_file(&entry.path, entry.language, &source)? {
+            Some(record) => files.push(record),
+            None => other_files += 1,
+        }
+    }
+
+    Ok(RepoIndex {
+        root,
+        files,
+        other_files,
+    })
 }
 
 /// Shared helpers used by the per-language extractors.

@@ -6,6 +6,32 @@ repo routing work through PRs).
 
 ---
 
+## PR #171 — Add conformance view (circular cross-repo dependencies)
+**2026-07-24** · [#171](https://github.com/baileyrd/rusty_repo_wise/pull/171) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
+
+- **Added:** the fourth slice of issue #64. Circular cross-repo
+  dependency detection (repo A imports repo B imports repo A, or a
+  longer chain), reusing exactly the edges PR #169's
+  `workspace_architecture` already computes — no new resolution logic,
+  just `repowise_graph::detect_repo_cycles` (petgraph `kosaraju_scc`
+  over repo-level edges, added but unused in #169) wired up to a real
+  surface. A workspace's repo-level dependency graph should form a DAG;
+  a cycle is a concrete, deterministic "pattern divergence" finding
+  needing no further human-specified rule set to detect.
+- New `GET /api/workspace-conformance` endpoint (`{"available": bool,
+  "cycles": [[repo names]]}`) and a **Conformance** dashboard section.
+- New `repowise workspace-conformance --workspace <path>` CLI
+  subcommand.
+- No new MCP tool — the tracking issue only names
+  `get_architecture`/`get_blast_radius` as MCP tools; conformance is
+  dashboard-only.
+- No breaking changes — purely additive (new route, new dashboard
+  section, new CLI subcommand).
+- **This does not close #64** — the contracts (producer/consumer API
+  matching) dashboard view remains, the last of the five bundled items.
+
+---
+
 ## PR #169 — Add cross-repo Rust import resolution
 **2026-07-24** · [#169](https://github.com/baileyrd/rusty_repo_wise/pull/169) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
 

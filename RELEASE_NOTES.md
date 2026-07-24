@@ -6,6 +6,51 @@ repo routing work through PRs).
 
 ---
 
+## PR #169 — Add cross-repo Rust import resolution
+**2026-07-24** · [#169](https://github.com/baileyrd/rusty_repo_wise/pull/169) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
+
+- **Added:** the third slice of issue #64 — real cross-repo dependency
+  resolution. `repowise-graph` gained `cross_repo_import_edges`: an
+  unresolved Rust `use` import in one workspace repo is now resolved
+  against another repo's Rust module-path map (`crate::path` -> file,
+  derived from each repo's own `Cargo.toml`), rather than left
+  permanently unresolved. An import counts as a cross-repo candidate
+  only if it's unresolved both at parse time AND against its **own**
+  repo's module map — a sibling-crate import within one multi-crate
+  repo (this port's own layout, for example) is never mistaken for a
+  cross-repo edge just because another repo happens to define a
+  same-named module.
+- Two new MCP tools: `get_architecture` (workspace-wide repo-pair
+  dependency summary + individual import sites; degrades to empty
+  lists like `list_repos` when no `--workspace` was given) and
+  `get_blast_radius` (direct, one-hop cross-repo importers of one
+  file — matches `RepoGraph::dependents_of`'s existing single-repo
+  precedent, which is also direct-only, not transitive; errors like
+  `get_context` on an unknown repo or unindexed file, since it targets
+  one specific file rather than degrading).
+- New `GET /api/workspace-architecture` endpoint and a **System Map**
+  dashboard section — a plain repo-pair table with individual import
+  sites listed underneath, not a force-directed graph, since repo-level
+  granularity is small.
+- New CLI subcommands: `repowise workspace-architecture --workspace
+  <path>` and `repowise workspace-blast-radius --workspace <path>
+  --repo <name> --file <path>`.
+- Rust-only for now — the only language this port anchors to a
+  `Cargo.toml`-derived crate name; every other language's cross-repo
+  imports are left unresolved, deliberately, for a future slice.
+- Also added `repowise_graph::detect_repo_cycles` and a
+  `repowise_workspace::detect_workspace_cycles` wrapper (petgraph
+  `kosaraju_scc` over repo-level edges) — unused by any surface in this
+  PR, laying groundwork for the next #64 slice (circular cross-repo
+  dependency detection powering a conformance view) without adding new
+  surface area here.
+- No breaking changes — purely additive (new crate functions, new MCP
+  tools, new route, new dashboard section, new CLI subcommands).
+- **This does not close #64** — the conformance (pattern divergence)
+  and contracts (producer/consumer API matching) dashboard views remain.
+
+---
+
 ## PR #167 — Add workspace co-change reporting
 **2026-07-24** · [#167](https://github.com/baileyrd/rusty_repo_wise/pull/167) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
 

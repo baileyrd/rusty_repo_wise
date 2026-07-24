@@ -6,6 +6,37 @@ repo routing work through PRs).
 
 ---
 
+## PR #147 — Add dependency-graph view (Phase 3)
+**2026-07-24** · [#147](https://github.com/baileyrd/rusty_repo_wise/pull/147) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** Phase 3 of the dashboard-server pivot — a visual
+  dependency-graph view, the last major static-dashboard-parity piece
+  that hadn't been ported yet.
+- **New `repowise-server` endpoint:** `GET /api/graph` — the file-level
+  import graph as `{nodes, edges, truncated}`. Truncated to the 150
+  most-connected files (ranked by dependency + dependent count) so the
+  view stays renderable on a large repo; `truncated: true` signals when
+  that cap actually cut something, rather than silently showing a
+  partial graph that looks complete.
+- **`repowise-web`:** a new graph section renders `/api/graph` as SVG,
+  laid out client-side with a hand-rolled Fruchterman-Reingold-style
+  force-directed simulation (deterministic circular start, all-pairs
+  repulsion, edges as springs, gentle pull to center) — no D3 or other
+  JS graph library, keeping the whole frontend buildable with just
+  `cargo`/`trunk`. Nodes are colored by language using GitHub's own
+  per-language colors; clicking a node opens its wiki page inline, the
+  same drill-down convention every other section uses.
+- Verified end-to-end manually: built a 4-file scratch Rust crate with
+  a real `mod`-based import chain, confirmed `/api/graph`'s JSON, then
+  drove the live page with headless Chromium — confirmed the SVG's
+  node/edge counts, took a full-page screenshot to visually confirm a
+  sane layout, and confirmed clicking a node opens its wiki page.
+- **Scope:** still not full parity. Ownership/dead-code/decision-
+  tracker views and chat (tying into #61's remaining LLM follow-ups)
+  are later phases, not done here. This PR does not close #59 or #65.
+
+---
+
 ## PR #145 — Add wiki drill-down links and instant search (Phase 2)
 **2026-07-24** · [#145](https://github.com/baileyrd/rusty_repo_wise/pull/145) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

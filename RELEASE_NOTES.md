@@ -6,6 +6,50 @@ repo routing work through PRs).
 
 ---
 
+## PR #206 — Add json_parse_in_loop health marker
+**2026-07-24** · [#206](https://github.com/baileyrd/rusty_repo_wise/pull/206) · closes [#193](https://github.com/baileyrd/rusty_repo_wise/issues/193)
+
+- **Added:** `json_parse_in_loop`, the sixth slice of issue #72's
+  Performance-signal cluster. Flags a known JSON-deserializing call
+  (`serde_json::from_str`/`from_slice`, `json.loads`/`json.load`,
+  `JSON.parse`) found inside a loop body — parsing the same/similarly-
+  shaped payload once per iteration is usually avoidable by parsing once
+  outside the loop, or restructuring to parse a single batched payload.
+- **`Symbol` gains `json_parse_in_loop: Vec<JsonParseInLoopRef>`** (each
+  entry: `line`, `callee_name`), populated at parse time.
+- **New `repowise-parser::metrics::json_parses_in_loops`**, a thin
+  wrapper on the shared `matches_in_loops` walk — no new walking logic
+  needed, same shape as `calls_in_loops`/`locks_in_loops`/
+  `resource_constructions_in_loops`.
+- **Scope:** implemented for **Rust, Python, and TypeScript/JavaScript**,
+  matching `io_in_loop`'s scope.
+  - Rust: reuses (and renames) `qualified_constructor_name` →
+    `qualified_call_name` — already extracting `Type::method` qualified
+    paths for `resource_construction_in_loop`, now reused for
+    `serde_json::from_str`/`from_slice`'s `module::function` shape too.
+  - Python: new `qualified_call_name` helper (`object.attribute`, e.g.
+    `json.loads`) — a bare `loads`/`load` would be dangerously generic
+    (`pickle.load`, `yaml.load`, any other `.load()` method).
+  - TypeScript/JavaScript: new `qualified_call_name` helper
+    (`object.property`, e.g. `JSON.parse`) — same generic-bare-name
+    problem (`Date.parse`, other `.parse()` methods).
+  - The other 13 parsed languages get an empty `json_parse_in_loop` list
+    and never trigger this marker.
+- **New `FindingKind::JsonParseInLoop`** (penalty −0.3, same weight as
+  the other loop-body markers), one `Finding` per flagged call, pointing
+  at the call's own line.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204).
+- 13 of #72's 19 sub-issues remain open — this closes only #193, not
+  #72 itself.
+
+---
+
 ## PR #204 — Add list_insert_zero_in_loop health marker
 **2026-07-24** · [#204](https://github.com/baileyrd/rusty_repo_wise/pull/204) · closes [#191](https://github.com/baileyrd/rusty_repo_wise/issues/191)
 

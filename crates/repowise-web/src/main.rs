@@ -17,8 +17,15 @@
 //! resolution over `GET /api/workspace-architecture`, rendered as a
 //! plain repo-pair table with the individual import sites listed
 //! underneath. Rust-only -- see `repowise-workspace`'s own module doc
-//! comment for what's deferred to a follow-up (`get_blast_radius` is
-//! MCP/CLI only so far, plus conformance/contracts views).
+//! comment for what's deferred to a follow-up (contracts is the last
+//! remaining #64 view).
+//!
+//! `ConformanceSection` is the next #64 slice: circular cross-repo
+//! dependencies over `GET /api/workspace-conformance`, reusing exactly
+//! the edges `SystemMapSection` already renders -- a workspace's
+//! repo-level dependency graph should form a DAG, so a cycle is a
+//! concrete "pattern divergence" finding needing no further
+//! human-specified rule set.
 //!
 //! Issue #65 (live-server-dependent dashboard features) also tracks
 //! cost tracking, its fifth and last bundled feature: `UsageSection`
@@ -294,6 +301,13 @@ struct WorkspaceArchitecture {
     repo_edges: Vec<RepoEdgeSummary>,
     edges: Vec<CrossRepoEdge>,
     total_edges: usize,
+}
+
+/// Mirrors `repowise-server`'s `WorkspaceConformanceDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct WorkspaceConformance {
+    available: bool,
+    cycles: Vec<Vec<String>>,
 }
 
 /// Mirrors `repowise-server`'s `UsageTotalsDto` wire shape.
@@ -1517,6 +1531,50 @@ fn SystemMapSection() -> impl IntoView {
     }
 }
 
+/// The conformance slice of #64: circular cross-repo dependencies over
+/// `GET /api/workspace-conformance`, reusing exactly the edges
+/// `SystemMapSection` already renders. A workspace's repo-level
+/// dependency graph should form a DAG; a cycle is a concrete,
+/// deterministic "pattern divergence" finding that needs no further
+/// human-specified rule set to detect -- unlike contracts (still a
+/// follow-up), which needs its own new detection capability entirely.
+#[component]
+fn ConformanceSection() -> impl IntoView {
+    let conformance =
+        LocalResource::new(|| fetch_json::<WorkspaceConformance>("/api/workspace-conformance"));
+
+    view! {
+        <h2>"Conformance"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                conformance
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(c) if !c.available => view! {
+                            <p class="empty">
+                                "No workspace configured (start the server with --workspace)."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(c) if c.cycles.is_empty() => view! {
+                            <p class="empty">"No circular cross-repo dependencies found."</p>
+                        }
+                        .into_any(),
+                        Ok(c) => view! {
+                            <ul>
+                                {c.cycles.into_iter().map(|cycle| view! {
+                                    <li>{cycle.join(" <-> ")}</li>
+                                }).collect::<Vec<_>>()}
+                            </ul>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// A cost-tracking view over `/api/usage` (#65's last remaining bundled
 /// feature): running token counts tallied across every `/api/chat`
 /// call this server process has handled, not a persisted history and
@@ -1835,6 +1893,7 @@ fn App() -> impl IntoView {
         <WorkspaceSection />
         <CoChangesSection />
         <SystemMapSection />
+        <ConformanceSection />
     }
 }
 

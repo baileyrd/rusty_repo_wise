@@ -186,6 +186,15 @@ enum Command {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Report circular cross-repo dependencies (repo A imports repo B
+    /// imports repo A, or a longer cycle) -- reuses exactly the edges
+    /// `workspace-architecture` already computes. A workspace's
+    /// repo-level dependency graph should form a DAG; a cycle is a
+    /// concrete, deterministic "pattern divergence" finding.
+    WorkspaceConformance {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -223,6 +232,7 @@ fn main() -> anyhow::Result<()> {
             repo,
             file,
         } => cmd_workspace_blast_radius(&workspace, &repo, &file),
+        Command::WorkspaceConformance { workspace } => cmd_workspace_conformance(&workspace),
     }
 }
 
@@ -722,6 +732,25 @@ fn cmd_workspace_blast_radius(workspace: &Path, repo: &str, file: &Path) -> anyh
             e.from_file.display(),
             e.import_path
         );
+    }
+    Ok(())
+}
+
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
+fn cmd_workspace_conformance(workspace: &Path) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    if repos.is_empty() {
+        println!("No repos configured in {}", workspace.display());
+        return Ok(());
+    }
+    let cycles = repowise_workspace::detect_workspace_cycles(&repos);
+    if cycles.is_empty() {
+        println!("No circular cross-repo dependencies found.");
+        return Ok(());
+    }
+    println!("Circular cross-repo dependencies found:");
+    for cycle in &cycles {
+        println!("  {}", cycle.join(" <-> "));
     }
     Ok(())
 }

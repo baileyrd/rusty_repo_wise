@@ -198,12 +198,13 @@ repowise dashboard [PATH]           # generate a static HTML dashboard under .re
 repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
 repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
-                                     #   --workspace <FILE> to opt into the Workspace/Workspace Co-Changes/System Map sections
+                                     #   --workspace <FILE> to opt into the Workspace/Workspace Co-Changes/System Map/Conformance sections
 repowise workspace-repos --workspace <FILE>  # list every repo in a workspace TOML file + indexed status
 repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own most-coupled file pairs
                                      #   --top <N> (default 10) how many pairs to list per repo
 repowise workspace-architecture --workspace <FILE>  # cross-repo Rust `use` resolution: which repos depend on which
 repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  # direct cross-repo importers of one file
+repowise workspace-conformance --workspace <FILE>  # circular cross-repo dependencies (repo A imports B imports A)
 ```
 
 ## Health scoring
@@ -923,12 +924,26 @@ deliberately, for a future slice.
   section** (a repo-pair table with the individual import sites listed
   underneath — a plain table, not a force-directed graph, since
   repo-level granularity is small).
+
+The next slice adds conformance: circular cross-repo dependencies,
+reusing exactly the edges `workspace-architecture` already computes. A
+workspace's repo-level dependency graph should form a DAG; a cycle
+(repo A imports repo B imports repo A, or a longer chain) is a
+concrete, deterministic "pattern divergence" finding that needs no
+further human-specified rule set to detect.
+
+- `repowise workspace-conformance --workspace <path>` prints any
+  circular cross-repo dependencies found, or a "none found" message.
+- `repowise serve-dashboard --workspace <path>` gains `GET
+  /api/workspace-conformance` and the dashboard gets a **Conformance
+  section**.
 - **Still deliberately not included**: the dashboard's
-  `/workspace/conformance` (pattern divergence) and `/workspace/contracts`
-  (producer/consumer API contract matching) views. There's also still no
-  way to switch which repo the rest of the dashboard/MCP server operates
-  on — `root` stays fixed for the life of the process, same as before
-  this slice existed.
+  `/workspace/contracts` (producer/consumer API contract matching)
+  view — the last remaining #64 item, needing a new route-detection
+  capability this port doesn't have yet. There's also still no way to
+  switch which repo the rest of the dashboard/MCP server operates on —
+  `root` stays fixed for the life of the process, same as before this
+  slice existed.
 
 ## Testing
 

@@ -1252,6 +1252,37 @@ async fn get_workspace_architecture(
     Json(dto)
 }
 
+#[derive(Serialize)]
+struct WorkspaceConformanceDto {
+    available: bool,
+    /// Each entry is one set of repo names involved in a circular
+    /// cross-repo dependency (repo A imports repo B imports repo A, or
+    /// a longer cycle) -- a workspace's repo-level dependency graph
+    /// should form a DAG; a cycle is a concrete, deterministic "pattern
+    /// divergence" finding needing no further human-specified rule set.
+    /// Empty (not an error) when no cycles are found.
+    cycles: Vec<Vec<String>>,
+}
+
+/// Circular cross-repo dependencies, reusing exactly the edges
+/// `/api/workspace-architecture` already computes -- see
+/// `repowise_workspace::detect_workspace_cycles`. `available: false`
+/// (empty `cycles`) when no workspace was configured, same shape as
+/// every other workspace-wide endpoint.
+async fn get_workspace_conformance(State(state): State<AppState>) -> Json<WorkspaceConformanceDto> {
+    let dto = match state.workspace_repos.as_ref() {
+        Some(repos) => WorkspaceConformanceDto {
+            available: true,
+            cycles: repowise_workspace::detect_workspace_cycles(repos),
+        },
+        None => WorkspaceConformanceDto {
+            available: false,
+            cycles: Vec::new(),
+        },
+    };
+    Json(dto)
+}
+
 async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
@@ -1346,6 +1377,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/workspace-architecture",
             get(get_workspace_architecture),
         )
+        .route("/api/workspace-conformance", get(get_workspace_conformance))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -2558,6 +2590,164 @@ mod tests {
         let repo_edges = json["repo_edges"].as_array().unwrap();
         assert_eq!(repo_edges.len(), 1);
         assert_eq!(repo_edges[0]["edge_count"], 1);
+    }
+
+    /// Writes a minimal real Rust crate importing `repo_b::baz::qux` --
+    /// the reverse-direction counterpart to
+    /// `index_rust_crate_importing_repo_a`, for building a mutual
+    /// cross-repo dependency (a cycle) in tests.
+    fn index_rust_crate_importing_repo_b(root: &Path) -> RepoIndex {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"repo-a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let file = root.join("src/foo.rs");
+        std::fs::write(&file, "use repo_b::baz::qux;\n").unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![repowise_core::FileRecord {
+                path: file,
+                language: repowise_core::Language::Rust,
+                lines: 1,
+                symbols: vec![],
+                imports: vec![repowise_core::ImportRef {
+                    path: "repo_b::baz::qux".to_string(),
+                    line: 1,
+                    resolved_file: None,
+                }],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    #[tokio::test]
+    async fn get_workspace_conformance_is_unavailable_without_a_workspace_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/workspace-conformance").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["cycles"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_workspace_conformance_reports_no_cycles_for_a_dag() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let repo_a_path = dir.path().join("repo-a");
+        index_rust_crate_with_foo_bar(&repo_a_path);
+        let repo_b_path = dir.path().join("repo-b");
+        index_rust_crate_importing_repo_a(&repo_b_path);
+
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "repo-a"
+                    path = "{}"
+
+                    [[repo]]
+                    name = "repo-b"
+                    path = "{}"
+                "#,
+                repo_a_path.display(),
+                repo_b_path.display(),
+            ),
+        )
+        .unwrap();
+
+        let (status, json) = {
+            let router = app(root, None, Some(workspace_path));
+            let response = router
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/api/workspace-conformance")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        };
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        assert_eq!(json["cycles"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_workspace_conformance_reports_a_mutual_cross_repo_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let repo_a_path = dir.path().join("repo-a");
+        index_rust_crate_importing_repo_b(&repo_a_path);
+        let repo_b_path = dir.path().join("repo-b");
+        index_rust_crate_importing_repo_a(&repo_b_path);
+
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "repo-a"
+                    path = "{}"
+
+                    [[repo]]
+                    name = "repo-b"
+                    path = "{}"
+                "#,
+                repo_a_path.display(),
+                repo_b_path.display(),
+            ),
+        )
+        .unwrap();
+
+        let router = app(root, None, Some(workspace_path));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/workspace-conformance")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["available"], true);
+        let cycles = json["cycles"].as_array().unwrap();
+        assert_eq!(cycles.len(), 1);
+        let mut cycle: Vec<String> = cycles[0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        cycle.sort();
+        assert_eq!(cycle, vec!["repo-a".to_string(), "repo-b".to_string()]);
     }
 
     #[tokio::test]

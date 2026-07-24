@@ -15,12 +15,14 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and the first of
+//! `repowise_core::Symbol::primitive_param_count`), and two of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
-//! `repowise_core::Symbol::io_in_loop`). Git-history-based markers
-//! (churn, hotspots, bug-fix history) aren't implemented yet — that
-//! needs the git-analytics layer, which is a separate phase.
+//! `repowise_core::Symbol::io_in_loop`) and string concatenation
+//! accumulating inside a loop body (`string_concat_in_loop`, same scope
+//! — see `repowise_core::Symbol::string_concat_in_loop`). Git-history-based
+//! markers (churn, hotspots, bug-fix history) aren't implemented yet —
+//! that needs the git-analytics layer, which is a separate phase.
 //!
 //! Every marker here is a plain threshold over data `repowise-parser`/
 //! `repowise-graph` already computed; nothing is inferred or guessed.
@@ -120,6 +122,11 @@ fn default_primitive_obsession() -> f64 {
 fn default_io_in_loop() -> f64 {
     0.3
 }
+// Same per-occurrence weight as `IoInLoop` (issue #178): another
+// loop-body performance pattern, same rough severity.
+fn default_string_concat_in_loop() -> f64 {
+    0.3
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -164,6 +171,8 @@ pub struct HealthWeights {
     pub primitive_obsession: f64,
     #[serde(default = "default_io_in_loop")]
     pub io_in_loop: f64,
+    #[serde(default = "default_string_concat_in_loop")]
+    pub string_concat_in_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -182,6 +191,7 @@ impl Default for HealthWeights {
             complex_conditional: default_complex_conditional(),
             primitive_obsession: default_primitive_obsession(),
             io_in_loop: default_io_in_loop(),
+            string_concat_in_loop: default_string_concat_in_loop(),
         }
     }
 }
@@ -210,6 +220,7 @@ impl HealthWeights {
             FindingKind::ComplexConditional => self.complex_conditional,
             FindingKind::PrimitiveObsession => self.primitive_obsession,
             FindingKind::IoInLoop => self.io_in_loop,
+            FindingKind::StringConcatInLoop => self.string_concat_in_loop,
         }
     }
 }
@@ -229,6 +240,7 @@ pub enum FindingKind {
     ComplexConditional,
     PrimitiveObsession,
     IoInLoop,
+    StringConcatInLoop,
 }
 
 impl FindingKind {
@@ -247,6 +259,7 @@ impl FindingKind {
             FindingKind::ComplexConditional => "complex-conditional",
             FindingKind::PrimitiveObsession => "primitive-obsession",
             FindingKind::IoInLoop => "io-in-loop",
+            FindingKind::StringConcatInLoop => "string-concat-in-loop",
         }
     }
 }
@@ -436,6 +449,23 @@ fn check_function_markers(
             detail: format!(
                 "`{}` (I/O-shaped call) found inside a loop body -- consider hoisting it out",
                 io_call.callee_name
+            ),
+        });
+    }
+    // Already filtered to string-append expressions found inside a loop
+    // body at extraction time (see
+    // `repowise_parser::metrics::string_concats_in_loops`); every entry
+    // here is already flagged, same as `io_in_loop` above.
+    for concat in &sym.string_concat_in_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(concat.line),
+            kind: FindingKind::StringConcatInLoop,
+            detail: format!(
+                "`{}` accumulated via string concatenation inside a loop body -- \
+                 consider a builder/join instead",
+                concat.variable
             ),
         });
     }

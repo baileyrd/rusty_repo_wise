@@ -4,8 +4,8 @@
 //! resolution, which isn't relevant here and would otherwise touch disk.
 
 use repowise_core::{
-    CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, Language, RepoIndex, Symbol,
-    SymbolKind,
+    CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, Language, RepoIndex,
+    StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -40,6 +40,7 @@ fn symbol(
         bumpy_road_bumps: 0,
         complex_conditionals: Vec::new(),
         io_in_loop: Vec::new(),
+        string_concat_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -350,6 +351,57 @@ fn flags_one_finding_per_io_in_loop_call_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(4)));
     assert!(lines.contains(&Some(6)));
     assert!(findings_for(&report, "clean", FindingKind::IoInLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_string_concat_in_loop_pointing_at_its_own_line() {
+    let mut looped = symbol(
+        "concat.rs",
+        "looped",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    looped.string_concat_in_loop = vec![
+        StringConcatInLoopRef {
+            line: 4,
+            variable: "s".to_string(),
+        },
+        StringConcatInLoopRef {
+            line: 6,
+            variable: "acc".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "concat.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "concat.rs",
+        vec![looped, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "looped", FindingKind::StringConcatInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::StringConcatInLoop).is_empty());
 }
 
 #[test]

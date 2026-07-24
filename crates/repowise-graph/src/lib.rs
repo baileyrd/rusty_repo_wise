@@ -35,7 +35,10 @@ fn last_path_segment(path: &str) -> String {
 #[derive(Debug, Clone)]
 pub enum Node {
     File(PathBuf),
-    Symbol(Symbol),
+    /// Boxed since `Symbol` (now carrying several `Vec<...>` health-marker
+    /// fields) is otherwise much larger than the `File` variant --
+    /// `clippy::large_enum_variant`.
+    Symbol(Box<Symbol>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +85,7 @@ impl RepoGraph {
             let fnode = graph.add_node(Node::File(file.path.clone()));
             file_index.insert(file.path.clone(), fnode);
             for sym in &file.symbols {
-                let snode = graph.add_node(Node::Symbol(sym.clone()));
+                let snode = graph.add_node(Node::Symbol(Box::new(sym.clone())));
                 symbol_index.insert(sym.id.clone(), snode);
                 graph.add_edge(fnode, snode, EdgeKind::Contains);
                 name_index
@@ -329,7 +332,7 @@ impl RepoGraph {
         self.graph
             .node_weights()
             .filter_map(|n| match n {
-                Node::Symbol(s) if s.name.to_lowercase().contains(&q) => Some(s),
+                Node::Symbol(s) if s.name.to_lowercase().contains(&q) => Some(s.as_ref()),
                 _ => None,
             })
             .collect()

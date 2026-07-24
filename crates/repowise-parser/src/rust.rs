@@ -124,6 +124,16 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let string_concat_in_loop = body
+                        .map(|b| {
+                            metrics::string_concats_in_loops(
+                                b,
+                                is_loop,
+                                |n| is_string_concat(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -147,6 +157,7 @@ impl<'a> Walker<'a> {
                         primitive_param_count,
                         body_hash,
                         io_in_loop,
+                        string_concat_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -180,6 +191,7 @@ impl<'a> Walker<'a> {
                         primitive_param_count: 0,
                         body_hash: None,
                         io_in_loop: Vec::new(),
+                        string_concat_in_loop: Vec::new(),
                     });
                 }
             }
@@ -203,6 +215,7 @@ impl<'a> Walker<'a> {
                         primitive_param_count: 0,
                         body_hash: None,
                         io_in_loop: Vec::new(),
+                        string_concat_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -398,6 +411,62 @@ fn is_io_call(name: &str) -> bool {
             | "fetch_all"
             | "recv"
     )
+}
+
+/// A string-append expression for `string_concat_in_loop` (issue #178):
+/// `s += other` (`compound_assignment_expr`), `s = s + other`
+/// (`assignment_expression` whose right side is a `+` `binary_expression`
+/// naming `s` on one side), or `s.push_str(other)` (a `call_expression`
+/// whose callee is a `push_str` method on a bare identifier). Returns the
+/// appended-onto variable's name.
+fn is_string_concat(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "compound_assignment_expr" => {
+            let left = node.child_by_field_name("left")?;
+            let operator = node.child_by_field_name("operator")?;
+            if left.kind() == "identifier" && text(operator, source) == "+=" {
+                Some(text(left, source).to_string())
+            } else {
+                None
+            }
+        }
+        "assignment_expression" => {
+            let left = node.child_by_field_name("left")?;
+            if left.kind() != "identifier" {
+                return None;
+            }
+            let left_name = text(left, source);
+            let right = node.child_by_field_name("right")?;
+            if right.kind() != "binary_expression"
+                || right
+                    .child_by_field_name("operator")
+                    .map(|op| text(op, source))
+                    != Some("+")
+            {
+                return None;
+            }
+            let bin_left = right.child_by_field_name("left")?;
+            let bin_right = right.child_by_field_name("right")?;
+            if text(bin_left, source) == left_name || text(bin_right, source) == left_name {
+                Some(left_name.to_string())
+            } else {
+                None
+            }
+        }
+        "call_expression" => {
+            let func = node.child_by_field_name("function")?;
+            if func.kind() != "field_expression" {
+                return None;
+            }
+            let field = func.child_by_field_name("field")?;
+            if text(field, source) != "push_str" {
+                return None;
+            }
+            let value = func.child_by_field_name("value")?;
+            (value.kind() == "identifier").then(|| text(value, source).to_string())
+        }
+        _ => None,
+    }
 }
 
 /// A parameter's declared type as source text, with a leading `&`/`&mut`/
@@ -869,5 +938,71 @@ mod tests {
         assert_eq!(hoisted.io_in_loop[0].callee_name, "read_to_string");
         // Same callee, but called after the loop rather than inside it.
         assert!(fine.io_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_string_concat_shapes_found_inside_a_loop_body_but_not_outside_one() {
+        let rec = extract_str(
+            r#"
+            fn compound_assign(items: &[&str]) -> String {
+                let mut s = String::new();
+                for i in items {
+                    s += i;
+                }
+                s
+            }
+
+            fn reassignment(items: &[&str]) -> String {
+                let mut s = String::new();
+                for i in items {
+                    s = s + i;
+                }
+                s
+            }
+
+            fn push_str_call(items: &[&str]) -> String {
+                let mut s = String::new();
+                for i in items {
+                    s.push_str(i);
+                }
+                s
+            }
+
+            fn fine(items: &[&str]) -> String {
+                let mut s = String::new();
+                for i in items {
+                    s.push_str(i);
+                }
+                s += " done";
+                s
+            }
+            "#,
+        );
+        let compound_assign = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "compound_assign")
+            .unwrap();
+        let reassignment = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "reassignment")
+            .unwrap();
+        let push_str_call = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "push_str_call")
+            .unwrap();
+        let fine = rec.symbols.iter().find(|s| s.name == "fine").unwrap();
+
+        assert_eq!(compound_assign.string_concat_in_loop.len(), 1);
+        assert_eq!(compound_assign.string_concat_in_loop[0].variable, "s");
+        assert_eq!(reassignment.string_concat_in_loop.len(), 1);
+        assert_eq!(reassignment.string_concat_in_loop[0].variable, "s");
+        assert_eq!(push_str_call.string_concat_in_loop.len(), 1);
+        assert_eq!(push_str_call.string_concat_in_loop[0].variable, "s");
+        // The append inside the loop is flagged, but the one after the
+        // loop is not -- "fine" should have exactly the in-loop one.
+        assert_eq!(fine.string_concat_in_loop.len(), 1);
     }
 }

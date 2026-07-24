@@ -124,6 +124,7 @@ mod tests {
             bumpy_road_bumps: 0,
             complex_conditionals: Vec::new(),
             io_in_loop: Vec::new(),
+            string_concat_in_loop: Vec::new(),
             param_count: 1,
             primitive_param_count: 0,
             body_hash: None,

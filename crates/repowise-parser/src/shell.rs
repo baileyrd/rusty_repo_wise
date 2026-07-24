@@ -111,6 +111,7 @@ impl<'a> Walker<'a> {
                         bumpy_road_bumps,
                         complex_conditionals: Vec::new(),
                         io_in_loop: Vec::new(),
+                        string_concat_in_loop: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

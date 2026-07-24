@@ -29,10 +29,11 @@
 //!
 //! Phase 5 of the #59/#65 dashboard-server pivot added the last
 //! *static-parity* view: a chat section over `/api/chat`, an opt-in
-//! RAG-lite endpoint (see `repowise-server`'s own module doc for what
-//! "lite" means here -- keyword search, not embeddings). Shows a plain
-//! explanatory message instead of a chat box when the server reports
-//! the feature isn't configured. Phase 4 broadened every file-path
+//! endpoint now grounded by real embeddings-based retrieval (issue #63
+//! -- see `repowise-server`'s own module doc for the retrieval/
+//! fallback design). Shows a plain explanatory message instead of a
+//! chat box when the server reports the feature isn't configured.
+//! Phase 4 broadened every file-path
 //! drill-down (Phase 2's wiki-only links) into a file-detail panel:
 //! wiki page, git-blame ownership breakdown, and any linked
 //! architectural decisions, each independently "not available" rather

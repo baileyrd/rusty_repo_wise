@@ -16,11 +16,22 @@
 //! (decisions linked to one file, for a per-file decision tracker), and
 //! `/api/dead-code` (confidence-tiered dead-code candidates). Phase 5
 //! added `POST /api/chat`, the last static-parity view: a chat endpoint
-//! over `repowise-llm`, grounded by a lightweight keyword search over
-//! indexed files/symbols (not real embeddings-based retrieval -- see
-//! issue #63 for that). `{"available": false}` when
+//! over `repowise-llm`. `{"available": false}` when
 //! `REPOWISE_LLM_BASE_URL` isn't set, same opt-in convention every other
 //! LLM feature in this port uses.
+//!
+//! [`build_chat_context_with_embeddings`] is issue #63's real semantic
+//! retrieval: embeds the question and every indexed file's symbol list
+//! via `repowise_llm::embed`, ranks by cosine similarity, and takes the
+//! top [`CHAT_CONTEXT_LIMIT`]. Falls back to the original keyword-
+//! substring [`build_chat_context`] if the embeddings call itself fails
+//! (e.g. an endpoint that doesn't implement `/v1/embeddings`), so a
+//! chat reply is never blocked by that. No vector index or persistence
+//! -- every chat call re-embeds the whole corpus in one batched
+//! request, an honest cost/latency tradeoff for a first slice.
+//! `/api/search` (the instant search box) is unaffected and stays
+//! substring-only; #63's own open questions suggest PageRank-biasing it
+//! with `repowise-graph`'s in-degree data as a cheaper follow-up.
 //!
 //! Issue #65 (the live-server-dependent dashboard features, split out
 //! after the #59/#65 pivot phases) also tracks a live job banner. `GET
@@ -499,6 +510,100 @@ fn build_chat_context(root: &Path, index: &RepoIndex, question: &str) -> String 
     context
 }
 
+/// A per-file text unit for embedding: this port's index stores
+/// structural metadata (symbols/imports/calls), not raw source, so the
+/// file's path and symbol list is the closest thing to a "document" it
+/// has to offer -- the same information `build_chat_context`'s keyword
+/// pass already matches against.
+fn file_document(root: &Path, file: &repowise_core::FileRecord) -> String {
+    let rel = relative(root, &file.path);
+    let mut doc = format!("File: {rel}\n");
+    for sym in &file.symbols {
+        doc.push_str(&format!("- {} ({})\n", sym.name, sym.kind.label()));
+    }
+    doc
+}
+
+/// Issue #63's real semantic retrieval: embeds the question and every
+/// indexed file's [`file_document`] in one batched call, ranks files by
+/// [`repowise_llm::cosine_similarity`], and takes the top
+/// `CHAT_CONTEXT_LIMIT`. No vector index or persistence -- every chat
+/// call re-embeds the whole corpus, an honest cost/latency tradeoff for
+/// a first slice (a large repo would want to cache these, tied to the
+/// reindex job, as a follow-up). Returns `Ok(None)` only for an empty
+/// index; any embeddings-call failure (a bad response, or an endpoint
+/// that doesn't implement `/v1/embeddings` at all) propagates as `Err`
+/// for the caller to fall back to keyword search on.
+fn embed_and_rank_context(
+    root: &Path,
+    index: &RepoIndex,
+    question: &str,
+    config: &repowise_llm::LlmConfig,
+) -> anyhow::Result<Option<String>> {
+    if index.files.is_empty() {
+        return Ok(None);
+    }
+
+    let mut inputs = vec![question.to_string()];
+    inputs.extend(index.files.iter().map(|f| file_document(root, f)));
+    let embeddings = repowise_llm::embed(config, &inputs)?;
+    let mut embeddings = embeddings.into_iter();
+    let question_embedding = embeddings
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("embeddings response was empty"))?;
+
+    let mut scored: Vec<(f32, &repowise_core::FileRecord)> = index
+        .files
+        .iter()
+        .zip(embeddings)
+        .map(|(file, embedding)| {
+            (
+                repowise_llm::cosine_similarity(&question_embedding, &embedding),
+                file,
+            )
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(CHAT_CONTEXT_LIMIT);
+
+    let mut context = String::from(
+        "You are a helpful assistant answering questions about a codebase. \
+         Base your answers only on the information below; if you don't have \
+         enough information to answer, say so rather than guessing.\n\n",
+    );
+    context.push_str(&format!(
+        "This repo has {} indexed file(s).\n",
+        index.files.len()
+    ));
+    context.push_str(
+        "\nPossibly relevant, found via semantic (embedding) search over indexed files:\n",
+    );
+    for (score, file) in &scored {
+        let rel = relative(root, &file.path);
+        context.push_str(&format!("- File: {rel} (similarity {score:.2})\n"));
+        for sym in &file.symbols {
+            context.push_str(&format!("  - {} ({})\n", sym.name, sym.kind.label()));
+        }
+    }
+    Ok(Some(context))
+}
+
+/// Builds the chat system prompt via embeddings-based retrieval, falling
+/// back to the keyword-search [`build_chat_context`] if the embeddings
+/// call itself fails -- a chat reply should never be blocked just
+/// because the configured endpoint doesn't support `/v1/embeddings`.
+fn build_chat_context_with_embeddings(
+    root: &Path,
+    index: &RepoIndex,
+    question: &str,
+    config: &repowise_llm::LlmConfig,
+) -> String {
+    match embed_and_rank_context(root, index, question, config) {
+        Ok(Some(context)) => context,
+        _ => build_chat_context(root, index, question),
+    }
+}
+
 struct ApiError(anyhow::Error);
 
 impl IntoResponse for ApiError {
@@ -855,17 +960,22 @@ async fn post_chat(
         .iter()
         .rev()
         .find(|t| t.role == "user")
-        .map(|t| t.content.as_str())
+        .map(|t| t.content.clone())
         .unwrap_or_default();
-    let context = build_chat_context(&state.root, &index, question);
-
-    let mut turns = vec![repowise_llm::Turn::system(context)];
-    turns.extend(request.history.into_iter().map(|t| repowise_llm::Turn {
-        role: t.role,
-        content: t.content,
-    }));
+    let root = (*state.root).clone();
+    let history: Vec<repowise_llm::Turn> = request
+        .history
+        .into_iter()
+        .map(|t| repowise_llm::Turn {
+            role: t.role,
+            content: t.content,
+        })
+        .collect();
 
     let (reply, usage) = tokio::task::spawn_blocking(move || {
+        let context = build_chat_context_with_embeddings(&root, &index, &question, &config);
+        let mut turns = vec![repowise_llm::Turn::system(context)];
+        turns.extend(history);
         repowise_llm::complete_messages_with_usage(&config, &turns)
     })
     .await
@@ -1522,6 +1632,7 @@ mod tests {
         let config = repowise_llm::LlmConfig {
             base_url: "http://127.0.0.1:0".to_string(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
         let router = app_with_llm_config(root, Some(config));
@@ -1626,31 +1737,98 @@ mod tests {
 
     /// Same hand-rolled fixture-server approach `repowise-llm`'s own
     /// tests use: a real HTTP round trip with no mocking crate.
+    /// Reads a full HTTP request off `stream`: a single `read()` call
+    /// isn't guaranteed to return the whole request when the body spans
+    /// more than one TCP segment (true for the chat-completions request
+    /// once its context includes several files' worth of symbols), so
+    /// this loops until it has read the `Content-Length`-declared body
+    /// in full (or gives up after a short idle gap, for a request with
+    /// no body).
+    fn read_full_request(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .ok();
+        let mut data = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    data.extend_from_slice(&buf[..n]);
+                    let Some(headers_end) = find_subslice(&data, b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let body_start = headers_end + 4;
+                    match content_length(&data[..headers_end]) {
+                        Some(len) if data.len() < body_start + len => continue,
+                        _ => break,
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&data).into_owned()
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    fn content_length(headers: &[u8]) -> Option<usize> {
+        String::from_utf8_lossy(headers).lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
+    }
+
     struct ChatFixtureServer {
         addr: std::net::SocketAddr,
+        received: Arc<Mutex<Vec<String>>>,
     }
 
     impl ChatFixtureServer {
-        fn start(response_body: &'static str) -> Self {
+        /// Serves `responses` in order, one per connection -- e.g.
+        /// `[embeddings_response, chat_response]` for a chat call that
+        /// embeds first and then completes. Every request's raw bytes
+        /// are recorded (`requests()`) so a test can assert on which
+        /// context (keyword vs. embeddings) was actually sent to the
+        /// chat-completions call.
+        fn start_sequence(responses: Vec<&'static str>) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap();
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let received_for_thread = received.clone();
             std::thread::spawn(move || {
-                use std::io::{Read, Write};
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response_body.len(),
-                    response_body
-                );
-                let _ = stream.write_all(response.as_bytes());
+                use std::io::Write;
+                for body in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    received_for_thread
+                        .lock()
+                        .unwrap()
+                        .push(read_full_request(&mut stream));
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
             });
-            ChatFixtureServer { addr }
+            ChatFixtureServer { addr, received }
         }
 
         fn base_url(&self) -> String {
             format!("http://{}", self.addr)
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.received.lock().unwrap().clone()
         }
     }
 
@@ -1717,11 +1895,14 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         index_with_one_busy_symbol(&root);
 
-        let response_body = r#"{"choices": [{"message": {"role": "assistant", "content": "busy() lives in busy.rs."}}]}"#;
-        let server = ChatFixtureServer::start(response_body);
+        let embeddings_response =
+            r#"{"data": [{"embedding": [1.0, 0.0]}, {"embedding": [1.0, 0.0]}]}"#;
+        let chat_response = r#"{"choices": [{"message": {"role": "assistant", "content": "busy() lives in busy.rs."}}]}"#;
+        let server = ChatFixtureServer::start_sequence(vec![embeddings_response, chat_response]);
         let config = repowise_llm::LlmConfig {
             base_url: server.base_url(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
 
@@ -1736,6 +1917,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["available"], true);
         assert_eq!(json["reply"], "busy() lives in busy.rs.");
+        assert!(server.requests()[1].contains("semantic (embedding) search"));
     }
 
     #[tokio::test]
@@ -1757,11 +1939,14 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         index_with_one_busy_symbol(&root);
 
-        let response_body = r#"{"choices": [{"message": {"role": "assistant", "content": "busy() lives in busy.rs."}}], "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}}"#;
-        let server = ChatFixtureServer::start(response_body);
+        let embeddings_response =
+            r#"{"data": [{"embedding": [1.0, 0.0]}, {"embedding": [1.0, 0.0]}]}"#;
+        let chat_response = r#"{"choices": [{"message": {"role": "assistant", "content": "busy() lives in busy.rs."}}], "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}}"#;
+        let server = ChatFixtureServer::start_sequence(vec![embeddings_response, chat_response]);
         let config = repowise_llm::LlmConfig {
             base_url: server.base_url(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
 
@@ -1780,6 +1965,39 @@ mod tests {
         assert_eq!(json["prompt_tokens"], 40);
         assert_eq!(json["completion_tokens"], 10);
         assert_eq!(json["total_tokens"], 50);
+    }
+
+    #[tokio::test]
+    async fn post_chat_falls_back_to_keyword_search_when_embeddings_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        // Missing "data" -- fails to deserialize as an embeddings
+        // response, simulating an endpoint that doesn't implement
+        // `/v1/embeddings` at all.
+        let embeddings_response = r#"{"error": "not supported"}"#;
+        let chat_response = r#"{"choices": [{"message": {"role": "assistant", "content": "busy() lives in busy.rs."}}]}"#;
+        let server = ChatFixtureServer::start_sequence(vec![embeddings_response, chat_response]);
+        let config = repowise_llm::LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
+            api_key: None,
+        };
+
+        let router = app_with_llm_config(root, Some(config));
+        let (status, json) = post_json(
+            router,
+            "/api/chat",
+            serde_json::json!({"history": [{"role": "user", "content": "What does busy do?"}]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        assert_eq!(json["reply"], "busy() lives in busy.rs.");
+        assert!(server.requests()[1].contains("keyword search"));
     }
 
     /// Like `get`, but drives an already-built `Router` instead of

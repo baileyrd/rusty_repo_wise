@@ -6,6 +6,57 @@ repo routing work through PRs).
 
 ---
 
+## PR #196 — Add io_in_loop health marker
+**2026-07-24** · [#196](https://github.com/baileyrd/rusty_repo_wise/pull/196) · closes [#177](https://github.com/baileyrd/rusty_repo_wise/issues/177)
+
+- **Added:** `io_in_loop`, the first slice of issue #72's Performance-signal
+  cluster (~19 pattern checks tracked as sub-issues #177-#195). Flags a
+  known file/network/database call found anywhere inside a loop body,
+  where hoisting the call above the loop is usually possible.
+- **`Symbol` gains `io_in_loop: Vec<IoInLoopRef>`** (each entry: `line`,
+  `callee_name`), populated at parse time.
+- **New `repowise-parser::metrics::calls_in_loops`**, mirroring
+  `complex_conditionals`'s shape but tracking a single "currently inside
+  a loop" flag down the whole body walk, so a call nested inside two
+  loops is still only reported once, at its own line, rather than once
+  per enclosing loop. Driven by two per-language pieces: an `is_loop`
+  classifier (a subset of each language's existing `is_decision` node
+  kinds — loops only, not `if`/`match`/etc., which branch but don't
+  repeat) and a small fixed table of I/O-shaped callee names.
+- **Scope:** implemented for **Rust, Python, and TypeScript/JavaScript
+  only** for this first pass, matching the LCOM4/`complex_conditional`
+  precedent (issues #51/#55). The other 13 parsed languages get an
+  empty `io_in_loop` list and never trigger this marker.
+- Like `unresolved_import_stems`/`repowise-workspace::contracts`'s
+  route-matching table, the I/O-callee-name table is deliberately coarse
+  and heuristic: matching on a call's last name/segment means it can't
+  tell a database cursor's `.execute(..)` from an unrelated `execute`
+  method on some other type, and it can't recognize I/O hidden behind a
+  wrapper function the table doesn't name.
+- **New `FindingKind::IoInLoop`** (penalty −0.3, same weight as
+  `ComplexConditional`), one `Finding` per flagged call, pointing at the
+  call's own line.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR (#127/#129): the field
+  has no `#[serde(default)]`, so an old index fails to deserialize
+  until regenerated. `index.json` is a regenerable cache, not a durable
+  format, so this isn't tracked as a breaking change.
+- 18 of #72's 19 sub-issues remain open (`string_concat_in_loop`,
+  `resource_construction_in_loop`, `lock_in_loop`,
+  `serial_await_in_loop`, `membership_test_against_list_in_loop`,
+  `nested_loop_with_io`, `blocking_sync_in_async`,
+  `blocking_io_under_lock`, `hot_path_sync_io`, `nested_loop_quadratic`,
+  `regex_compile_in_loop`, `defer_in_loop`,
+  `goroutine_in_unbounded_loop`, `list_insert_zero_in_loop`,
+  `pd_concat_in_loop`, `json_parse_in_loop`, `array_spread_in_reduce`,
+  `sql_cartesian_join`) — this closes only #177, not #72 itself.
+
+---
+
 ## PR #175 — Add Structural-tier language recognition
 **2026-07-24** · [#175](https://github.com/baileyrd/rusty_repo_wise/pull/175) · closes [#70](https://github.com/baileyrd/rusty_repo_wise/issues/70)
 

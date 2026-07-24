@@ -6,6 +6,49 @@ repo routing work through PRs).
 
 ---
 
+## PR #161 — Add embeddings-based chat retrieval
+**2026-07-24** · [#161](https://github.com/baileyrd/rusty_repo_wise/pull/161) · part of [#63](https://github.com/baileyrd/rusty_repo_wise/issues/63)
+
+- **Added:** issue #63's first slice — real semantic retrieval for
+  `/api/chat`, replacing the keyword-substring grounding it used
+  before. `repowise-llm::embed` calls the configured endpoint's
+  OpenAI-compatible `POST /v1/embeddings` to embed the question and
+  every indexed file's symbol list in one batched request; results are
+  ranked by cosine similarity and the top 10 files go into the system
+  prompt.
+- **Graceful fallback:** if the embeddings call itself fails (e.g. an
+  endpoint that doesn't implement `/v1/embeddings` at all), chat falls
+  back to the original keyword search rather than failing the request.
+- **No vector index or persistence:** every chat call re-embeds the
+  whole corpus in one batched request — an honest cost/latency
+  tradeoff for a first slice. A larger repo would want to cache these,
+  tied to the reindex job, as a follow-up.
+- **`REPOWISE_EMBEDDING_MODEL`** selects the embedding model/route
+  alias (default `"embed"`), separate from `REPOWISE_LLM_MODEL`.
+- `/api/search` (the dashboard's instant search box) is unaffected and
+  stays substring-only. #63's own open questions suggest
+  PageRank-biasing that with `repowise-graph`'s in-degree data as a
+  cheaper follow-up if pursued.
+- **Found and fixed a real test flake** while writing this (not a
+  product bug): `ureq`'s connection pooling could hand a fixture-test
+  server's already-closed socket back to a second sequential request
+  (fixed by setting `Connection: close` on outgoing requests), and the
+  test fixture's single `read()` call didn't reliably capture a full
+  HTTP request once a request body grew large enough to span multiple
+  TCP segments (fixed by looping reads until the declared
+  `Content-Length` is satisfied).
+- Verified end-to-end manually: a real compiled server against a
+  scratch git repo with two files, pointed at a small fixture
+  implementing both `/v1/embeddings` (deterministic fake vectors) and
+  `/v1/chat/completions`, confirming the correct file ranked first by
+  similarity in the actual request sent to the LLM. Repeated with the
+  fixture returning 404 on `/v1/embeddings` to confirm the keyword-
+  search fallback.
+- **Scope:** this doesn't close #63 — `/api/search` remains
+  substring-only, and there's no vector index/persistence yet.
+
+---
+
 ## PR #159 — Add cost tracking (token usage) to the dashboard
 **2026-07-24** · [#159](https://github.com/baileyrd/rusty_repo_wise/pull/159) · closes [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

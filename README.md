@@ -723,7 +723,16 @@ FastAPI-backend architecture, minus the Node.js dependency.
   "wiki_pages_available", "llm_configured", "llm_model"}` — a status
   snapshot, not a config editor: this port has no persisted repo-level
   exclusion/generation config or global server/webhook/MCP config to
-  write to yet, so there's no write endpoint here.
+  write to yet, so there's no write endpoint here. `GET /api/usage`
+  (issue #65's cost-tracking view, its fifth and last bundled feature)
+  returns `{"chat_call_count", "prompt_tokens", "completion_tokens",
+  "total_tokens"}`, tallied across every `/api/chat` call this server
+  process has handled whose response reported OpenAI-compatible
+  `usage` (`repowise_llm::complete_messages_with_usage`). In-memory for
+  this process only — resets on restart, not a persisted history — and
+  token counts, not a dollar figure: `repowise-llm` has no per-model
+  pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
+  or otherwise) can route to whichever provider it's configured for.
 - **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
   renders every section the static dashboard has — overview, code
   health, hotspots, architectural decisions, and a symbols table with a
@@ -760,7 +769,12 @@ FastAPI-backend architecture, minus the Node.js dependency.
   **Settings section** (bottom of the page) is a read-only status view
   over `/api/settings`: repo root, indexed file counts, and whether git
   history, wiki pages, and an LLM are available — no edit form, since
-  this port has no persisted config to write to yet.
+  this port has no persisted config to write to yet. A **Usage section**
+  polls `/api/usage` every 3s for running chat-call and
+  prompt/completion/total token counts, so it keeps reflecting the chat
+  section's activity elsewhere on the page without the two components
+  sharing state directly — token counts only, current server process
+  only, not a persisted dollar-cost history.
   It's deliberately **not** a member of the root Cargo workspace (its
   own `Cargo.toml` has an empty `[workspace]` table): it only ever
   targets `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev),
@@ -787,17 +801,19 @@ FastAPI-backend architecture, minus the Node.js dependency.
   gets there with a hand-rolled force-directed layout instead, so no JS
   build toolchain is needed for any part of the frontend.
 
-This closes out issue #59 and the dashboard-server pivot's static-parity
-scope: every view the static dashboard had now has a live equivalent,
-plus drill-down, search, a dependency graph, chat, and Present Mode the
-static page never had. Two honest caveats: chat's retrieval is keyword
-search, not real embeddings-based RAG (issue #63), and this still isn't
-a byte-for-byte reproduction of real repowise's dashboard (e.g. no
-D3-identical graph rendering) — it's parity in what the dashboard
-*does*, built a different way. Issue #65 (which also tracks Present
-Mode, the live job banner, and a read-only Settings view) stays open
-for its one remaining bundled, still-undone feature: cost tracking —
-it needs its own design pass (persistence for cost history).
+This closes out issue #59 and issue #65 both: every view the static
+dashboard had now has a live equivalent, plus drill-down, search, a
+dependency graph, chat, Present Mode, a live job banner, a read-only
+Settings view, and cost tracking — all five of #65's bundled,
+live-server-dependent features the static dashboard never had. Two
+honest caveats remain: chat's retrieval is keyword search, not real
+embeddings-based RAG (issue #63), and cost tracking is in-memory
+per-process token counts, not a persisted dollar-cost history (no
+per-model pricing table exists to convert tokens to dollars, and
+nothing here survives a server restart). This still isn't a
+byte-for-byte reproduction of real repowise's dashboard either (e.g.
+no D3-identical graph rendering) — it's parity in what the dashboard
+*does*, built a different way.
 
 ## Testing
 

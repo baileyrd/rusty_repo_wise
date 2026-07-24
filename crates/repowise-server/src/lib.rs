@@ -35,8 +35,15 @@
 //! configured (and which model) -- this port has no persisted
 //! repo-level exclusion/generation config or global server/webhook/MCP
 //! config to expose a write endpoint for, so surfacing what the server
-//! already knows about itself is this slice's honest scope. Cost
-//! tracking, #65's one remaining bundled feature, is not done here.
+//! already knows about itself is this slice's honest scope. `GET
+//! /api/usage` is #65's cost-tracking view -- the last of its five
+//! bundled features -- reporting running totals (chat-call count,
+//! prompt/completion/total tokens) tallied from every `/api/chat` call
+//! whose response reported `usage`
+//! (`repowise_llm::complete_messages_with_usage`). In-memory for this
+//! server process only (reset on restart, not a persisted history
+//! across sessions) and token counts, not a dollar cost -- this port
+//! has no per-model pricing table.
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
@@ -74,6 +81,43 @@ struct AppState {
     /// tests).
     llm_config: Arc<Option<repowise_llm::LlmConfig>>,
     reindex_job: ReindexJob,
+    usage: UsageTracker,
+}
+
+/// Running token-usage totals for this server process, tallied across
+/// every `/api/chat` call that got a usage-reporting response back --
+/// in-memory and reset on restart, not a persisted history across
+/// sessions (that needs its own design pass, same as every other
+/// "needs persistence" gap noted elsewhere in this module). Token
+/// counts, not a dollar cost: see `repowise_llm::Usage`'s own doc
+/// comment for why.
+#[derive(Serialize, Clone, Copy, Default)]
+struct UsageTotalsDto {
+    chat_call_count: u64,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+}
+
+#[derive(Clone, Default)]
+struct UsageTracker(Arc<Mutex<UsageTotalsDto>>);
+
+impl UsageTracker {
+    fn new() -> Self {
+        UsageTracker::default()
+    }
+
+    fn record(&self, usage: repowise_llm::Usage) {
+        let mut totals = self.0.lock().unwrap();
+        totals.chat_call_count += 1;
+        totals.prompt_tokens += usage.prompt_tokens;
+        totals.completion_tokens += usage.completion_tokens;
+        totals.total_tokens += usage.total_tokens;
+    }
+
+    fn snapshot(&self) -> UsageTotalsDto {
+        *self.0.lock().unwrap()
+    }
 }
 
 /// The live job banner's status shape, polled by the dashboard via `GET
@@ -821,15 +865,24 @@ async fn post_chat(
         content: t.content,
     }));
 
-    let reply =
-        tokio::task::spawn_blocking(move || repowise_llm::complete_messages(&config, &turns))
-            .await
-            .map_err(anyhow::Error::from)??;
+    let (reply, usage) = tokio::task::spawn_blocking(move || {
+        repowise_llm::complete_messages_with_usage(&config, &turns)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+
+    if let Some(usage) = usage {
+        state.usage.record(usage);
+    }
 
     Ok(Json(ChatResponseDto {
         available: true,
         reply: Some(reply),
     }))
+}
+
+async fn get_usage(State(state): State<AppState>) -> Json<UsageTotalsDto> {
+    Json(state.usage.snapshot())
 }
 
 async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
@@ -896,6 +949,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
         root: Arc::new(root),
         llm_config: Arc::new(repowise_llm::LlmConfig::from_env()),
         reindex_job: ReindexJob::new(),
+        usage: UsageTracker::new(),
     };
     build_router(state, static_dir)
 }
@@ -916,6 +970,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/chat", post(post_chat))
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
         .route("/api/settings", get(get_settings))
+        .route("/api/usage", get(get_usage))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -1604,6 +1659,7 @@ mod tests {
             root: Arc::new(root),
             llm_config: Arc::new(llm_config),
             reindex_job: ReindexJob::new(),
+            usage: UsageTracker::new(),
         };
         build_router(state, None)
     }
@@ -1680,6 +1736,50 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["available"], true);
         assert_eq!(json["reply"], "busy() lives in busy.rs.");
+    }
+
+    #[tokio::test]
+    async fn get_usage_starts_at_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/usage").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["chat_call_count"], 0);
+        assert_eq!(json["total_tokens"], 0);
+    }
+
+    #[tokio::test]
+    async fn post_chat_tallies_reported_usage_into_api_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let response_body = r#"{"choices": [{"message": {"role": "assistant", "content": "busy() lives in busy.rs."}}], "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}}"#;
+        let server = ChatFixtureServer::start(response_body);
+        let config = repowise_llm::LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            api_key: None,
+        };
+
+        let router = app_with_llm_config(root, Some(config));
+        let (status, _json) = post_json(
+            router.clone(),
+            "/api/chat",
+            serde_json::json!({"history": [{"role": "user", "content": "What does busy do?"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json) = get_on(router, "/api/usage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["chat_call_count"], 1);
+        assert_eq!(json["prompt_tokens"], 40);
+        assert_eq!(json["completion_tokens"], 10);
+        assert_eq!(json["total_tokens"], 50);
     }
 
     /// Like `get`, but drives an already-built `Router` instead of

@@ -678,43 +678,57 @@ FastAPI-backend architecture, minus the Node.js dependency.
 
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
-  `/api/search`, plus (new) `/api/graph` — the same data the static
-  dashboard's sections already compute (`repowise overview`/`health`/
-  `hotspots`/`decisions`, plus the full symbol list), as JSON instead of
-  baked into one static HTML page. File paths are always relative to
-  `PATH`, never absolute host paths. `/api/hotspots` returns
-  `{"available": false}` (not an error) when `PATH` isn't a git repo,
-  same "degrade gracefully" behavior as the static dashboard.
-  `/api/wiki-pages` lists which indexed files already have a
-  `repowise-docs` wiki page on disk; `/api/wiki?path=<rel>` serves one
-  page's raw markdown (matched against that exact set, so a crafted
-  `path` can't escape `.repowise/wiki/` via `..` segments);
-  `/api/search?q=<term>` does a case-insensitive substring match over
-  file paths and symbol names, capped at 20 results each; `/api/graph`
-  returns the file-level import graph (nodes + edges), truncated to the
-  150 most-connected files (`"truncated": true` when cut down) so a
-  large repo's graph stays renderable.
+  `/api/search`, `/api/graph`, plus (new) `/api/ownership` and
+  `/api/dead-code` — the same data the static dashboard's sections
+  already compute (`repowise overview`/`health`/`hotspots`/`decisions`,
+  plus the full symbol list), as JSON instead of baked into one static
+  HTML page. File paths are always relative to `PATH`, never absolute
+  host paths. `/api/hotspots` returns `{"available": false}` (not an
+  error) when `PATH` isn't a git repo, same "degrade gracefully"
+  behavior as the static dashboard. `/api/wiki-pages` lists which
+  indexed files already have a `repowise-docs` wiki page on disk;
+  `/api/wiki?path=<rel>` serves one page's raw markdown (matched
+  against that exact set, so a crafted `path` can't escape
+  `.repowise/wiki/` via `..` segments); `/api/search?q=<term>` does a
+  case-insensitive substring match over file paths and symbol names,
+  capped at 20 results each; `/api/graph` returns the file-level import
+  graph (nodes + edges), truncated to the 150 most-connected files
+  (`"truncated": true` when cut down) so a large repo's graph stays
+  renderable; `/api/ownership?path=<rel>` returns one file's git-blame
+  author breakdown (`{"available": false}` for a non-git-repo or
+  unindexed path, same degrade-gracefully convention); `/api/decisions`
+  takes an optional `?file=<rel>` to filter to decisions linked to one
+  file (omitted, it behaves exactly as before — every mined decision);
+  `/api/dead-code` returns confidence-tiered dead-code candidates with
+  an optional `?min_confidence=low|medium|high` filter, mirroring the
+  `get_dead_code` MCP tool's own shape (`total_matching` before the
+  50-candidate cap).
 - **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
   renders every section the static dashboard has — overview, code
   health, hotspots, architectural decisions, and a symbols table with a
   live (client-side-reactive, not just embedded-JS) kind filter — plus
   things the static dashboard didn't have a live version of yet: every
   rendered file path (including graph nodes) is a **drill-down link**
-  (opens that file's wiki page inline, as raw markdown, when
-  `repowise docs` has already generated one — same "check disk, don't
-  generate" convention as the static dashboard), a **Ctrl/Cmd+K instant
-  search box** live-queries `/api/search` as you type and jumps straight
-  to a matching file's wiki page, and a **dependency-graph view** renders
-  `/api/graph` as an SVG, laid out client-side with a small
-  Fruchterman-Reingold-style force-directed simulation (nodes repel each
-  other, edges act as springs, gently pulled back toward center) —
-  colored by language using GitHub's own per-language colors, no D3 or
-  other JS graph library involved. It's deliberately **not** a member of the
-  root Cargo workspace (its own `Cargo.toml` has an empty `[workspace]`
-  table): it only ever targets `wasm32-unknown-unknown` via
-  [`trunk`](https://trunkrs.dev), and pulling a WASM-only crate into the
-  main workspace would break plain `cargo build/test/clippy --workspace`
-  for every other crate (which target the host). Build it with:
+  that opens a **file-detail panel** — the file's wiki page (if
+  `repowise docs` has generated one), its git-blame ownership
+  breakdown, and any architectural decisions linked to it, each loading
+  and failing independently so a file with no wiki page yet still shows
+  whatever ownership/decision data exists instead of one shared error.
+  A **Ctrl/Cmd+K instant search box** live-queries `/api/search` as you
+  type and opens the same panel for a matching file. A
+  **dependency-graph view** renders `/api/graph` as an SVG, laid out
+  client-side with a small Fruchterman-Reingold-style force-directed
+  simulation (nodes repel each other, edges act as springs, gently
+  pulled back toward center) — colored by language using GitHub's own
+  per-language colors, no D3 or other JS graph library involved. A
+  **dead-code section** lists `/api/dead-code`'s candidates with a
+  minimum-confidence filter, each risk factor available as a tooltip.
+  It's deliberately **not** a member of the root Cargo workspace (its
+  own `Cargo.toml` has an empty `[workspace]` table): it only ever
+  targets `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev),
+  and pulling a WASM-only crate into the main workspace would break
+  plain `cargo build/test/clippy --workspace` for every other crate
+  (which target the host). Build it with:
   ```sh
   rustup target add wasm32-unknown-unknown   # once
   cargo install trunk                        # once
@@ -735,9 +749,8 @@ FastAPI-backend architecture, minus the Node.js dependency.
   gets there with a hand-rolled force-directed layout instead, so no JS
   build toolchain is needed for any part of the frontend.
 
-Still not full parity: ownership/dead-code/decision-tracker views and
-chat (tying into the LLM-dependent-features follow-ups from issue #61)
-are later phases, not done here.
+Still not full parity: chat (tying into the LLM-dependent-features
+follow-ups from issue #61) is a later phase, not done here.
 
 ## Testing
 

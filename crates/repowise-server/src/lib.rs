@@ -1078,10 +1078,15 @@ mod tests {
             assert!(status.success(), "git {args:?} failed");
         };
         run(&["init", "-q"]);
+        // Local config, not env vars: CI runners have neither a global
+        // git identity nor GIT_AUTHOR_*/GIT_COMMITTER_* set, so without
+        // this the commit fails outright ("empty ident name"). `--author`
+        // below still overrides these for the *author* field specifically,
+        // giving a deterministic name for ownership assertions regardless
+        // of whichever identity a given environment happens to default to.
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
         run(&["add", "-A"]);
-        // `--author` overrides this shell's own GIT_AUTHOR_* env vars
-        // (which otherwise take precedence over repo-local config),
-        // giving a deterministic author name for ownership assertions.
         run(&[
             "commit",
             "-q",

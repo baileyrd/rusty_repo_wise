@@ -127,6 +127,7 @@ impl<'a> Walker<'a> {
                         primitive_param_count: 0,
                         body_hash: None,
                         io_in_loop: Vec::new(),
+                        string_concat_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -156,6 +157,7 @@ impl<'a> Walker<'a> {
                         primitive_param_count: 0,
                         body_hash: None,
                         io_in_loop: Vec::new(),
+                        string_concat_in_loop: Vec::new(),
                     });
                 }
             }
@@ -308,6 +310,16 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let string_concat_in_loop = body
+            .map(|b| {
+                metrics::string_concats_in_loops(
+                    b,
+                    is_loop,
+                    |n| is_string_concat(n, self.source),
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -325,6 +337,7 @@ impl<'a> Walker<'a> {
             primitive_param_count,
             body_hash,
             io_in_loop,
+            string_concat_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -465,6 +478,50 @@ fn is_io_call(name: &str) -> bool {
         name,
         "readFile" | "readFileSync" | "writeFile" | "writeFileSync" | "fetch" | "query" | "execute"
     )
+}
+
+/// A string-append expression for `string_concat_in_loop` (issue #178):
+/// `s += other` (`augmented_assignment_expression`) or `s = s + other`
+/// (`assignment_expression` whose right side is a `+` `binary_expression`
+/// naming `s` on one side). JS/TS has no dedicated mutating string-append
+/// method (strings are immutable), so those two shapes are the whole
+/// pattern here. Returns the appended-onto variable's name.
+fn is_string_concat(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "augmented_assignment_expression" => {
+            let left = node.child_by_field_name("left")?;
+            let operator = node.child_by_field_name("operator")?;
+            if left.kind() == "identifier" && text(operator, source) == "+=" {
+                Some(text(left, source).to_string())
+            } else {
+                None
+            }
+        }
+        "assignment_expression" => {
+            let left = node.child_by_field_name("left")?;
+            if left.kind() != "identifier" {
+                return None;
+            }
+            let left_name = text(left, source);
+            let right = node.child_by_field_name("right")?;
+            if right.kind() != "binary_expression"
+                || right
+                    .child_by_field_name("operator")
+                    .map(|op| text(op, source))
+                    != Some("+")
+            {
+                return None;
+            }
+            let bin_left = right.child_by_field_name("left")?;
+            let bin_right = right.child_by_field_name("right")?;
+            if text(bin_left, source) == left_name || text(bin_right, source) == left_name {
+                Some(left_name.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// A parameter's declared type annotation as source text. TypeScript-only:
@@ -714,5 +771,29 @@ mod tests {
         assert_eq!(hoisted.io_in_loop.len(), 1);
         assert_eq!(hoisted.io_in_loop[0].callee_name, "readFileSync");
         assert!(fine.io_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_string_concat_shapes_found_inside_a_loop_body_but_not_outside_one() {
+        let rec = extract_js(
+            "function compoundAssign(items) {\n  let s = '';\n  for (const i of items) {\n    s += i;\n  }\n  return s;\n}\n\nfunction reassignment(items) {\n  let s = '';\n  for (const i of items) {\n    s = s + i;\n  }\n  return s;\n}\n\nfunction fine(items) {\n  let s = '';\n  for (const i of items) {\n    s += i;\n  }\n  s = s + ' done';\n  return s;\n}\n",
+        );
+        let compound_assign = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "compoundAssign")
+            .unwrap();
+        let reassignment = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "reassignment")
+            .unwrap();
+        let fine = rec.symbols.iter().find(|s| s.name == "fine").unwrap();
+
+        assert_eq!(compound_assign.string_concat_in_loop.len(), 1);
+        assert_eq!(compound_assign.string_concat_in_loop[0].variable, "s");
+        assert_eq!(reassignment.string_concat_in_loop.len(), 1);
+        assert_eq!(reassignment.string_concat_in_loop[0].variable, "s");
+        assert_eq!(fine.string_concat_in_loop.len(), 1);
     }
 }

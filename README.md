@@ -64,7 +64,7 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from thirteen
+- Score every file's health deterministically (0–10, no LLM/ML) from fourteen
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
@@ -78,10 +78,14 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and I/O in a loop (`io_in_loop` — a known
-  file/network/database call found inside a loop body where hoisting it
-  above the loop is usually possible, Rust/Python/TS+JS only; the first
-  slice of repowise's Performance-signal cluster) — except for shell
+  declared parameter types), and two of repowise's Performance-signal
+  cluster: I/O in a loop (`io_in_loop` — a known file/network/database
+  call found inside a loop body where hoisting it above the loop is
+  usually possible) and string concatenation in a loop
+  (`string_concat_in_loop` — `+=`/`s = s + other`/`.push_str(..)`
+  accumulating onto a string variable inside a loop body, quadratic
+  string-building cost since each append reallocates and copies the
+  whole string so far), both Rust/Python/TS+JS only — except for shell
   scripts, which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -118,7 +122,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 13 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 14 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -144,8 +148,9 @@ dashboard is one static page with no per-file drill-down or live search
   (feeds LCOM4), per-condition boolean-operator-chain detection for
   Rust/Python/TS+JS (feeds `complex_conditional`), declared-parameter-type
   extraction for Rust/TypeScript (feeds `primitive_obsession`), and a
-  shared loop-classifier plus a small per-language I/O-callee-name table
-  for Rust/Python/TS+JS (feeds `io_in_loop`).
+  shared loop-classifier for Rust/Python/TS+JS feeding both a small
+  per-language I/O-callee-name table (`io_in_loop`) and a per-language
+  string-append-expression classifier (`string_concat_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -241,6 +246,7 @@ to `[0, 10]`:
 | Complex conditional (`complex_conditional`) | single condition chains >= 3 boolean operators | −0.3 |
 | Primitive obsession (`primitive_obsession`) | >= 3 bare-primitive-typed parameters | −0.3 |
 | I/O in loop (`io_in_loop`) | a known I/O-shaped call found inside a loop body | −0.3 |
+| String concat in loop (`string_concat_in_loop`) | a string-append expression accumulating inside a loop body | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -256,7 +262,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the thirteen; everything else keeps its default
+# only overriding two of the fourteen; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -385,6 +391,28 @@ means it can't tell a database cursor's `.execute(..)` from an unrelated
 `execute` method on some other type, and it can't recognize I/O hidden
 behind a wrapper function the table doesn't name. The other 13 languages
 have no `is_loop`/I/O-callee-table logic yet and so never produce any
+entries for this marker.
+
+**String concat in loop (`string_concat_in_loop`)** flags a string-append
+expression accumulating onto a variable found anywhere inside a loop body
+— the second slice of the Performance-signal cluster, reusing `io_in_loop`'s
+`is_loop` classifier and, like it, implemented for **Rust, Python, and
+TypeScript/JavaScript only**. Each language recognizes two shapes: a
+compound `+=` assignment onto a bare identifier, and a reassignment of the
+shape `s = s + other` (an `assignment` whose right side is a `+`
+binary expression naming the left-hand identifier on either side). Rust
+additionally recognizes `s.push_str(other)` — a `call_expression` whose
+callee is a `push_str` method on a bare identifier — since Python/JS have
+no mutating string-append method (their strings are immutable, so `+=`/
+reassignment are the only shapes). `repowise-parser::metrics::string_concats_in_loops`
+mirrors `calls_in_loops`'s "currently inside a loop" tracking exactly, just
+matching a different per-language classifier
+(`Symbol::string_concat_in_loop: Vec<StringConcatInLoopRef>`, each entry
+carrying the append's own `line` and the appended-onto `variable` name).
+Repeated string concatenation is a well-known quadratic-time trap: each
+append reallocates and copies the whole string built so far, so this is a
+genuine performance-risk signal, not just a style nit. The other 13
+languages have no per-language classifier yet and so never produce any
 entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates

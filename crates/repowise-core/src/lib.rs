@@ -216,6 +216,14 @@ pub struct Symbol {
     /// Rust, Python, and TypeScript/JavaScript, matching the scope
     /// LCOM4/`complex_conditional` already established.
     pub io_in_loop: Vec<IoInLoopRef>,
+    /// String-append expressions (`+=`, `s = s + other`, `.push_str(..)`)
+    /// accumulating onto a variable found inside a loop body -- quadratic
+    /// string-building cost in most languages, since each append
+    /// reallocates and copies the whole string so far. Empty for symbols
+    /// with no body, and for languages this extraction isn't implemented
+    /// for yet -- currently Rust, Python, and TypeScript/JavaScript,
+    /// matching `io_in_loop`'s scope.
+    pub string_concat_in_loop: Vec<StringConcatInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -234,6 +242,15 @@ pub struct ComplexConditionalRef {
 pub struct IoInLoopRef {
     pub line: usize,
     pub callee_name: String,
+}
+
+/// A single string-append expression found inside a loop body. `line`
+/// points at the append expression itself; `variable` is the name of the
+/// string variable being appended onto.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StringConcatInLoopRef {
+    pub line: usize,
+    pub variable: String,
 }
 
 impl Symbol {

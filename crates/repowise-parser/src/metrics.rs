@@ -4,7 +4,7 @@
 //! a duplicate-code body hash. These feed `repowise-health`'s
 //! deterministic scoring.
 
-use repowise_core::{ComplexConditionalRef, IoInLoopRef};
+use repowise_core::{ComplexConditionalRef, IoInLoopRef, StringConcatInLoopRef};
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
 
@@ -278,6 +278,62 @@ pub fn calls_in_loops(
         &is_loop,
         &call_callee,
         &is_io_call,
+        &is_nested_function,
+        &mut out,
+    );
+    out
+}
+
+/// Every string-append expression within `body` (`is_string_concat`,
+/// applied to each node -- returns the appended-onto variable's name, or
+/// `None` if the node isn't a recognized append shape) that occurs
+/// anywhere inside a loop (`is_loop`). Same "currently inside a loop"
+/// flag-tracking shape as `calls_in_loops` (issue #177) -- a nested
+/// append is still only reported once, at its own line.
+pub fn string_concats_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    is_string_concat: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<StringConcatInLoopRef> {
+    fn walk(
+        node: Node,
+        in_loop: bool,
+        is_loop: &dyn Fn(Node) -> bool,
+        is_string_concat: &dyn Fn(Node) -> Option<String>,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<StringConcatInLoopRef>,
+    ) {
+        if in_loop {
+            if let Some(variable) = is_string_concat(node) {
+                out.push(StringConcatInLoopRef {
+                    line: node.start_position().row + 1,
+                    variable,
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            let child_in_loop = in_loop || is_loop(child);
+            walk(
+                child,
+                child_in_loop,
+                is_loop,
+                is_string_concat,
+                is_nested_function,
+                out,
+            );
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        body,
+        false,
+        &is_loop,
+        &is_string_concat,
         &is_nested_function,
         &mut out,
     );

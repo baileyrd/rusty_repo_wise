@@ -21,6 +21,14 @@
 //! refactor-plan codegen, doc-gen-as-decision-source): only wiki-summary
 //! generation is implemented here. The other three need real
 //! retrieval/context design of their own and are left as follow-ups.
+//!
+//! [`complete_messages_with_usage`] also returns each response's token
+//! [`Usage`] (`prompt_tokens`/`completion_tokens`/`total_tokens`), when
+//! the endpoint reports it -- `repowise-server`'s `/api/usage` (issue
+//! #65's cost-tracking view) tallies these across chat calls. Token
+//! counts only, not a dollar cost: this crate has no per-model pricing
+//! table, since `rusty_provider` (and any other OpenAI-compatible
+//! endpoint) can route to whichever provider it's configured for.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -78,6 +86,7 @@ struct ChatMessage<'a> {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    usage: Option<UsageDto>,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +97,26 @@ struct ChatChoice {
 #[derive(Deserialize)]
 struct ChatResponseMessage {
     content: String,
+}
+
+#[derive(Deserialize)]
+struct UsageDto {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+}
+
+/// Token counts for one completion, when the endpoint reports them --
+/// the OpenAI-compatible `usage` object is optional per-provider, so
+/// callers that want it get `None` rather than zeros for an endpoint
+/// that omits it. Deliberately token counts, not a dollar cost: this
+/// crate has no per-model pricing table (the "cost" varies by whichever
+/// provider `rusty_provider` -- or any other endpoint -- routes to).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
 }
 
 /// One turn in a multi-turn conversation passed to [`complete_messages`].
@@ -123,12 +152,16 @@ impl Turn {
 }
 
 /// One OpenAI-compatible chat-completions round trip over an arbitrary
-/// turn history in, the assistant's reply text out. Synchronous
-/// (`ureq`), matching the HTTP-client choice `repowise-adr`/
-/// `repowise-git` already made for their own opt-in network calls, so
-/// callers don't need to pull an async runtime into an otherwise-
-/// synchronous context the way `repowise serve` does.
-pub fn complete_messages(config: &LlmConfig, turns: &[Turn]) -> anyhow::Result<String> {
+/// turn history in, the assistant's reply text (and token usage, when
+/// the endpoint reports it) out. Synchronous (`ureq`), matching the
+/// HTTP-client choice `repowise-adr`/`repowise-git` already made for
+/// their own opt-in network calls, so callers don't need to pull an
+/// async runtime into an otherwise-synchronous context the way
+/// `repowise serve` does.
+pub fn complete_messages_with_usage(
+    config: &LlmConfig,
+    turns: &[Turn],
+) -> anyhow::Result<(String, Option<Usage>)> {
     let url = format!(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
@@ -149,12 +182,24 @@ pub fn complete_messages(config: &LlmConfig, turns: &[Turn]) -> anyhow::Result<S
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
     let response: ChatResponse = req.send_json(serde_json::to_value(&body)?)?.into_json()?;
-    response
+    let usage = response.usage.map(|u| Usage {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+    });
+    let reply = response
         .choices
         .into_iter()
         .next()
         .map(|c| c.message.content)
-        .ok_or_else(|| anyhow::anyhow!("LLM response had no choices"))
+        .ok_or_else(|| anyhow::anyhow!("LLM response had no choices"))?;
+    Ok((reply, usage))
+}
+
+/// Same round trip as [`complete_messages_with_usage`], for the callers
+/// that only need the reply text.
+pub fn complete_messages(config: &LlmConfig, turns: &[Turn]) -> anyhow::Result<String> {
+    complete_messages_with_usage(config, turns).map(|(reply, _)| reply)
 }
 
 /// A single `system`/`user` round trip -- the shape every caller before
@@ -333,6 +378,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reply, "Sure, here's more detail.");
+    }
+
+    #[test]
+    fn complete_messages_with_usage_captures_reported_token_counts() {
+        let response = r#"{"choices": [{"message": {"role": "assistant", "content": "Hi."}}], "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}}"#;
+        let server = FixtureServer::start(vec![response]);
+        let config = LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            api_key: None,
+        };
+
+        let (reply, usage) = complete_messages_with_usage(&config, &[Turn::user("hi")]).unwrap();
+
+        assert_eq!(reply, "Hi.");
+        let usage = usage.expect("usage should be present");
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn complete_messages_with_usage_is_none_when_the_endpoint_omits_it() {
+        let response = r#"{"choices": [{"message": {"role": "assistant", "content": "Hi."}}]}"#;
+        let server = FixtureServer::start(vec![response]);
+        let config = LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            api_key: None,
+        };
+
+        let (_, usage) = complete_messages_with_usage(&config, &[Turn::user("hi")]).unwrap();
+
+        assert!(usage.is_none());
     }
 
     #[test]

@@ -1,11 +1,18 @@
-//! Issue #65 (live-server-dependent dashboard features) also tracks a
-//! read-only Settings view (`SettingsSection`, over `GET
-//! /api/settings`): repo root, indexed file counts, and whether git
-//! history/wiki pages/an LLM are available. No edit form -- this port
-//! has no persisted config to write to yet, so it's a status view, not
-//! a settings *editor*. Cost tracking, #65's one remaining bundled
-//! feature, is not done here; it needs its own design pass
-//! (persistence for cost history).
+//! Issue #65 (live-server-dependent dashboard features) also tracks
+//! cost tracking, its fifth and last bundled feature: `UsageSection`
+//! polls `GET /api/usage` every 3s for running chat-call and
+//! prompt/completion/total token counts, tallied for this server
+//! process only (not a persisted history across restarts) and in
+//! tokens, not a dollar figure -- see `repowise-llm`'s own doc comment
+//! for why there's no pricing conversion. Polling (rather than a
+//! one-shot fetch) is what lets it reflect `ChatSection`'s activity
+//! without the two components sharing state directly.
+//!
+//! It also tracks a read-only Settings view (`SettingsSection`, over
+//! `GET /api/settings`): repo root, indexed file counts, and whether
+//! git history/wiki pages/an LLM are available. No edit form -- this
+//! port has no persisted config to write to yet, so it's a status
+//! view, not a settings *editor*.
 //!
 //! It also tracks a live job banner: a "Reindex" button (`JobBanner`)
 //! that triggers the server's `POST /api/reindex` and polls `GET
@@ -197,6 +204,15 @@ struct Settings {
     wiki_pages_available: bool,
     llm_configured: bool,
     llm_model: Option<String>,
+}
+
+/// Mirrors `repowise-server`'s `UsageTotalsDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct Usage {
+    chat_call_count: u64,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
 }
 
 /// Mirrors `repowise-server`'s `ReindexStatusDto` wire shape.
@@ -1213,6 +1229,54 @@ fn SettingsSection() -> impl IntoView {
     }
 }
 
+/// A cost-tracking view over `/api/usage` (#65's last remaining bundled
+/// feature): running token counts tallied across every `/api/chat`
+/// call this server process has handled, not a persisted history and
+/// not a dollar figure -- see `repowise_llm::Usage`'s own doc comment
+/// for why there's no pricing conversion. Polls every 3s (rather than a
+/// one-shot fetch like most other sections) so it keeps reflecting
+/// `ChatSection`'s activity elsewhere on the page without the two
+/// components needing to share any state directly.
+#[component]
+fn UsageSection() -> impl IntoView {
+    let usage = RwSignal::new(None::<Usage>);
+    let error = RwSignal::new(None::<String>);
+
+    spawn_local(async move {
+        loop {
+            match fetch_json::<Usage>("/api/usage").await {
+                Ok(u) => {
+                    usage.set(Some(u));
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            TimeoutFuture::new(3000).await;
+        }
+    });
+
+    view! {
+        <h2>"Usage"</h2>
+        {move || match usage.get() {
+            None => view! { <p>"Loading..."</p> }.into_any(),
+            Some(u) => view! {
+                <ul>
+                    <li>{format!("{} chat call(s)", u.chat_call_count)}</li>
+                    <li>{format!("{} prompt token(s)", u.prompt_tokens)}</li>
+                    <li>{format!("{} completion token(s)", u.completion_tokens)}</li>
+                    <li>{format!("{} total token(s)", u.total_tokens)}</li>
+                </ul>
+                <p class="empty">
+                    "Token counts for this server process only (resets on restart), \
+                     not a dollar cost -- see the README for why."
+                </p>
+            }
+            .into_any(),
+        }}
+        {move || error.get().map(|e| view! { <p class="error">{format!("Error: {e}")}</p> })}
+    }
+}
+
 /// A chat interface over `/api/chat`. Renders a plain explanatory
 /// message instead of a chat box when the server reports the LLM
 /// feature isn't configured, rather than a confusing empty/broken UI.
@@ -1478,6 +1542,7 @@ fn App() -> impl IntoView {
         <GraphSection selected=selected />
         <DeadCodeSection selected=selected />
         <ChatSection />
+        <UsageSection />
         <SettingsSection />
     }
 }

@@ -242,6 +242,17 @@ pub struct Symbol {
     /// isn't implemented for yet -- currently Rust, Python, and
     /// TypeScript/JavaScript, matching `io_in_loop`'s scope.
     pub lock_in_loop: Vec<LockInLoopRef>,
+    /// Calls recognized as inserting at index 0 of a list/vector
+    /// (`.insert(0, ...)` and language equivalents -- a small fixed
+    /// per-language pattern, heuristic, not type-aware) found inside a
+    /// loop body within the symbol: O(n) per call (shifts every
+    /// element), O(n^2) across the whole loop, versus appending and
+    /// reversing once or using a deque. Empty for symbols with no body,
+    /// and for languages this extraction isn't implemented for yet --
+    /// currently Rust and Python only (this marker's own scope, unlike
+    /// the other loop-body markers, doesn't include TypeScript/
+    /// JavaScript).
+    pub list_insert_zero_in_loop: Vec<ListInsertZeroInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -289,6 +300,17 @@ pub struct ResourceConstructionInLoopRef {
 pub struct LockInLoopRef {
     pub line: usize,
     pub callee_name: String,
+}
+
+/// A single call recognized as inserting at index 0 of a list/vector
+/// (by a small fixed per-language pattern -- heuristic, not type-aware)
+/// found inside a loop body. `line` points at the call itself, not the
+/// enclosing loop or function; `variable` is the name of the list/vector
+/// being inserted into.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListInsertZeroInLoopRef {
+    pub line: usize,
+    pub variable: String,
 }
 
 impl Symbol {

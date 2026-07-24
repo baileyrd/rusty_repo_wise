@@ -26,6 +26,7 @@ fn build_index(root: &std::path::Path) -> RepoIndex {
         string_concat_in_loop: Vec::new(),
         resource_construction_in_loop: Vec::new(),
         lock_in_loop: Vec::new(),
+        list_insert_zero_in_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,

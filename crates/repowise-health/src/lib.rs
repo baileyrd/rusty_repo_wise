@@ -15,17 +15,19 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and four of
-//! repowise's Performance-signal cluster (issue #72), all Rust/Python/
-//! TS+JS-only: I/O-shaped calls found inside a loop body (`io_in_loop`
-//! — see `repowise_core::Symbol::io_in_loop`), string concatenation
-//! accumulating inside a loop body (`string_concat_in_loop` — see
-//! `repowise_core::Symbol::string_concat_in_loop`), expensive-resource
-//! construction inside a loop body (`resource_construction_in_loop` —
-//! see `repowise_core::Symbol::resource_construction_in_loop`), and lock
-//! acquisition inside a loop body (`lock_in_loop` — see
-//! `repowise_core::Symbol::lock_in_loop`). Git-history-based markers
-//! (churn, hotspots, bug-fix history) aren't
+//! `repowise_core::Symbol::primitive_param_count`), and five of
+//! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
+//! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
+//! `repowise_core::Symbol::io_in_loop`), string concatenation
+//! accumulating inside a loop body (`string_concat_in_loop`, same scope
+//! — see `repowise_core::Symbol::string_concat_in_loop`), expensive-resource
+//! construction inside a loop body (`resource_construction_in_loop`, same
+//! scope — see `repowise_core::Symbol::resource_construction_in_loop`),
+//! lock acquisition inside a loop body (`lock_in_loop`, same scope — see
+//! `repowise_core::Symbol::lock_in_loop`), and index-0 list/vector
+//! inserts inside a loop body (`list_insert_zero_in_loop`, Rust/Python
+//! only -- see `repowise_core::Symbol::list_insert_zero_in_loop`).
+//! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
 //!
@@ -143,6 +145,11 @@ fn default_resource_construction_in_loop() -> f64 {
 fn default_lock_in_loop() -> f64 {
     0.3
 }
+// Same per-occurrence weight as the other loop-body markers (issue
+// #191): same rough severity.
+fn default_list_insert_zero_in_loop() -> f64 {
+    0.3
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -193,6 +200,8 @@ pub struct HealthWeights {
     pub resource_construction_in_loop: f64,
     #[serde(default = "default_lock_in_loop")]
     pub lock_in_loop: f64,
+    #[serde(default = "default_list_insert_zero_in_loop")]
+    pub list_insert_zero_in_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -214,6 +223,7 @@ impl Default for HealthWeights {
             string_concat_in_loop: default_string_concat_in_loop(),
             resource_construction_in_loop: default_resource_construction_in_loop(),
             lock_in_loop: default_lock_in_loop(),
+            list_insert_zero_in_loop: default_list_insert_zero_in_loop(),
         }
     }
 }
@@ -245,6 +255,7 @@ impl HealthWeights {
             FindingKind::StringConcatInLoop => self.string_concat_in_loop,
             FindingKind::ResourceConstructionInLoop => self.resource_construction_in_loop,
             FindingKind::LockInLoop => self.lock_in_loop,
+            FindingKind::ListInsertZeroInLoop => self.list_insert_zero_in_loop,
         }
     }
 }
@@ -267,6 +278,7 @@ pub enum FindingKind {
     StringConcatInLoop,
     ResourceConstructionInLoop,
     LockInLoop,
+    ListInsertZeroInLoop,
 }
 
 impl FindingKind {
@@ -288,6 +300,7 @@ impl FindingKind {
             FindingKind::StringConcatInLoop => "string-concat-in-loop",
             FindingKind::ResourceConstructionInLoop => "resource-construction-in-loop",
             FindingKind::LockInLoop => "lock-in-loop",
+            FindingKind::ListInsertZeroInLoop => "list-insert-zero-in-loop",
         }
     }
 }
@@ -529,6 +542,24 @@ fn check_function_markers(
                 "`{}` (lock acquisition) found inside a loop body -- \
                  consider acquiring it once outside the loop",
                 lock.callee_name
+            ),
+        });
+    }
+    // Already filtered to index-0 list/vector inserts found inside a
+    // loop body at extraction time (see
+    // `repowise_parser::metrics::list_inserts_zero_in_loops`); every
+    // entry here is already flagged, same as the other loop-body
+    // markers above.
+    for insert in &sym.list_insert_zero_in_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(insert.line),
+            kind: FindingKind::ListInsertZeroInLoop,
+            detail: format!(
+                "`{}.insert(0, ...)` found inside a loop body -- O(n) per call, \
+                 O(n^2) across the loop; consider appending and reversing once, or a deque",
+                insert.variable
             ),
         });
     }

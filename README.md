@@ -64,9 +64,9 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from sixteen
-  rule-based markers: long functions, high cyclomatic complexity, oversized
-  parameter lists, god classes, duplicate code, near-duplicate code
+- Score every file's health deterministically (0–10, no LLM/ML) from
+  seventeen rule-based markers: long functions, high cyclomatic complexity,
+  oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
   (LCOM4 — Rust/Python/TS+JS only, see "Health scoring" below), nested
@@ -78,21 +78,26 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and four of repowise's Performance-signal
-  cluster, all Rust/Python/TS+JS only: I/O in a loop (`io_in_loop` — a
-  known file/network/database call found inside a loop body where
-  hoisting it above the loop is usually possible), string concatenation
+  declared parameter types), and five of repowise's Performance-signal
+  cluster: I/O in a loop (`io_in_loop` — a known file/network/database
+  call found inside a loop body where hoisting it above the loop is
+  usually possible, Rust/Python/TS+JS only), string concatenation
   in a loop (`string_concat_in_loop` — `+=`/`s = s + other`/
   `.push_str(..)` accumulating onto a string variable inside a loop
   body, quadratic string-building cost since each append reallocates
-  and copies the whole string so far), expensive resource
-  construction in a loop (`resource_construction_in_loop` — a known
-  expensive-to-construct resource, e.g. an HTTP client or connection/
-  thread pool, built inside a loop body where hoisting it above the
-  loop is usually possible), and lock acquisition in a loop
-  (`lock_in_loop` — a mutex/lock acquisition (`.lock()`/`.acquire()`)
-  happening inside a loop body instead of once outside it) — except for
-  shell scripts, which are deliberately exempt from the dead-code
+  and copies the whole string so far, Rust/Python/TS+JS only), expensive
+  resource construction in a loop (`resource_construction_in_loop` — a
+  known expensive-to-construct resource, e.g. an HTTP client or
+  connection/thread pool, built inside a loop body where hoisting it
+  above the loop is usually possible, Rust/Python/TS+JS only), lock
+  acquisition in a loop (`lock_in_loop` — a mutex/lock acquisition
+  (`.lock()`/`.acquire()`) happening inside a loop body instead of once
+  outside it, Rust/Python/TS+JS only), and an index-0 list/vector insert
+  in a loop (`list_insert_zero_in_loop` — `.insert(0, ...)` inside a loop
+  body, O(n) per call and O(n²) across the loop since it shifts every
+  element, versus appending and reversing once or using a deque; Rust and
+  Python only, unlike the other four Performance-signal markers) — except
+  for shell scripts, which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
   graph can see, making the signal too unreliable to report for that
@@ -128,7 +133,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 16 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 17 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -158,7 +163,9 @@ dashboard is one static page with no per-file drill-down or live search
   I/O-callee-name table (`io_in_loop`), a per-language string-append-
   expression classifier (`string_concat_in_loop`), a per-language
   expensive-resource-constructor-name table (`resource_construction_in_loop`),
-  and a per-language lock-acquisition-callee-name table (`lock_in_loop`).
+  a per-language lock-acquisition-callee-name table (`lock_in_loop`), and
+  (Rust/Python only) an index-0-list-insert-call classifier
+  (`list_insert_zero_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -257,6 +264,7 @@ to `[0, 10]`:
 | String concat in loop (`string_concat_in_loop`) | a string-append expression accumulating inside a loop body | −0.3 |
 | Resource construction in loop (`resource_construction_in_loop`) | a known expensive-to-construct resource built inside a loop body | −0.3 |
 | Lock in loop (`lock_in_loop`) | a mutex/lock acquisition happening inside a loop body | −0.3 |
+| List insert-zero in loop (`list_insert_zero_in_loop`) | `.insert(0, ...)` on a list/vector found inside a loop body | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -272,7 +280,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the sixteen; everything else keeps its default
+# only overriding two of the seventeen; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -476,6 +484,30 @@ native mutex. `repowise-parser::metrics::locks_in_loops` reuses the same
 markers (`Symbol::lock_in_loop: Vec<LockInLoopRef>`, each entry carrying
 the call's own `line` and `callee_name`). The other 13 languages have no
 per-language table yet and so never produce any entries for this marker.
+
+**List insert-zero in loop (`list_insert_zero_in_loop`)** flags
+`.insert(0, ...)` on a list/vector found anywhere inside a loop body —
+the fifth slice of the Performance-signal cluster, reusing `io_in_loop`'s
+`is_loop` classifier, but unlike the other four Performance-signal
+markers, implemented for **Rust and Python only** (this marker's own
+scope doesn't extend to TypeScript/JavaScript). Inserting at index 0
+shifts every existing element, so it's O(n) per call and O(n²) across
+the whole loop — building a list "in reverse order" via repeated
+front-insertion is a common accidental-quadratic pattern, versus
+appending and reversing once, or using a deque. Unlike the callee-name-table
+markers above, this classifier needs to inspect the call's *arguments*
+too (the first argument must be the literal `0`), not just the callee
+name, so it's a single combined per-language classifier rather than a
+name-table `filter` step: Rust's `.insert(0, ...)` on an identifier
+receiver (covering both `Vec::insert`/`VecDeque::insert`, since this
+port has no type information to distinguish the two), and Python's
+`list.insert(0, ...)` the same way.
+`repowise-parser::metrics::list_inserts_zero_in_loops` reuses the same
+"currently inside a loop" tracking shape as the other loop-body markers
+(`Symbol::list_insert_zero_in_loop: Vec<ListInsertZeroInLoopRef>`, each
+entry carrying the call's own `line` and the receiver's `variable`
+name). The other 14 languages have no per-language classifier yet and so
+never produce any entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

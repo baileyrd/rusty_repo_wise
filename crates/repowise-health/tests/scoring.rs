@@ -5,7 +5,7 @@
 
 use repowise_core::{
     CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
-    ListInsertZeroInLoopRef, LockInLoopRef, RegexCompileInLoopRef, RepoIndex,
+    ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopWithIoRef, RegexCompileInLoopRef, RepoIndex,
     ResourceConstructionInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
@@ -47,6 +47,7 @@ fn symbol(
         list_insert_zero_in_loop: Vec::new(),
         json_parse_in_loop: Vec::new(),
         regex_compile_in_loop: Vec::new(),
+        nested_loop_with_io: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -663,6 +664,57 @@ fn flags_one_finding_per_regex_compile_in_loop_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(4)));
     assert!(lines.contains(&Some(6)));
     assert!(findings_for(&report, "clean", FindingKind::RegexCompileInLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_nested_loop_with_io_pointing_at_its_own_line() {
+    let mut nested = symbol(
+        "nested.rs",
+        "nested",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    nested.nested_loop_with_io = vec![
+        NestedLoopWithIoRef {
+            line: 4,
+            callee_name: "read_to_string".to_string(),
+        },
+        NestedLoopWithIoRef {
+            line: 6,
+            callee_name: "write_all".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "nested.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "nested.rs",
+        vec![nested, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "nested", FindingKind::NestedLoopWithIo);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::NestedLoopWithIo).is_empty());
 }
 
 #[test]

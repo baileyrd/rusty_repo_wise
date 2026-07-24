@@ -188,6 +188,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let nested_loop_with_io = body
+                        .map(|b| {
+                            metrics::ios_in_nested_loops(
+                                b,
+                                is_loop,
+                                |n| call_expression_callee(n, self.source),
+                                is_io_call,
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -217,6 +228,7 @@ impl<'a> Walker<'a> {
                         list_insert_zero_in_loop,
                         json_parse_in_loop,
                         regex_compile_in_loop,
+                        nested_loop_with_io,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -256,6 +268,7 @@ impl<'a> Walker<'a> {
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
+                        nested_loop_with_io: Vec::new(),
                     });
                 }
             }
@@ -285,6 +298,7 @@ impl<'a> Walker<'a> {
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
+                        nested_loop_with_io: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -1350,5 +1364,49 @@ mod tests {
             "Regex::new"
         );
         assert!(hoisted.regex_compile_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_io_in_a_doubly_nested_loop_but_not_a_single_loop() {
+        let rec = extract_str(
+            r#"
+            fn doubly_nested(rows: &[Vec<&str>]) {
+                for row in rows {
+                    for cell in row {
+                        std::fs::read_to_string(cell).unwrap();
+                    }
+                }
+            }
+
+            fn single_loop(cells: &[&str]) {
+                for cell in cells {
+                    std::fs::read_to_string(cell).unwrap();
+                }
+            }
+            "#,
+        );
+        let doubly_nested = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "doubly_nested")
+            .unwrap();
+        let single_loop = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "single_loop")
+            .unwrap();
+
+        // Doubly-nested triggers both the plain io_in_loop marker and the
+        // depth-2+ nested_loop_with_io marker for the same call.
+        assert_eq!(doubly_nested.io_in_loop.len(), 1);
+        assert_eq!(doubly_nested.nested_loop_with_io.len(), 1);
+        assert_eq!(
+            doubly_nested.nested_loop_with_io[0].callee_name,
+            "read_to_string"
+        );
+
+        // A single loop triggers io_in_loop only, not nested_loop_with_io.
+        assert_eq!(single_loop.io_in_loop.len(), 1);
+        assert!(single_loop.nested_loop_with_io.is_empty());
     }
 }

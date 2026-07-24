@@ -180,6 +180,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let nested_loop_with_io = body
+                        .map(|b| {
+                            metrics::ios_in_nested_loops(
+                                b,
+                                is_loop,
+                                |n| call_expression_callee(n, self.source),
+                                is_io_call,
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -204,6 +215,7 @@ impl<'a> Walker<'a> {
                         list_insert_zero_in_loop,
                         json_parse_in_loop,
                         regex_compile_in_loop,
+                        nested_loop_with_io,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -238,6 +250,7 @@ impl<'a> Walker<'a> {
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
+                        nested_loop_with_io: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -853,5 +866,29 @@ mod tests {
             "re.compile"
         );
         assert!(hoisted.regex_compile_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_io_in_a_doubly_nested_loop_but_not_a_single_loop() {
+        let rec = extract_str(
+            "def doubly_nested(rows, fh):\n    for row in rows:\n        for cell in row:\n            fh.write(cell)\n\ndef single_loop(cells, fh):\n    for cell in cells:\n        fh.write(cell)\n",
+        );
+        let doubly_nested = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "doubly_nested")
+            .unwrap();
+        let single_loop = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "single_loop")
+            .unwrap();
+
+        assert_eq!(doubly_nested.io_in_loop.len(), 1);
+        assert_eq!(doubly_nested.nested_loop_with_io.len(), 1);
+        assert_eq!(doubly_nested.nested_loop_with_io[0].callee_name, "write");
+
+        assert_eq!(single_loop.io_in_loop.len(), 1);
+        assert!(single_loop.nested_loop_with_io.is_empty());
     }
 }

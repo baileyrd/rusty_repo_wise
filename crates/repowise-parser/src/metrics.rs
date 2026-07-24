@@ -6,7 +6,8 @@
 
 use repowise_core::{
     ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
-    RegexCompileInLoopRef, ResourceConstructionInLoopRef, StringConcatInLoopRef,
+    NestedLoopWithIoRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef,
+    StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -425,6 +426,87 @@ pub fn regex_compiles_in_loops(
     )
     .into_iter()
     .map(|(line, callee_name)| RegexCompileInLoopRef { line, callee_name })
+    .collect()
+}
+
+/// Like `matches_in_loops`, but tracks a running loop-nesting *depth*
+/// instead of a single in-loop boolean, and only reports a match once
+/// depth reaches `min_depth` or deeper -- for `nested_loop_with_io`
+/// (issue #183), which needs to distinguish a call inside one loop from
+/// a call inside a loop nested inside another loop, unlike every other
+/// loop-body marker built on `matches_in_loops` above, which only cares
+/// whether a loop encloses the call at all.
+fn matches_in_nested_loops<T>(
+    body: Node,
+    min_depth: usize,
+    is_loop: impl Fn(Node) -> bool,
+    classify: impl Fn(Node) -> Option<T>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<(usize, T)> {
+    #[allow(clippy::too_many_arguments)]
+    fn walk<T>(
+        node: Node,
+        loop_depth: usize,
+        min_depth: usize,
+        is_loop: &dyn Fn(Node) -> bool,
+        classify: &dyn Fn(Node) -> Option<T>,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<(usize, T)>,
+    ) {
+        if loop_depth >= min_depth {
+            if let Some(value) = classify(node) {
+                out.push((node.start_position().row + 1, value));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            let child_depth = loop_depth + usize::from(is_loop(child));
+            walk(
+                child,
+                child_depth,
+                min_depth,
+                is_loop,
+                classify,
+                is_nested_function,
+                out,
+            );
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        body,
+        0,
+        min_depth,
+        &is_loop,
+        &classify,
+        &is_nested_function,
+        &mut out,
+    );
+    out
+}
+
+/// I/O-shaped calls (the same pattern table `calls_in_loops` uses) found
+/// at loop-nesting depth 2 or deeper -- worse than a single-loop
+/// `io_in_loop` hit, since it's potentially O(n^2) (or deeper) I/O calls.
+pub fn ios_in_nested_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    call_callee: impl Fn(Node) -> Option<String>,
+    is_io_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<NestedLoopWithIoRef> {
+    matches_in_nested_loops(
+        body,
+        2,
+        is_loop,
+        |n| call_callee(n).filter(|name| is_io_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| NestedLoopWithIoRef { line, callee_name })
     .collect()
 }
 

@@ -274,6 +274,18 @@ pub struct Symbol {
     /// Rust, Python, and TypeScript/JavaScript, matching `io_in_loop`'s
     /// scope.
     pub regex_compile_in_loop: Vec<RegexCompileInLoopRef>,
+    /// I/O-shaped calls (same small fixed per-language name table as
+    /// `io_in_loop`) found at loop-nesting depth 2 or deeper within the
+    /// symbol -- worse than a single-loop `io_in_loop` hit, since it's
+    /// potentially O(n^2) (or deeper) I/O calls rather than O(n). A call
+    /// reported here is also reported in `io_in_loop` (this is a
+    /// depth-2+ subset, not a separate detection pass), so the two
+    /// markers double-count on purpose -- the outer one measures "any
+    /// loop-body I/O", the inner one measures the specifically worse
+    /// nested case. Empty for symbols with no body, and for languages
+    /// this extraction isn't implemented for yet -- currently Rust,
+    /// Python, and TypeScript/JavaScript, matching `io_in_loop`'s scope.
+    pub nested_loop_with_io: Vec<NestedLoopWithIoRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -350,6 +362,16 @@ pub struct JsonParseInLoopRef {
 /// or function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegexCompileInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
+}
+
+/// A single I/O-shaped call (by the same small fixed per-language name
+/// table as `IoInLoopRef` -- heuristic, not type-aware) found at
+/// loop-nesting depth 2 or deeper. `line` points at the call itself, not
+/// the enclosing loops or function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NestedLoopWithIoRef {
     pub line: usize,
     pub callee_name: String,
 }

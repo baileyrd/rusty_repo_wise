@@ -30,6 +30,7 @@ fn symbol(name: &str, complexity: usize) -> Symbol {
         list_insert_zero_in_loop: Vec::new(),
         json_parse_in_loop: Vec::new(),
         regex_compile_in_loop: Vec::new(),
+        nested_loop_with_io: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,
@@ -74,6 +75,7 @@ fn default_weights_match_this_crates_original_hardcoded_penalties() {
     assert_eq!(defaults.list_insert_zero_in_loop, 0.3);
     assert_eq!(defaults.json_parse_in_loop, 0.3);
     assert_eq!(defaults.regex_compile_in_loop, 0.3);
+    assert_eq!(defaults.nested_loop_with_io, 0.6);
 }
 
 #[test]

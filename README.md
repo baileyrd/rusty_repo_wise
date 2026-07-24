@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  nineteen rule-based markers: long functions, high cyclomatic complexity,
+  twenty rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and seven of repowise's Performance-signal
+  declared parameter types), and eight of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -104,7 +104,12 @@ specifics per layer), not full feature parity:
   and regex compilation in a loop (`regex_compile_in_loop` — a known
   regex-construction call (`Regex::new`/`re.compile`/`new RegExp`) found
   inside a loop body where compiling the pattern once outside the loop is
-  usually possible, Rust/Python/TS+JS only) — except for shell scripts,
+  usually possible, Rust/Python/TS+JS only), and I/O in a nested loop
+  (`nested_loop_with_io` — an `io_in_loop` call found at loop-nesting
+  depth 2 or deeper, potentially O(n²) or worse rather than O(n), so it's
+  a depth-2+ subset of `io_in_loop` reported under both markers rather
+  than a separate detection pass, Rust/Python/TS+JS only) — except for
+  shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -141,7 +146,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 19 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 20 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -174,8 +179,10 @@ dashboard is one static page with no per-file drill-down or live search
   a per-language lock-acquisition-callee-name table (`lock_in_loop`),
   (Rust/Python only) an index-0-list-insert-call classifier
   (`list_insert_zero_in_loop`), a per-language JSON-parse-callee-name
-  table (`json_parse_in_loop`), and a per-language regex-compile-callee-name
-  table (`regex_compile_in_loop`).
+  table (`json_parse_in_loop`), a per-language regex-compile-callee-name
+  table (`regex_compile_in_loop`), and a shared loop-nesting-*depth*
+  classifier reusing the I/O-callee-name table above
+  (`nested_loop_with_io`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -277,6 +284,7 @@ to `[0, 10]`:
 | List insert-zero in loop (`list_insert_zero_in_loop`) | `.insert(0, ...)` on a list/vector found inside a loop body | −0.3 |
 | JSON parse in loop (`json_parse_in_loop`) | a known JSON-deserializing call found inside a loop body | −0.3 |
 | Regex compile in loop (`regex_compile_in_loop`) | a known regex-compilation call found inside a loop body | −0.3 |
+| Nested loop with I/O (`nested_loop_with_io`) | an `io_in_loop` call found at loop-nesting depth 2+ | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -292,7 +300,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the nineteen; everything else keeps its default
+# only overriding two of the twenty; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -576,6 +584,39 @@ the others, this is deliberately coarse and heuristic: it can't
 recognize regex compilation hidden behind a wrapper function or a type
 alias the table doesn't name. The other 13 languages have no
 per-language table yet and so never produce any entries for this marker.
+
+**Nested loop with I/O (`nested_loop_with_io`)** flags an I/O-shaped
+call found at loop-nesting depth 2 or deeper — the eighth and final
+currently-implemented slice of the Performance-signal cluster, and the
+odd one out shape-wise: every marker above only cares whether *some*
+loop encloses a call at all, while this one specifically distinguishes
+a call inside one loop from a call inside a loop nested inside another
+loop, since the latter is potentially O(n²) (or worse) I/O calls rather
+than O(n) — the same I/O call at depth 1 is already covered by
+`io_in_loop` alone, and staying at depth 1 is not itself a problem this
+marker cares about. Implemented for **Rust, Python, and
+TypeScript/JavaScript only**, reusing `io_in_loop`'s own `is_loop`
+classifier and I/O-callee-name table unchanged — no new pattern
+recognition was needed, only a different walk. That walk is a new
+`repowise-parser::metrics::matches_in_nested_loops`, structurally
+parallel to `matches_in_loops` but tracking a running loop-nesting
+*depth* (incremented on entering each loop node, never decremented)
+instead of a single in-loop boolean, and only reporting a match once
+depth reaches a caller-supplied minimum (2, here) — a shared building
+block the other seven loop-body markers don't need, since none of them
+care how many loops deep a call is, only whether it's inside one at
+all. `repowise-parser::metrics::ios_in_nested_loops` wraps that walk the
+same way `calls_in_loops` wraps the plain version
+(`Symbol::nested_loop_with_io: Vec<NestedLoopWithIoRef>`, each entry
+carrying the call's own `line` and `callee_name`). A call flagged here
+is *also* flagged in `io_in_loop` — this is deliberately a depth-2+
+subset of that marker, not an independent detection pass, so the two
+markers double-count the same call on purpose: the outer one measures
+"any loop-body I/O", the inner one measures the specifically worse
+nested case, and its default penalty (−0.6) is double the flat −0.3
+every other loop-body marker uses to reflect that added severity. The
+other 13 languages have no per-language table yet and so never produce
+any entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

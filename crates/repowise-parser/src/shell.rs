@@ -117,6 +117,7 @@ impl<'a> Walker<'a> {
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
+                        nested_loop_with_io: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

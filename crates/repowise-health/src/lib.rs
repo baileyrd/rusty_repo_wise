@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and seven of
+//! `repowise_core::Symbol::primitive_param_count`), and eight of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -31,7 +31,11 @@
 //! scope as `io_in_loop` -- see
 //! `repowise_core::Symbol::json_parse_in_loop`), and regex-compilation
 //! calls inside a loop body (`regex_compile_in_loop`, same scope as
-//! `io_in_loop` -- see `repowise_core::Symbol::regex_compile_in_loop`).
+//! `io_in_loop` -- see `repowise_core::Symbol::regex_compile_in_loop`),
+//! and I/O calls found at loop-nesting depth 2+ (`nested_loop_with_io`,
+//! same scope as `io_in_loop` -- a depth-2+ subset of it, not a separate
+//! detection pass, so a flagged call is reported under both markers --
+//! see `repowise_core::Symbol::nested_loop_with_io`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -165,6 +169,14 @@ fn default_json_parse_in_loop() -> f64 {
 fn default_regex_compile_in_loop() -> f64 {
     0.3
 }
+// Heavier than the other loop-body markers' flat 0.3 (issue #183): a
+// loop-nesting depth of 2+ makes the I/O call potentially O(n^2) (or
+// deeper), not just O(n), so it earns a heavier per-occurrence penalty
+// even though every occurrence here also already counts once toward
+// `io_in_loop`'s own penalty.
+fn default_nested_loop_with_io() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -221,6 +233,8 @@ pub struct HealthWeights {
     pub json_parse_in_loop: f64,
     #[serde(default = "default_regex_compile_in_loop")]
     pub regex_compile_in_loop: f64,
+    #[serde(default = "default_nested_loop_with_io")]
+    pub nested_loop_with_io: f64,
 }
 
 impl Default for HealthWeights {
@@ -245,6 +259,7 @@ impl Default for HealthWeights {
             list_insert_zero_in_loop: default_list_insert_zero_in_loop(),
             json_parse_in_loop: default_json_parse_in_loop(),
             regex_compile_in_loop: default_regex_compile_in_loop(),
+            nested_loop_with_io: default_nested_loop_with_io(),
         }
     }
 }
@@ -279,6 +294,7 @@ impl HealthWeights {
             FindingKind::ListInsertZeroInLoop => self.list_insert_zero_in_loop,
             FindingKind::JsonParseInLoop => self.json_parse_in_loop,
             FindingKind::RegexCompileInLoop => self.regex_compile_in_loop,
+            FindingKind::NestedLoopWithIo => self.nested_loop_with_io,
         }
     }
 }
@@ -304,6 +320,7 @@ pub enum FindingKind {
     ListInsertZeroInLoop,
     JsonParseInLoop,
     RegexCompileInLoop,
+    NestedLoopWithIo,
 }
 
 impl FindingKind {
@@ -328,6 +345,7 @@ impl FindingKind {
             FindingKind::ListInsertZeroInLoop => "list-insert-zero-in-loop",
             FindingKind::JsonParseInLoop => "json-parse-in-loop",
             FindingKind::RegexCompileInLoop => "regex-compile-in-loop",
+            FindingKind::NestedLoopWithIo => "nested-loop-with-io",
         }
     }
 }
@@ -623,6 +641,25 @@ fn check_function_markers(
                 "`{}` (regex compilation) found inside a loop body -- consider hoisting it out \
                  and reusing the compiled pattern across iterations",
                 compile.callee_name
+            ),
+        });
+    }
+    // Already filtered to I/O-shaped calls found at loop-nesting depth
+    // 2+ at extraction time (see
+    // `repowise_parser::metrics::ios_in_nested_loops`); every entry here
+    // is already flagged, same as the other loop-body markers above. A
+    // call reported here is also reported in `io_in_loop` above -- this
+    // is intentionally a depth-2+ subset of it, not a separate pass.
+    for nested_io in &sym.nested_loop_with_io {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(nested_io.line),
+            kind: FindingKind::NestedLoopWithIo,
+            detail: format!(
+                "`{}` (I/O-shaped call) found inside a loop nested inside another loop -- \
+                 potentially O(n^2) or worse; consider hoisting it out or restructuring",
+                nested_io.callee_name
             ),
         });
     }

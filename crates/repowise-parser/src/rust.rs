@@ -134,6 +134,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let resource_construction_in_loop = body
+                        .map(|b| {
+                            metrics::resource_constructions_in_loops(
+                                b,
+                                is_loop,
+                                |n| qualified_constructor_name(n, self.source),
+                                is_expensive_constructor,
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -158,6 +169,7 @@ impl<'a> Walker<'a> {
                         body_hash,
                         io_in_loop,
                         string_concat_in_loop,
+                        resource_construction_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -192,6 +204,7 @@ impl<'a> Walker<'a> {
                         body_hash: None,
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
+                        resource_construction_in_loop: Vec::new(),
                     });
                 }
             }
@@ -216,6 +229,7 @@ impl<'a> Walker<'a> {
                         body_hash: None,
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
+                        resource_construction_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -467,6 +481,47 @@ fn is_string_concat(node: Node, source: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// For a call node whose target is a fully-qualified `Type::method` path
+/// (a `scoped_identifier`, e.g. `reqwest::HttpClient::new()`), the last
+/// two path segments joined by `::` (e.g. `HttpClient::new`). Used for
+/// `resource_construction_in_loop` (issue #179) instead of
+/// `call_target_name`'s plain last-segment match, because a bare method
+/// name like `new` is far too generic on its own -- `Vec::new()`/
+/// `String::new()` are cheap and must not match. A method call on a
+/// receiver *value* (`field_expression`, e.g. `pool.get_connection()`)
+/// returns `None`: this port has no type information to know what type
+/// owns the receiver, so those are left unrecognized rather than guessed.
+fn qualified_constructor_name(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let func = node.child_by_field_name("function")?;
+    if func.kind() != "scoped_identifier" {
+        return None;
+    }
+    let method = func.child_by_field_name("name")?;
+    let path = func.child_by_field_name("path")?;
+    let type_name = last_path_segment(text(path, source));
+    Some(format!("{type_name}::{}", text(method, source)))
+}
+
+/// A small fixed table of `Type::method` constructor paths recognized as
+/// building an expensive resource (an HTTP client, a connection/thread
+/// pool) -- heuristic and coarse, like `is_io_call`: it can't recognize
+/// an expensive constructor hidden behind a type alias or a wrapper
+/// function this table doesn't name. Deliberately excludes regex
+/// construction (`Regex::new`) -- reserved for `regex_compile_in_loop`
+/// (issue #188) so the two markers don't double-flag the same call once
+/// both exist -- and excludes plain-allocation constructors
+/// (`Vec::with_capacity`, `String::new`, etc.), which the issue's own
+/// acceptance criteria names as a required non-match.
+fn is_expensive_constructor(name: &str) -> bool {
+    matches!(
+        name,
+        "HttpClient::new" | "Client::new" | "ThreadPool::new" | "ConnectionPool::new" | "Pool::new"
+    )
 }
 
 /// A parameter's declared type as source text, with a leading `&`/`&mut`/
@@ -1004,5 +1059,43 @@ mod tests {
         // The append inside the loop is flagged, but the one after the
         // loop is not -- "fine" should have exactly the in-loop one.
         assert_eq!(fine.string_concat_in_loop.len(), 1);
+    }
+
+    #[test]
+    fn flags_expensive_constructors_in_a_loop_but_not_cheap_ones() {
+        let rec = extract_str(
+            r#"
+            fn hoisted(urls: &[&str]) {
+                for _u in urls {
+                    let client = HttpClient::new();
+                    drop(client);
+                }
+            }
+
+            fn cheap_allocs(items: &[i32]) -> Vec<i32> {
+                let mut out = Vec::new();
+                for i in items {
+                    let buf = Vec::with_capacity(4);
+                    out.push(*i);
+                    drop(buf);
+                }
+                out
+            }
+            "#,
+        );
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+        let cheap_allocs = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "cheap_allocs")
+            .unwrap();
+
+        assert_eq!(hoisted.resource_construction_in_loop.len(), 1);
+        assert_eq!(
+            hoisted.resource_construction_in_loop[0].callee_name,
+            "HttpClient::new"
+        );
+        // `Vec::with_capacity`/`Vec::new` are explicitly not expensive.
+        assert!(cheap_allocs.resource_construction_in_loop.is_empty());
     }
 }

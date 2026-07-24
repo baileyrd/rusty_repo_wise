@@ -25,6 +25,7 @@ fn symbol(name: &str, complexity: usize) -> Symbol {
         complex_conditionals: Vec::new(),
         io_in_loop: Vec::new(),
         string_concat_in_loop: Vec::new(),
+        resource_construction_in_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,
@@ -64,6 +65,7 @@ fn default_weights_match_this_crates_original_hardcoded_penalties() {
     assert_eq!(defaults.primitive_obsession, 0.3);
     assert_eq!(defaults.io_in_loop, 0.3);
     assert_eq!(defaults.string_concat_in_loop, 0.3);
+    assert_eq!(defaults.resource_construction_in_loop, 0.3);
 }
 
 #[test]

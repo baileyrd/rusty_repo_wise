@@ -128,6 +128,7 @@ impl<'a> Walker<'a> {
                         body_hash: None,
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
+                        resource_construction_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -158,6 +159,7 @@ impl<'a> Walker<'a> {
                         body_hash: None,
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
+                        resource_construction_in_loop: Vec::new(),
                     });
                 }
             }
@@ -320,6 +322,17 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let resource_construction_in_loop = body
+            .map(|b| {
+                metrics::resource_constructions_in_loops(
+                    b,
+                    is_loop,
+                    |n| resource_constructor_callee(n, self.source),
+                    is_expensive_constructor,
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -338,6 +351,7 @@ impl<'a> Walker<'a> {
             body_hash,
             io_in_loop,
             string_concat_in_loop,
+            resource_construction_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -522,6 +536,34 @@ fn is_string_concat(node: Node, source: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// If `node` is a `call_expression` or `new_expression`, the callee/
+/// constructor name to match against `is_expensive_constructor` --
+/// JS/TS resources are typically constructed via `new Thing(...)`
+/// (`new_expression`, not a call), so this checks both shapes rather
+/// than reusing `call_expression_callee` (which only handles calls).
+fn resource_constructor_callee(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "call_expression" => node
+            .child_by_field_name("function")
+            .map(|f| call_target_name(f, source)),
+        "new_expression" => node
+            .child_by_field_name("constructor")
+            .map(|f| call_target_name(f, source)),
+        _ => None,
+    }
+}
+
+/// A small fixed table of constructor-shaped names recognized as building
+/// an expensive resource (an HTTP client, a connection/thread pool) for
+/// `resource_construction_in_loop` (issue #179) -- heuristic and coarse,
+/// like `is_io_call`: matching on a bare class/constructor name means it
+/// can't tell a project's own `Client` class from an unrelated one of the
+/// same name. Deliberately excludes regex construction (`new RegExp`) --
+/// reserved for `regex_compile_in_loop` (issue #188).
+fn is_expensive_constructor(name: &str) -> bool {
+    matches!(name, "ThreadPool" | "Pool" | "HttpClient" | "Client")
 }
 
 /// A parameter's declared type annotation as source text. TypeScript-only:
@@ -795,5 +837,21 @@ mod tests {
         assert_eq!(reassignment.string_concat_in_loop.len(), 1);
         assert_eq!(reassignment.string_concat_in_loop[0].variable, "s");
         assert_eq!(fine.string_concat_in_loop.len(), 1);
+    }
+
+    #[test]
+    fn flags_expensive_constructors_in_a_loop_but_not_cheap_ones() {
+        let rec = extract_js(
+            "function hoisted(urls) {\n  for (const u of urls) {\n    const client = new HttpClient();\n    client.get(u);\n  }\n}\n\nfunction cheap(items) {\n  const out = [];\n  for (const i of items) {\n    const arr = new Array();\n    out.push(arr);\n  }\n  return out;\n}\n",
+        );
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+        let cheap = rec.symbols.iter().find(|s| s.name == "cheap").unwrap();
+
+        assert_eq!(hoisted.resource_construction_in_loop.len(), 1);
+        assert_eq!(
+            hoisted.resource_construction_in_loop[0].callee_name,
+            "HttpClient"
+        );
+        assert!(cheap.resource_construction_in_loop.is_empty());
     }
 }

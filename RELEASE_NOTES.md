@@ -6,6 +6,37 @@ repo routing work through PRs).
 
 ---
 
+## PR #153 — Add Present Mode to the live dashboard
+**2026-07-24** · [#153](https://github.com/baileyrd/rusty_repo_wise/pull/153) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** the first of #65's four remaining bundled features — a
+  full-screen, keyboard-driven step-through of the dashboard's core
+  narrative sections (Overview, Code health, Hotspots, Architectural
+  decisions, Dependency graph). `ArrowRight`/`Space` advances,
+  `ArrowLeft` goes back, `Escape` exits; on-screen Prev/Next buttons
+  for mouse users.
+- Frontend-only: no new server endpoint. Each slide reuses the
+  existing section component and the same `/api/*` data it already
+  fetches.
+- **Shareable/bookmarkable via URL:** the current slide is reflected as
+  `#present/<n>` in the URL hash via `history.replaceState` (not a
+  plain hash assignment, so stepping through slides doesn't spam the
+  browser's back-button history). Loading a URL with that hash present
+  opens directly into that slide.
+- Verified end-to-end manually: entered Present Mode on a real running
+  server, confirmed the URL hash updates on `ArrowRight`/`ArrowLeft`
+  with the correct slide rendering (screenshots), confirmed `Escape`
+  clears the hash and exits, and confirmed reloading directly at
+  `#present/3` opens straight into that slide.
+- **Scope:** cost tracking (daily LLM spend, cost heatmap), Settings
+  (repo-level exclusions/generation options, global server/LLM/
+  webhook/MCP config), and the live job banner (background indexing
+  progress) remain undone — each needs its own design pass
+  (persistence, a write-capable settings API, a background-job concept
+  the server doesn't have at all yet). This PR does not close #65.
+
+---
+
 ## PR #151 — Add dashboard chat view over repowise-llm (Phase 5)
 **2026-07-24** · [#151](https://github.com/baileyrd/rusty_repo_wise/pull/151) · closes [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

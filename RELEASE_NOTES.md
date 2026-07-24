@@ -6,6 +6,44 @@ repo routing work through PRs).
 
 ---
 
+## PR #155 — Add live job banner (reindex) to the dashboard
+**2026-07-24** · [#155](https://github.com/baileyrd/rusty_repo_wise/pull/155) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** the second of #65's remaining bundled features — a live
+  job banner. A "Reindex" button (top of the dashboard, next to
+  Present) triggers `POST /api/reindex`, a new endpoint that kicks off
+  a background reindex unless one's already running; `GET
+  /api/reindex` reports the job's current status
+  (idle/running/completed/failed) for the dashboard to poll.
+- **Shared indexing implementation:** `build_index` (repo walk + parse)
+  moved out of `repowise-cli`'s private `indexing` module into
+  `repowise-parser` as a public function, so `repowise-cli`'s
+  `init`/`update` and the server's new reindex job share exactly one
+  implementation instead of risking drift between two copies.
+- **Concurrency-safe:** an `Arc<Mutex<ReindexStatusDto>>` with an
+  atomic `try_start()` guard ensures at most one reindex runs at a
+  time; a bad root path surfaces as a `Failed` status, never a 500.
+- `JobBanner`, the frontend component, polls `/api/reindex` via
+  `gloo-timers` every 500ms until the job leaves `Running` — both on
+  page load (to pick up a job already in flight from a previous visit)
+  and after triggering a new one.
+- Verified end-to-end manually: a real compiled server against a
+  scratch git repo, `curl`-driven through the idle→running→completed
+  transition, then headless Chromium (Playwright) clicking the
+  "Reindex" button and observing the banner update from
+  "Reindexing..." to "Indexed N file(s)..." (screenshot). Caught and
+  fixed a real bug in the process: `duration_ms: u128` silently failed
+  to deserialize in the WASM frontend (gloo-net's JS-number-based JSON
+  path has no `u128` support), fixed by narrowing to `u64` on both
+  sides.
+- **Scope:** cost tracking (daily LLM spend, cost heatmap) and Settings
+  (repo-level exclusions/generation options, global server/LLM/
+  webhook/MCP config) remain undone — each needs its own design pass
+  (persistence for cost history, a write-capable settings API). This
+  PR does not close #65.
+
+---
+
 ## PR #153 — Add Present Mode to the live dashboard
 **2026-07-24** · [#153](https://github.com/baileyrd/rusty_repo_wise/pull/153) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

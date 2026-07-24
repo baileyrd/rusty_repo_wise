@@ -691,7 +691,12 @@ FastAPI-backend architecture, minus the Node.js dependency.
   against that exact set, so a crafted `path` can't escape
   `.repowise/wiki/` via `..` segments); `/api/search?q=<term>` does a
   case-insensitive substring match over file paths and symbol names,
-  capped at 20 results each; `/api/graph` returns the file-level import
+  capped at 20 results each — PageRank-biased (issue #63's cheaper-than-
+  embeddings intermediate step): among equally-matching results, files
+  with more dependents (`repowise-graph`'s already-computed
+  `dependents_of`) and symbols with more callers (`call_in_degree`)
+  rank first, no new analysis or network call needed, so instant
+  search stays instant; `/api/graph` returns the file-level import
   graph (nodes + edges), truncated to the 150 most-connected files
   (`"truncated": true` when cut down) so a large repo's graph stays
   renderable; `/api/ownership?path=<rel>` returns one file's git-blame
@@ -816,11 +821,12 @@ dependency graph, chat, Present Mode, a live job banner, a read-only
 Settings view, and cost tracking — all five of #65's bundled,
 live-server-dependent features the static dashboard never had. Chat's
 retrieval is now real embeddings-based semantic search (issue #63's
-first slice) rather than keyword matching, though `/api/search` (the
-dashboard's own instant search box) is still substring-only —
-PageRank-biasing that with `repowise-graph`'s in-degree data, one of
-#63's own suggested cheaper intermediate steps, remains a follow-up.
-One honest caveat remains: cost tracking is in-memory per-process
+first slice) rather than keyword matching, and `/api/search` (the
+dashboard's own instant search box) is PageRank-biased by
+`repowise-graph`'s already-computed in-degree data (#63's second
+slice) rather than plain alphabetical — no embeddings there, since an
+API call per keystroke would make instant search not instant. One
+honest caveat remains: cost tracking is in-memory per-process
 token counts, not a persisted dollar-cost history (no per-model
 pricing table exists to convert tokens to dollars, and nothing here
 survives a server restart). This still isn't a byte-for-byte

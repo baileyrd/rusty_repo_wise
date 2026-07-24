@@ -6,6 +6,42 @@ repo routing work through PRs).
 
 ---
 
+## PR #159 — Add cost tracking (token usage) to the dashboard
+**2026-07-24** · [#159](https://github.com/baileyrd/rusty_repo_wise/pull/159) · closes [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** the fifth and last of #65's bundled features — cost
+  tracking. `GET /api/usage` returns running chat-call and
+  prompt/completion/total token counts, tallied across every
+  `/api/chat` call whose response reported OpenAI-compatible `usage`.
+- **Token counts, not a dollar cost:** `repowise-llm` has no per-model
+  pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
+  or otherwise) can route to whichever provider it's configured for.
+- **In-memory only:** tallied for this server process, reset on
+  restart — not a persisted history across sessions, unlike real
+  repowise's daily-spend/cost-heatmap view. A genuinely persisted
+  history is a follow-up if ever pursued further.
+- `repowise-llm` gained `complete_messages_with_usage` (capturing the
+  response's `usage` object) alongside the existing
+  `complete_messages`/`complete`, which are unchanged for their other
+  callers (wiki-summary generation).
+- `UsageSection`, the frontend component, polls `/api/usage` every 3s
+  rather than fetching once, so it keeps reflecting `ChatSection`'s
+  activity elsewhere on the page without the two components sharing
+  state directly.
+- Verified end-to-end manually: a real compiled server against a
+  scratch git repo, pointed at a small fixture HTTP server returning a
+  fixed OpenAI-compatible response with `usage`, `curl`-ing `/api/chat`
+  then `/api/usage` to confirm the tally, then headless Chromium
+  (Playwright) sending a chat message through the real UI and
+  confirming the Usage section's polling loop picks up the updated
+  counts (screenshot).
+- **This closes issue #65**: all five of its bundled,
+  live-server-dependent features (Present Mode, chat, live job banner,
+  read-only Settings, cost tracking) are now delivered, across PRs
+  #151, #153, #155, #157, and #159.
+
+---
+
 ## PR #157 — Add read-only Settings view to the dashboard
 **2026-07-24** · [#157](https://github.com/baileyrd/rusty_repo_wise/pull/157) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

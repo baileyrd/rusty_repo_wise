@@ -6,6 +6,36 @@ repo routing work through PRs).
 
 ---
 
+## PR #175 — Add Structural-tier language recognition
+**2026-07-24** · [#175](https://github.com/baileyrd/rusty_repo_wise/pull/175) · closes [#70](https://github.com/baileyrd/rusty_repo_wise/issues/70)
+
+- **Added:** issue #70 asked to verify whether `hotspots`/`ownership`/
+  `coupled` already work for Objective-C, R, Zig, Julia, Elm, OCaml,
+  Crystal, Nim, and D files (previously `Language::Other`), since git
+  analytics is file-path based, not symbol based. Investigation found a
+  real, partial gap: `ownership`/`coupled` already worked (both take an
+  explicit file path and read straight from `git blame`/`git log`,
+  bypassing `RepoIndex` entirely) — but `hotspots` and any other
+  `RepoIndex.files`-driven view never showed these files at all, because
+  a `Language::Other` file gets **no `FileRecord`**, just folded into a
+  bare `other_files: usize` count with no path retained anywhere.
+- These 9 languages are now recognized `Language` variants with a bare,
+  zero-symbol `FileRecord` (path/language/line count only, via a new
+  `repowise_parser::structural_only` helper) instead of falling into
+  `other_files`. Their hotspot score is always `0` (churn × 0
+  complexity, since no tree-sitter grammar exists for them) — git-history
+  signal only, matching repowise's own "Structural tier" framing.
+- `repowise overview` now reports real per-language file counts for
+  these languages instead of lumping them into "Other"; `repowise
+  hotspots` now lists them (with a `0` score); the dashboard's
+  dependency-graph view gained GitHub-linguist colors for all 9.
+- No breaking changes — purely additive (new enum variants, new
+  dispatch arms). Existing indexes still load fine; a re-`init`/`update`
+  is needed for these languages' files to start appearing.
+- **This closes #70.**
+
+---
+
 ## PR #173 — Add contracts view (producer/consumer API matching)
 **2026-07-24** · [#173](https://github.com/baileyrd/rusty_repo_wise/pull/173) · closes [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
 

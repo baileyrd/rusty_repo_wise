@@ -1,23 +1,26 @@
-//! Phase 4 of the #59/#65 live-dashboard pivot broadens every file-path
-//! drill-down (Phase 2's wiki-only links) into a file-detail panel:
-//! wiki page, git-blame ownership breakdown, and any linked
-//! architectural decisions, each independently "not available" rather
-//! than a shared error -- so every indexed file is clickable now, not
-//! just ones with a wiki page. It also adds a dead-code section
-//! (`/api/dead-code`, with a minimum-confidence filter). Phase 3 added
-//! a dependency-graph view: an SVG rendering of `/api/graph`'s
-//! file-level import graph, laid out client-side with a small
-//! force-directed simulation (no D3 or other JS graph library --
-//! keeping the whole frontend buildable with just `cargo`/`trunk`).
-//! Still not full parity with real repowise's dashboard -- the chat
-//! view, tying into #61's LLM follow-ups, is a later phase, not built
-//! here.
+//! Phase 5 of the #59/#65 live-dashboard pivot adds the last view: a
+//! chat section over `/api/chat`, an opt-in RAG-lite endpoint (see
+//! `repowise-server`'s own module doc for what "lite" means here --
+//! keyword search, not embeddings). Shows a plain explanatory message
+//! instead of a chat box when the server reports the feature isn't
+//! configured. Phase 4 broadened every file-path drill-down (Phase 2's
+//! wiki-only links) into a file-detail panel: wiki page, git-blame
+//! ownership breakdown, and any linked architectural decisions, each
+//! independently "not available" rather than a shared error -- so every
+//! indexed file is clickable now, not just ones with a wiki page. It
+//! also added a dead-code section (`/api/dead-code`, with a minimum-
+//! confidence filter). Phase 3 added a dependency-graph view: an SVG
+//! rendering of `/api/graph`'s file-level import graph, laid out
+//! client-side with a small force-directed simulation (no D3 or other
+//! JS graph library -- keeping the whole frontend buildable with just
+//! `cargo`/`trunk`).
 
 use leptos::html;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos::web_sys;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Clone, Debug)]
 struct Overview {
@@ -144,6 +147,23 @@ struct DeadCode {
     total_matching: usize,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ChatTurn {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ChatRequest {
+    history: Vec<ChatTurn>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct ChatResponse {
+    available: bool,
+    reply: Option<String>,
+}
+
 async fn fetch_json<T>(path: &str) -> Result<T, String>
 where
     T: for<'de> Deserialize<'de>,
@@ -164,6 +184,23 @@ where
         return Err(format!("server returned {}", response.status()));
     }
     response.json::<T>().await.map_err(|e| e.to_string())
+}
+
+async fn post_json<Req, Resp>(path: &str, body: &Req) -> Result<Resp, String>
+where
+    Req: Serialize + ?Sized,
+    Resp: for<'de> Deserialize<'de>,
+{
+    let response = gloo_net::http::Request::post(path)
+        .json(body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.ok() {
+        return Err(format!("server returned {}", response.status()));
+    }
+    response.json::<Resp>().await.map_err(|e| e.to_string())
 }
 
 type WikiPages = LocalResource<Result<Vec<String>, String>>;
@@ -983,6 +1020,114 @@ fn DeadCodeSection(selected: RwSignal<Option<String>>) -> impl IntoView {
     }
 }
 
+/// A chat interface over `/api/chat`. Renders a plain explanatory
+/// message instead of a chat box when the server reports the LLM
+/// feature isn't configured, rather than a confusing empty/broken UI.
+#[component]
+fn ChatSection() -> impl IntoView {
+    let history: RwSignal<Vec<ChatTurn>> = RwSignal::new(Vec::new());
+    let draft = RwSignal::new(String::new());
+    let sending = RwSignal::new(false);
+    let unavailable = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+
+    let do_send = move || {
+        let message = draft.get();
+        if message.trim().is_empty() || sending.get() {
+            return;
+        }
+        draft.set(String::new());
+        error.set(None);
+        history.update(|h| {
+            h.push(ChatTurn {
+                role: "user".to_string(),
+                content: message,
+            })
+        });
+        sending.set(true);
+        let request_history = history.get();
+        spawn_local(async move {
+            let result = post_json::<ChatRequest, ChatResponse>(
+                "/api/chat",
+                &ChatRequest {
+                    history: request_history,
+                },
+            )
+            .await;
+            match result {
+                Ok(res) if !res.available => unavailable.set(true),
+                Ok(res) => {
+                    if let Some(reply) = res.reply {
+                        history.update(|h| {
+                            h.push(ChatTurn {
+                                role: "assistant".to_string(),
+                                content: reply,
+                            })
+                        });
+                    }
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            sending.set(false);
+        });
+    };
+
+    view! {
+        <h2>"Chat"</h2>
+        {move || {
+            if unavailable.get() {
+                view! {
+                    <p class="empty">
+                        "Chat requires REPOWISE_LLM_BASE_URL (an OpenAI-compatible endpoint, \
+                         e.g. rusty_provider) to be set on the server."
+                    </p>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <div class="chat">
+                        <ul class="chat-history">
+                            {move || {
+                                history
+                                    .get()
+                                    .into_iter()
+                                    .map(|turn| view! {
+                                        <li class=format!("chat-turn chat-turn-{}", turn.role)>
+                                            <strong>{format!("{}: ", turn.role)}</strong>
+                                            {turn.content}
+                                        </li>
+                                    })
+                                    .collect::<Vec<_>>()
+                            }}
+                        </ul>
+                        {move || {
+                            error
+                                .get()
+                                .map(|e| view! { <p class="error">{format!("Error: {e}")}</p> })
+                        }}
+                        <input
+                            type="text"
+                            placeholder="Ask about this codebase..."
+                            prop:value=move || draft.get()
+                            prop:disabled=move || sending.get()
+                            on:input=move |ev| draft.set(event_target_value(&ev))
+                            on:keydown=move |ev| {
+                                if ev.key() == "Enter" {
+                                    do_send();
+                                }
+                            }
+                        />
+                        <button on:click=move |_| do_send() prop:disabled=move || sending.get()>
+                            {move || if sending.get() { "Sending..." } else { "Send" }}
+                        </button>
+                    </div>
+                }
+                .into_any()
+            }
+        }}
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let wiki_pages: WikiPages = LocalResource::new(|| fetch_json::<Vec<String>>("/api/wiki-pages"));
@@ -1000,6 +1145,7 @@ fn App() -> impl IntoView {
         <SymbolsSection selected=selected />
         <GraphSection selected=selected />
         <DeadCodeSection selected=selected />
+        <ChatSection />
     }
 }
 

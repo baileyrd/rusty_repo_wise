@@ -678,8 +678,8 @@ FastAPI-backend architecture, minus the Node.js dependency.
 
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
-  `/api/search`, `/api/graph`, plus (new) `/api/ownership` and
-  `/api/dead-code` — the same data the static dashboard's sections
+  `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`, plus
+  (new) `POST /api/chat` — the same data the static dashboard's sections
   already compute (`repowise overview`/`health`/`hotspots`/`decisions`,
   plus the full symbol list), as JSON instead of baked into one static
   HTML page. File paths are always relative to `PATH`, never absolute
@@ -702,7 +702,15 @@ FastAPI-backend architecture, minus the Node.js dependency.
   `/api/dead-code` returns confidence-tiered dead-code candidates with
   an optional `?min_confidence=low|medium|high` filter, mirroring the
   `get_dead_code` MCP tool's own shape (`total_matching` before the
-  50-candidate cap).
+  50-candidate cap). `POST /api/chat` takes `{"history": [{"role",
+  "content"}, ...]}` (the whole conversation so far) and returns
+  `{"available": bool, "reply": string | null}` — `available: false`
+  when `REPOWISE_LLM_BASE_URL` isn't set, the same opt-in convention
+  `repowise generate` (issue #61) already uses. When available, the
+  latest user message is grounded with a lightweight keyword search
+  over indexed file paths and symbol names (not real embeddings-based
+  retrieval — that's issue #63's job) before being sent to
+  `repowise-llm`.
 - **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
   renders every section the static dashboard has — overview, code
   health, hotspots, architectural decisions, and a symbols table with a
@@ -722,7 +730,11 @@ FastAPI-backend architecture, minus the Node.js dependency.
   pulled back toward center) — colored by language using GitHub's own
   per-language colors, no D3 or other JS graph library involved. A
   **dead-code section** lists `/api/dead-code`'s candidates with a
-  minimum-confidence filter, each risk factor available as a tooltip.
+  minimum-confidence filter, each risk factor available as a tooltip. A
+  **chat section** talks to `POST /api/chat`, with full conversation
+  history kept client-side and resent every turn; if the server reports
+  the LLM isn't configured, it shows a plain explanatory message instead
+  of a broken-looking chat box.
   It's deliberately **not** a member of the root Cargo workspace (its
   own `Cargo.toml` has an empty `[workspace]` table): it only ever
   targets `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev),
@@ -749,8 +761,14 @@ FastAPI-backend architecture, minus the Node.js dependency.
   gets there with a hand-rolled force-directed layout instead, so no JS
   build toolchain is needed for any part of the frontend.
 
-Still not full parity: chat (tying into the LLM-dependent-features
-follow-ups from issue #61) is a later phase, not done here.
+This closes out the dashboard-server pivot (issues #59/#65): every view
+the static dashboard had now has a live equivalent, plus drill-down,
+search, a dependency graph, and chat the static page never had. Two
+honest caveats: chat's retrieval is keyword search, not real
+embeddings-based RAG (issue #63), and this still isn't a byte-for-byte
+reproduction of real repowise's dashboard (e.g. no Cmd+K palette
+overlay, no D3-identical graph rendering) — it's parity in what the
+dashboard *does*, built a different way.
 
 ## Testing
 

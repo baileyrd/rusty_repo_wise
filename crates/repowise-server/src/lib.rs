@@ -11,13 +11,16 @@
 //! (wiki-page drill-down, matching the static dashboard's file-path
 //! links) and `/api/search` (instant search over files and symbols).
 //! Phase 3 added `/api/graph`, a file-level import dependency graph for
-//! a visual graph view. Phase 4 (this module now) adds `/api/ownership`
-//! (per-file git-blame breakdown), an optional `?file=` filter on
-//! `/api/decisions` (decisions linked to one file, for a per-file
-//! decision tracker), and `/api/dead-code` (confidence-tiered dead-code
-//! candidates) — the last non-LLM-dependent views. Still not full
-//! parity — the chat view, tying into #61's LLM follow-ups, is a later
-//! phase, not done here.
+//! a visual graph view. Phase 4 added `/api/ownership` (per-file
+//! git-blame breakdown), an optional `?file=` filter on `/api/decisions`
+//! (decisions linked to one file, for a per-file decision tracker), and
+//! `/api/dead-code` (confidence-tiered dead-code candidates). Phase 5
+//! (this module now) adds `POST /api/chat`, the last view: a chat
+//! endpoint over `repowise-llm`, grounded by a lightweight keyword
+//! search over indexed files/symbols (not real embeddings-based
+//! retrieval -- see issue #63 for that). `{"available": false}` when
+//! `REPOWISE_LLM_BASE_URL` isn't set, same opt-in convention every other
+//! LLM feature in this port uses.
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
@@ -25,7 +28,7 @@
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use repowise_core::RepoIndex;
 use serde::{Deserialize, Serialize};
@@ -47,6 +50,12 @@ fn relative(root: &Path, file: &Path) -> String {
 #[derive(Clone)]
 struct AppState {
     root: Arc<PathBuf>,
+    /// Resolved once at server startup (`LlmConfig::from_env()`), not
+    /// re-read per request -- keeps `post_chat` a pure function of its
+    /// state, and lets tests inject a fixture config directly instead of
+    /// mutating process env vars (which would race across parallel
+    /// tests).
+    llm_config: Arc<Option<repowise_llm::LlmConfig>>,
 }
 
 /// A JSON-serializable copy of `repowise_graph::Overview` — kept as a
@@ -271,6 +280,92 @@ struct DeadCodeDto {
 
 /// Matches the `get_dead_code` MCP tool's own default `limit`.
 const DEAD_CODE_LIMIT: usize = 50;
+
+#[derive(Deserialize)]
+struct ChatTurnDto {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatRequestDto {
+    /// Full conversation so far, oldest first, ending with the new user
+    /// turn -- this endpoint is otherwise stateless, so the frontend
+    /// owns history and resends it every call.
+    history: Vec<ChatTurnDto>,
+}
+
+#[derive(Serialize)]
+struct ChatResponseDto {
+    /// `false` when `REPOWISE_LLM_BASE_URL` isn't set -- the same
+    /// opt-in convention every other LLM feature in this port uses.
+    /// `reply` is `None` in that case.
+    available: bool,
+    reply: Option<String>,
+}
+
+/// How many keyword-matched files/symbols to inject as grounding
+/// context -- enough to be useful, short enough to stay a small
+/// fraction of the LLM's context window.
+const CHAT_CONTEXT_LIMIT: usize = 10;
+
+/// A lightweight, non-embeddings "RAG" pass: split the latest user
+/// message into words, substring-match them against indexed file paths
+/// and symbol names (the same technique `/api/search` uses), and hand
+/// the LLM whatever turns up. Real semantic retrieval is issue #63's
+/// job; this is deliberately simple and fully deterministic.
+fn build_chat_context(root: &Path, index: &RepoIndex, question: &str) -> String {
+    let mut context = String::from(
+        "You are a helpful assistant answering questions about a codebase. \
+         Base your answers only on the information below; if you don't have \
+         enough information to answer, say so rather than guessing.\n\n",
+    );
+    context.push_str(&format!(
+        "This repo has {} indexed file(s).\n",
+        index.files.len()
+    ));
+
+    let words: Vec<String> = question
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() > 2)
+        .collect();
+
+    let mut matches = Vec::new();
+    if !words.is_empty() {
+        for file in &index.files {
+            let rel = relative(root, &file.path);
+            let rel_lower = rel.to_lowercase();
+            if words.iter().any(|w| rel_lower.contains(w.as_str())) {
+                matches.push(format!("File: {rel}"));
+            }
+            for sym in &file.symbols {
+                let name_lower = sym.name.to_lowercase();
+                if words.iter().any(|w| name_lower.contains(w.as_str())) {
+                    matches.push(format!(
+                        "Symbol: {} ({}) in {rel}:{}",
+                        sym.name,
+                        sym.kind.label(),
+                        sym.start_line
+                    ));
+                }
+            }
+        }
+    }
+    matches.truncate(CHAT_CONTEXT_LIMIT);
+
+    if matches.is_empty() {
+        context.push_str("\nNo specific files or symbols matched keywords in the question.\n");
+    } else {
+        context.push_str(
+            "\nPossibly relevant, found via keyword search over file paths and symbol names:\n",
+        );
+        for m in &matches {
+            context.push_str(&format!("- {m}\n"));
+        }
+    }
+    context
+}
 
 struct ApiError(anyhow::Error);
 
@@ -611,6 +706,44 @@ async fn get_dead_code(
     }))
 }
 
+async fn post_chat(
+    State(state): State<AppState>,
+    Json(request): Json<ChatRequestDto>,
+) -> Result<Json<ChatResponseDto>, ApiError> {
+    let Some(config) = state.llm_config.as_ref().clone() else {
+        return Ok(Json(ChatResponseDto {
+            available: false,
+            reply: None,
+        }));
+    };
+
+    let index = RepoIndex::load(&state.root)?;
+    let question = request
+        .history
+        .iter()
+        .rev()
+        .find(|t| t.role == "user")
+        .map(|t| t.content.as_str())
+        .unwrap_or_default();
+    let context = build_chat_context(&state.root, &index, question);
+
+    let mut turns = vec![repowise_llm::Turn::system(context)];
+    turns.extend(request.history.into_iter().map(|t| repowise_llm::Turn {
+        role: t.role,
+        content: t.content,
+    }));
+
+    let reply =
+        tokio::task::spawn_blocking(move || repowise_llm::complete_messages(&config, &turns))
+            .await
+            .map_err(anyhow::Error::from)??;
+
+    Ok(Json(ChatResponseDto {
+        available: true,
+        reply: Some(reply),
+    }))
+}
+
 /// Build the axum `Router` — separated from `serve` so tests can drive
 /// requests directly against it (via `tower::ServiceExt::oneshot`)
 /// without binding a real socket. `static_dir`, if given, serves the
@@ -619,7 +752,12 @@ async fn get_dead_code(
 pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
     let state = AppState {
         root: Arc::new(root),
+        llm_config: Arc::new(repowise_llm::LlmConfig::from_env()),
     };
+    build_router(state, static_dir)
+}
+
+fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let router = Router::new()
         .route("/api/overview", get(get_overview))
         .route("/api/health", get(get_health))
@@ -632,6 +770,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
         .route("/api/graph", get(get_graph))
         .route("/api/ownership", get(get_ownership))
         .route("/api/dead-code", get(get_dead_code))
+        .route("/api/chat", post(post_chat))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -1193,5 +1332,169 @@ mod tests {
         let (status, _json) = get(root, "/api/dead-code?min_confidence=nonsense").await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn build_chat_context_includes_keyword_matched_symbols() {
+        let root = PathBuf::from("/repo");
+        let file = root.join("busy.rs");
+        let index = RepoIndex {
+            root: root.clone(),
+            files: vec![repowise_core::FileRecord {
+                path: file.clone(),
+                language: repowise_core::Language::Rust,
+                lines: 1,
+                symbols: vec![repowise_core::Symbol {
+                    id: "busy.rs::busy::1".to_string(),
+                    name: "busy".to_string(),
+                    kind: repowise_core::SymbolKind::Function,
+                    file: file.clone(),
+                    start_line: 1,
+                    end_line: 1,
+                    parent: None,
+                    complexity: 1,
+                    max_nesting_depth: 0,
+                    bumpy_road_bumps: 0,
+                    complex_conditionals: Vec::new(),
+                    param_count: 0,
+                    primitive_param_count: 0,
+                    body_hash: None,
+                }],
+                imports: vec![],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+
+        let context = build_chat_context(&root, &index, "What does busy do?");
+
+        assert!(context.contains("Symbol: busy (function) in busy.rs:1"));
+    }
+
+    #[test]
+    fn build_chat_context_notes_no_matches_for_an_unrelated_question() {
+        let root = PathBuf::from("/repo");
+        let index = RepoIndex {
+            root: root.clone(),
+            files: vec![],
+            other_files: 0,
+        };
+
+        let context = build_chat_context(&root, &index, "hello there");
+
+        assert!(context.contains("No specific files or symbols matched"));
+    }
+
+    /// Same hand-rolled fixture-server approach `repowise-llm`'s own
+    /// tests use: a real HTTP round trip with no mocking crate.
+    struct ChatFixtureServer {
+        addr: std::net::SocketAddr,
+    }
+
+    impl ChatFixtureServer {
+        fn start(response_body: &'static str) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+            ChatFixtureServer { addr }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+    }
+
+    fn app_with_llm_config(root: PathBuf, llm_config: Option<repowise_llm::LlmConfig>) -> Router {
+        let state = AppState {
+            root: Arc::new(root),
+            llm_config: Arc::new(llm_config),
+        };
+        build_router(state, None)
+    }
+
+    async fn post_json(
+        router: Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
+            })
+        };
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn post_chat_reports_unavailable_without_llm_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app_with_llm_config(root, None);
+        let (status, json) = post_json(
+            router,
+            "/api/chat",
+            serde_json::json!({"history": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["reply"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn post_chat_returns_a_reply_when_llm_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let response_body = r#"{"choices": [{"message": {"role": "assistant", "content": "busy() lives in busy.rs."}}]}"#;
+        let server = ChatFixtureServer::start(response_body);
+        let config = repowise_llm::LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            api_key: None,
+        };
+
+        let router = app_with_llm_config(root, Some(config));
+        let (status, json) = post_json(
+            router,
+            "/api/chat",
+            serde_json::json!({"history": [{"role": "user", "content": "What does busy do?"}]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        assert_eq!(json["reply"], "busy() lives in busy.rs.");
     }
 }

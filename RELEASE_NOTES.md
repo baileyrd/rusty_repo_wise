@@ -6,6 +6,33 @@ repo routing work through PRs).
 
 ---
 
+## PR #163 — PageRank-bias /api/search ranking
+**2026-07-24** · [#163](https://github.com/baileyrd/rusty_repo_wise/pull/163) · closes [#63](https://github.com/baileyrd/rusty_repo_wise/issues/63)
+
+- **Added:** issue #63's second and final slice — `/api/search` (the
+  dashboard's instant search box) now ranks substring matches by
+  `repowise-graph`'s already-computed in-degree data instead of plain
+  alphabetical order: files with more dependents (`dependents_of`) and
+  symbols with more callers (`call_in_degree`) rank first among
+  equally-matching results.
+- **Deliberately not embeddings:** an API call per keystroke would make
+  instant search not instant, so this is the "cheaper intermediate
+  step" #63's own open questions suggested for this endpoint
+  specifically — no new analysis, no network call, just re-ranking
+  what the graph already knows.
+- Verified end-to-end manually: a real compiled server against a
+  scratch Cargo-shaped repo (`src/main.rs` with `mod b; mod c;`), where
+  `src/b.rs`/`src/c.rs` (each with one dependent) correctly rank ahead
+  of `src/main.rs` (zero dependents) despite `main.rs` sorting first
+  alphabetically.
+- **This closes issue #63.** Together with PR #161 (embeddings-based
+  chat retrieval), both of #63's two open-questions paths are now
+  addressed: real semantic retrieval where a chat request already
+  tolerates one network round trip, and a cheaper graph-based bias
+  where it doesn't.
+
+---
+
 ## PR #161 — Add embeddings-based chat retrieval
 **2026-07-24** · [#161](https://github.com/baileyrd/rusty_repo_wise/pull/161) · part of [#63](https://github.com/baileyrd/rusty_repo_wise/issues/63)
 

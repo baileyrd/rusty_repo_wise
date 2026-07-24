@@ -10,10 +10,14 @@
 //! `/api/symbols`. Phase 2 added `/api/wiki-pages` and `/api/wiki`
 //! (wiki-page drill-down, matching the static dashboard's file-path
 //! links) and `/api/search` (instant search over files and symbols).
-//! Phase 3 (this module now) adds `/api/graph`, a file-level import
-//! dependency graph for a visual graph view — the last major static-
-//! dashboard-parity piece. Still not full parity — the chat/LLM views
-//! are a later phase, not done here.
+//! Phase 3 added `/api/graph`, a file-level import dependency graph for
+//! a visual graph view. Phase 4 (this module now) adds `/api/ownership`
+//! (per-file git-blame breakdown), an optional `?file=` filter on
+//! `/api/decisions` (decisions linked to one file, for a per-file
+//! decision tracker), and `/api/dead-code` (confidence-tiered dead-code
+//! candidates) — the last non-LLM-dependent views. Still not full
+//! parity — the chat view, tying into #61's LLM follow-ups, is a later
+//! phase, not done here.
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
@@ -219,6 +223,55 @@ struct GraphDto {
 /// which is also the most useful part of the graph to look at.
 const GRAPH_NODE_LIMIT: usize = 150;
 
+#[derive(Deserialize)]
+struct OwnershipQuery {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct OwnershipEntryDto {
+    author: String,
+    lines: usize,
+    percentage: f64,
+}
+
+/// `available: false` covers both "not a git repo" and "path doesn't
+/// match an indexed file" -- `git blame` failures degrade gracefully
+/// the same way `/api/hotspots` does, rather than a 500.
+#[derive(Serialize)]
+struct OwnershipDto {
+    available: bool,
+    owners: Vec<OwnershipEntryDto>,
+}
+
+#[derive(Deserialize)]
+struct DeadCodeQuery {
+    #[serde(default)]
+    min_confidence: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DeadCodeCandidateDto {
+    file: String,
+    symbol: String,
+    line: usize,
+    confidence: String,
+    risk_factors: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DeadCodeDto {
+    candidates: Vec<DeadCodeCandidateDto>,
+    /// How many candidates matched `min_confidence` before truncation to
+    /// `DEAD_CODE_LIMIT` -- mirrors the `get_dead_code` MCP tool's own
+    /// `total_matching` field, for the same "don't silently truncate"
+    /// reason.
+    total_matching: usize,
+}
+
+/// Matches the `get_dead_code` MCP tool's own default `limit`.
+const DEAD_CODE_LIMIT: usize = 50;
+
 struct ApiError(anyhow::Error);
 
 impl IntoResponse for ApiError {
@@ -304,12 +357,33 @@ async fn get_hotspots(State(state): State<AppState>) -> Result<Json<HotspotsDto>
     Ok(Json(dto))
 }
 
-async fn get_decisions(State(state): State<AppState>) -> Result<Json<Vec<DecisionDto>>, ApiError> {
+#[derive(Deserialize)]
+struct DecisionsQuery {
+    /// Optional relative file path -- when given, only decisions linked
+    /// to that file are returned. Powers the per-file decision-tracker
+    /// panel; omitted entirely, this endpoint behaves exactly as it did
+    /// before (every mined decision), which the repo-wide "Architectural
+    /// decisions" section still relies on.
+    #[serde(default)]
+    file: Option<String>,
+}
+
+async fn get_decisions(
+    State(state): State<AppState>,
+    Query(query): Query<DecisionsQuery>,
+) -> Result<Json<Vec<DecisionDto>>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let decisions = repowise_adr::mine(&index).unwrap_or_default();
     Ok(Json(
         decisions
             .into_iter()
+            .filter(|d| match &query.file {
+                None => true,
+                Some(rel) => d
+                    .linked_files
+                    .iter()
+                    .any(|f| relative(&state.root, f) == *rel),
+            })
             .map(|d| DecisionDto {
                 id: d.id,
                 title: d.title,
@@ -455,6 +529,88 @@ async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiE
     }))
 }
 
+/// `path` is matched against the indexed-files set (not joined onto
+/// `root` directly) before ever reaching `git blame`, the same
+/// path-traversal-safe convention `/api/wiki` uses.
+async fn get_ownership(
+    State(state): State<AppState>,
+    Query(query): Query<OwnershipQuery>,
+) -> Result<Json<OwnershipDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let Some(file) = index
+        .files
+        .iter()
+        .find(|f| relative(&state.root, &f.path) == query.path)
+    else {
+        return Ok(Json(OwnershipDto {
+            available: false,
+            owners: Vec::new(),
+        }));
+    };
+
+    let dto = match repowise_git::ownership_of(&state.root, &file.path) {
+        Ok(owners) => OwnershipDto {
+            available: true,
+            owners: owners
+                .into_iter()
+                .map(|o| OwnershipEntryDto {
+                    author: o.author,
+                    lines: o.lines,
+                    percentage: o.percentage,
+                })
+                .collect(),
+        },
+        Err(_) => OwnershipDto {
+            available: false,
+            owners: Vec::new(),
+        },
+    };
+    Ok(Json(dto))
+}
+
+async fn get_dead_code(
+    State(state): State<AppState>,
+    Query(query): Query<DeadCodeQuery>,
+) -> Result<Json<DeadCodeDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let graph = repowise_graph::RepoGraph::build(&index);
+    let candidates = repowise_health::find_dead_code(&index, &graph);
+
+    let threshold = match query.min_confidence.as_deref() {
+        None => repowise_health::DeadCodeConfidence::Low,
+        Some(s) if s.eq_ignore_ascii_case("low") => repowise_health::DeadCodeConfidence::Low,
+        Some(s) if s.eq_ignore_ascii_case("medium") => repowise_health::DeadCodeConfidence::Medium,
+        Some(s) if s.eq_ignore_ascii_case("high") => repowise_health::DeadCodeConfidence::High,
+        Some(other) => {
+            return Err(
+                anyhow::anyhow!("min_confidence must be low/medium/high, got {other:?}").into(),
+            );
+        }
+    };
+
+    let matching: Vec<_> = candidates
+        .into_iter()
+        .filter(|c| c.confidence >= threshold)
+        .collect();
+    let total_matching = matching.len();
+    let candidates = matching
+        .into_iter()
+        .take(DEAD_CODE_LIMIT)
+        .map(|c| DeadCodeCandidateDto {
+            file: relative(&state.root, &c.file),
+            symbol: c.symbol,
+            line: c.line,
+            confidence: c.confidence.label().to_string(),
+            risk_factors: c.risk_factors,
+        })
+        .collect();
+
+    Ok(Json(DeadCodeDto {
+        candidates,
+        total_matching,
+    }))
+}
+
 /// Build the axum `Router` — separated from `serve` so tests can drive
 /// requests directly against it (via `tower::ServiceExt::oneshot`)
 /// without binding a real socket. `static_dir`, if given, serves the
@@ -474,6 +630,8 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
         .route("/api/wiki", get(get_wiki))
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
+        .route("/api/ownership", get(get_ownership))
+        .route("/api/dead-code", get(get_dead_code))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -863,5 +1021,172 @@ mod tests {
         assert_eq!(json["edges"], serde_json::json!([]));
         assert_eq!(json["nodes"][0]["id"], "busy.rs");
         assert_eq!(json["nodes"][0]["language"], "Rust");
+    }
+
+    /// A repo with one file containing one commented, uncommented-name
+    /// symbol -- a `// This is a decision: ...` comment immediately
+    /// above it is enough for `repowise_adr::mine`'s code-comment source
+    /// to produce a `DecisionRecord` linked to that exact file.
+    fn index_with_a_decision_comment(root: &Path) -> RepoIndex {
+        let file = root.join("busy.rs");
+        std::fs::write(
+            &file,
+            "// This is a decision: chose recursion for simplicity.\npub fn busy() {}\n",
+        )
+        .unwrap();
+        let symbol = repowise_core::Symbol {
+            id: "busy.rs::busy::2".to_string(),
+            name: "busy".to_string(),
+            kind: repowise_core::SymbolKind::Function,
+            file: file.clone(),
+            start_line: 2,
+            end_line: 2,
+            parent: None,
+            complexity: 1,
+            max_nesting_depth: 0,
+            bumpy_road_bumps: 0,
+            complex_conditionals: Vec::new(),
+            param_count: 0,
+            primitive_param_count: 0,
+            body_hash: None,
+        };
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![repowise_core::FileRecord {
+                path: file,
+                language: repowise_core::Language::Rust,
+                lines: 2,
+                symbols: vec![symbol],
+                imports: vec![],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    fn git_commit_all(root: &Path, message: &str) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["add", "-A"]);
+        // `--author` overrides this shell's own GIT_AUTHOR_* env vars
+        // (which otherwise take precedence over repo-local config),
+        // giving a deterministic author name for ownership assertions.
+        run(&[
+            "commit",
+            "-q",
+            "-m",
+            message,
+            "--author=Test <test@example.com>",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn get_decisions_filters_by_file_query_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_a_decision_comment(&root);
+
+        let (status, json) = get(root.clone(), "/api/decisions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.as_array().unwrap().len(), 1);
+
+        let (status, json) = get(root.clone(), "/api/decisions?file=busy.rs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.as_array().unwrap().len(), 1);
+
+        let (status, json) = get(root, "/api/decisions?file=other.rs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_ownership_returns_owner_breakdown_for_an_indexed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        git_commit_all(&root, "add busy.rs");
+
+        let (status, json) = get(root, "/api/ownership?path=busy.rs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        assert_eq!(json["owners"][0]["author"], "Test");
+        assert!(json["owners"][0]["percentage"].as_f64().unwrap() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn get_ownership_is_unavailable_without_git_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/ownership?path=busy.rs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["owners"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_ownership_is_unavailable_for_an_unindexed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        git_commit_all(&root, "add busy.rs");
+
+        let (status, json) = get(root, "/api/ownership?path=nope.rs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+    }
+
+    #[tokio::test]
+    async fn get_dead_code_returns_candidates_for_an_uncalled_function() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/dead-code").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["candidates"][0]["symbol"], "busy");
+        assert_eq!(json["total_matching"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_dead_code_filters_by_min_confidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/dead-code?min_confidence=high").await;
+
+        assert_eq!(status, StatusCode::OK);
+        // "busy" is a unique name and no unresolved import's stem
+        // matches its file stem, so it's High confidence -- still
+        // included at the high-only threshold.
+        assert_eq!(json["total_matching"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_dead_code_errors_on_invalid_min_confidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, _json) = get(root, "/api/dead-code?min_confidence=nonsense").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

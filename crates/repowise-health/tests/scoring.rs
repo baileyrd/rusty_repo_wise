@@ -4,7 +4,7 @@
 //! resolution, which isn't relevant here and would otherwise touch disk.
 
 use repowise_core::{
-    CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, Language, RepoIndex,
+    CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, Language, LockInLoopRef, RepoIndex,
     ResourceConstructionInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
@@ -42,6 +42,7 @@ fn symbol(
         io_in_loop: Vec::new(),
         string_concat_in_loop: Vec::new(),
         resource_construction_in_loop: Vec::new(),
+        lock_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -454,6 +455,57 @@ fn flags_one_finding_per_resource_construction_in_loop_pointing_at_its_own_line(
     assert!(lines.contains(&Some(4)));
     assert!(lines.contains(&Some(6)));
     assert!(findings_for(&report, "clean", FindingKind::ResourceConstructionInLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_lock_in_loop_pointing_at_its_own_line() {
+    let mut looped = symbol(
+        "lock.rs",
+        "looped",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    looped.lock_in_loop = vec![
+        LockInLoopRef {
+            line: 4,
+            callee_name: "lock".to_string(),
+        },
+        LockInLoopRef {
+            line: 6,
+            callee_name: "try_lock".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "lock.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "lock.rs",
+        vec![looped, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "looped", FindingKind::LockInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::LockInLoop).is_empty());
 }
 
 #[test]

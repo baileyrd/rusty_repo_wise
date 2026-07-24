@@ -64,7 +64,7 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from fifteen
+- Score every file's health deterministically (0–10, no LLM/ML) from sixteen
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
@@ -78,22 +78,25 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and three of repowise's Performance-signal
+  declared parameter types), and four of repowise's Performance-signal
   cluster, all Rust/Python/TS+JS only: I/O in a loop (`io_in_loop` — a
   known file/network/database call found inside a loop body where
   hoisting it above the loop is usually possible), string concatenation
   in a loop (`string_concat_in_loop` — `+=`/`s = s + other`/
   `.push_str(..)` accumulating onto a string variable inside a loop
   body, quadratic string-building cost since each append reallocates
-  and copies the whole string so far), and expensive resource
+  and copies the whole string so far), expensive resource
   construction in a loop (`resource_construction_in_loop` — a known
   expensive-to-construct resource, e.g. an HTTP client or connection/
   thread pool, built inside a loop body where hoisting it above the
-  loop is usually possible) — except for shell scripts, which are
-  deliberately exempt from the dead-code marker: a shell function is
-  routinely invoked only from the command line, another script, or a
-  cron job, none of which this port's call graph can see, making the
-  signal too unreliable to report for that language.
+  loop is usually possible), and lock acquisition in a loop
+  (`lock_in_loop` — a mutex/lock acquisition (`.lock()`/`.acquire()`)
+  happening inside a loop body instead of once outside it) — except for
+  shell scripts, which are deliberately exempt from the dead-code
+  marker: a shell function is routinely invoked only from the command
+  line, another script, or a cron job, none of which this port's call
+  graph can see, making the signal too unreliable to report for that
+  language.
 - Derive git-history analytics — churn, hotspot score (churn × complexity),
   bug-fix commit frequency, co-change coupling, and per-author line
   ownership — by shelling out to `git log`/`git blame`, joined against the
@@ -125,7 +128,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 15 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 16 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -153,8 +156,9 @@ dashboard is one static page with no per-file drill-down or live search
   extraction for Rust/TypeScript (feeds `primitive_obsession`), and a
   shared loop-classifier for Rust/Python/TS+JS feeding a per-language
   I/O-callee-name table (`io_in_loop`), a per-language string-append-
-  expression classifier (`string_concat_in_loop`), and a per-language
-  expensive-resource-constructor-name table (`resource_construction_in_loop`).
+  expression classifier (`string_concat_in_loop`), a per-language
+  expensive-resource-constructor-name table (`resource_construction_in_loop`),
+  and a per-language lock-acquisition-callee-name table (`lock_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -252,6 +256,7 @@ to `[0, 10]`:
 | I/O in loop (`io_in_loop`) | a known I/O-shaped call found inside a loop body | −0.3 |
 | String concat in loop (`string_concat_in_loop`) | a string-append expression accumulating inside a loop body | −0.3 |
 | Resource construction in loop (`resource_construction_in_loop`) | a known expensive-to-construct resource built inside a loop body | −0.3 |
+| Lock in loop (`lock_in_loop`) | a mutex/lock acquisition happening inside a loop body | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -267,7 +272,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the fifteen; everything else keeps its default
+# only overriding two of the sixteen; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -448,6 +453,29 @@ coarse and heuristic: it can't recognize an expensive constructor hidden
 behind a type alias or a wrapper function the table doesn't name. The
 other 13 languages have no per-language table yet and so never produce
 any entries for this marker.
+
+**Lock in loop (`lock_in_loop`)** flags a mutex/lock acquisition call
+found anywhere inside a loop body — the fourth slice of the
+Performance-signal cluster, reusing `io_in_loop`'s `is_loop` classifier
+and, like it, implemented for **Rust, Python, and TypeScript/JavaScript
+only**. Repeated per-iteration lock/unlock churn is usually avoidable by
+acquiring the lock once outside the loop instead. A small fixed table of
+lock-acquisition method names per language is matched against each call
+node's callee name: Rust's `Mutex::lock`/`try_lock` (deliberately
+excluding `RwLock::read`/`write`, since those bare method names are far
+too generic on their own — the `Read`/`Write` trait methods, plain
+field getters/setters, etc. share the same names, and this port has no
+type information to know a given receiver is actually an `RwLock`);
+Python's `threading.Lock`/`RLock`'s `.acquire()` (the `with lock:` shape
+isn't recognized — distinguishing a lock context manager from any other
+`with` statement would need type information this port doesn't have);
+and the same `.acquire()` shape for TypeScript/JavaScript, mirroring
+common userland lock libraries (e.g. `async-mutex`) since JS has no
+native mutex. `repowise-parser::metrics::locks_in_loops` reuses the same
+"currently inside a loop" tracking shape as the other three loop-body
+markers (`Symbol::lock_in_loop: Vec<LockInLoopRef>`, each entry carrying
+the call's own `line` and `callee_name`). The other 13 languages have no
+per-language table yet and so never produce any entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

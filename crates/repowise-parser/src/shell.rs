@@ -113,6 +113,7 @@ impl<'a> Walker<'a> {
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
+                        lock_in_loop: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

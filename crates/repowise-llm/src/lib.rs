@@ -29,6 +29,17 @@
 //! counts only, not a dollar cost: this crate has no per-model pricing
 //! table, since `rusty_provider` (and any other OpenAI-compatible
 //! endpoint) can route to whichever provider it's configured for.
+//!
+//! [`embed`] is issue #63's real semantic retrieval: an OpenAI-
+//! compatible `POST {base_url}/v1/embeddings` call, plus
+//! [`cosine_similarity`] as the pure-function ranking step --
+//! `repowise-server`'s chat view embeds the question and each indexed
+//! file's symbol list, then ranks by similarity, instead of the
+//! keyword-substring grounding it used before. No vector index or
+//! persistence: every chat call re-embeds the whole corpus in one
+//! batched request, an honest cost/latency tradeoff for a first slice
+//! (see `repowise-server`'s own module doc for the fallback behavior
+//! when an endpoint doesn't support embeddings at all).
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -42,6 +53,10 @@ use std::path::PathBuf;
 pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
+    /// Model/route alias for [`embed`] -- a separate setting from
+    /// `model` since embedding and chat models are never the same
+    /// model in practice.
+    pub embedding_model: String,
     pub api_key: Option<String>,
 }
 
@@ -50,8 +65,10 @@ impl LlmConfig {
     /// switch for every LLM feature in this crate. `REPOWISE_LLM_MODEL`
     /// defaults to `"smart"` (a plausible `rusty_provider` route alias);
     /// point it at a direct `"provider/model"` string or your own alias
-    /// for any other OpenAI-compatible endpoint. `REPOWISE_LLM_API_KEY`
-    /// is optional — omit it for an endpoint that doesn't require one.
+    /// for any other OpenAI-compatible endpoint. `REPOWISE_EMBEDDING_MODEL`
+    /// defaults to `"embed"`, the same "plausible alias" convention.
+    /// `REPOWISE_LLM_API_KEY` is optional — omit it for an endpoint that
+    /// doesn't require one.
     pub fn from_env() -> Option<Self> {
         let base_url = std::env::var("REPOWISE_LLM_BASE_URL")
             .ok()
@@ -60,12 +77,17 @@ impl LlmConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "smart".to_string());
+        let embedding_model = std::env::var("REPOWISE_EMBEDDING_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "embed".to_string());
         let api_key = std::env::var("REPOWISE_LLM_API_KEY")
             .ok()
             .filter(|s| !s.is_empty());
         Some(LlmConfig {
             base_url,
             model,
+            embedding_model,
             api_key,
         })
     }
@@ -177,7 +199,9 @@ pub fn complete_messages_with_usage(
         model: &config.model,
         messages: &messages,
     };
-    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    let mut req = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .set("Connection", "close");
     if let Some(key) = &config.api_key {
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
@@ -206,6 +230,63 @@ pub fn complete_messages(config: &LlmConfig, turns: &[Turn]) -> anyhow::Result<S
 /// the chat view needed. Thin wrapper over [`complete_messages`].
 pub fn complete(config: &LlmConfig, system: &str, user: &str) -> anyhow::Result<String> {
     complete_messages(config, &[Turn::system(system), Turn::user(user)])
+}
+
+#[derive(Serialize)]
+struct EmbeddingRequest<'a> {
+    model: &'a str,
+    input: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct EmbeddingResponse {
+    data: Vec<EmbeddingDatum>,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingDatum {
+    embedding: Vec<f32>,
+}
+
+/// One OpenAI-compatible embeddings round trip
+/// (`POST {base_url}/v1/embeddings`), batching every string in `inputs`
+/// into a single request -- the response preserves `inputs`' order, one
+/// embedding vector per input. Empty `inputs` short-circuits to an
+/// empty result without a network call.
+pub fn embed(config: &LlmConfig, inputs: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!("{}/v1/embeddings", config.base_url.trim_end_matches('/'));
+    let body = EmbeddingRequest {
+        model: &config.embedding_model,
+        input: inputs,
+    };
+    let mut req = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .set("Connection", "close");
+    if let Some(key) = &config.api_key {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    let response: EmbeddingResponse = req.send_json(serde_json::to_value(&body)?)?.into_json()?;
+    Ok(response.data.into_iter().map(|d| d.embedding).collect())
+}
+
+/// Cosine similarity between two embedding vectors, in `[-1.0, 1.0]`
+/// (`0.0` for a mismatched length or a zero vector, rather than a NaN
+/// or a panic) -- the ranking step for embeddings-based retrieval.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a * norm_b)
+    }
 }
 
 const SUMMARY_SYSTEM_PROMPT: &str = "You are writing a short summary for a code wiki page. \
@@ -350,6 +431,7 @@ mod tests {
         let config = LlmConfig {
             base_url: server.base_url(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
 
@@ -364,6 +446,7 @@ mod tests {
         let config = LlmConfig {
             base_url: server.base_url(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
 
@@ -387,6 +470,7 @@ mod tests {
         let config = LlmConfig {
             base_url: server.base_url(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
 
@@ -406,12 +490,64 @@ mod tests {
         let config = LlmConfig {
             base_url: server.base_url(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
 
         let (_, usage) = complete_messages_with_usage(&config, &[Turn::user("hi")]).unwrap();
 
         assert!(usage.is_none());
+    }
+
+    #[test]
+    fn embed_parses_a_batched_embeddings_response_in_order() {
+        let response = r#"{"data": [{"embedding": [1.0, 0.0]}, {"embedding": [0.0, 1.0]}]}"#;
+        let server = FixtureServer::start(vec![response]);
+        let config = LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
+            api_key: None,
+        };
+
+        let embeddings = embed(&config, &["a".to_string(), "b".to_string()]).unwrap();
+
+        assert_eq!(embeddings, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+    }
+
+    #[test]
+    fn embed_of_empty_input_short_circuits_without_a_network_call() {
+        let config = LlmConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
+            api_key: None,
+        };
+
+        let embeddings = embed(&config, &[]).unwrap();
+
+        assert!(embeddings.is_empty());
+    }
+
+    #[test]
+    fn cosine_similarity_of_identical_vectors_is_one() {
+        assert!((cosine_similarity(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_of_orthogonal_vectors_is_zero() {
+        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_of_opposite_vectors_is_negative_one() {
+        assert!((cosine_similarity(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_is_zero_for_a_zero_vector_or_mismatched_lengths() {
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0, 0.0]), 0.0);
     }
 
     #[test]
@@ -478,6 +614,7 @@ mod tests {
         let config = LlmConfig {
             base_url: server.base_url(),
             model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
             api_key: None,
         };
 

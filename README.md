@@ -707,10 +707,19 @@ FastAPI-backend architecture, minus the Node.js dependency.
   `{"available": bool, "reply": string | null}` — `available: false`
   when `REPOWISE_LLM_BASE_URL` isn't set, the same opt-in convention
   `repowise generate` (issue #61) already uses. When available, the
-  latest user message is grounded with a lightweight keyword search
-  over indexed file paths and symbol names (not real embeddings-based
-  retrieval — that's issue #63's job) before being sent to
-  `repowise-llm`. `GET /api/reindex` / `POST /api/reindex` (issue #65's
+  latest user message is grounded with real embeddings-based retrieval
+  (issue #63): `repowise-llm::embed` calls the same endpoint's
+  OpenAI-compatible `POST /v1/embeddings` to embed the question and
+  every indexed file's symbol list in one batched request, ranks files
+  by cosine similarity, and includes the top 10 in the system prompt.
+  No vector index or persistence — every chat call re-embeds the whole
+  corpus, an honest cost/latency tradeoff for a first slice. Falls back
+  to the previous lightweight keyword search over file paths and symbol
+  names if the embeddings call itself fails (e.g. an endpoint that
+  doesn't implement `/v1/embeddings` at all), so a chat reply is never
+  blocked by that. `REPOWISE_EMBEDDING_MODEL` selects the embedding
+  model/route alias (default `"embed"`), separate from
+  `REPOWISE_LLM_MODEL`. `GET /api/reindex` / `POST /api/reindex` (issue #65's
   live job banner) expose a background reindex job: `POST` starts one
   (`repowise_parser::build_index`, the same implementation
   `init`/`update` use, so there's exactly one indexing codepath) unless
@@ -805,15 +814,19 @@ This closes out issue #59 and issue #65 both: every view the static
 dashboard had now has a live equivalent, plus drill-down, search, a
 dependency graph, chat, Present Mode, a live job banner, a read-only
 Settings view, and cost tracking — all five of #65's bundled,
-live-server-dependent features the static dashboard never had. Two
-honest caveats remain: chat's retrieval is keyword search, not real
-embeddings-based RAG (issue #63), and cost tracking is in-memory
-per-process token counts, not a persisted dollar-cost history (no
-per-model pricing table exists to convert tokens to dollars, and
-nothing here survives a server restart). This still isn't a
-byte-for-byte reproduction of real repowise's dashboard either (e.g.
-no D3-identical graph rendering) — it's parity in what the dashboard
-*does*, built a different way.
+live-server-dependent features the static dashboard never had. Chat's
+retrieval is now real embeddings-based semantic search (issue #63's
+first slice) rather than keyword matching, though `/api/search` (the
+dashboard's own instant search box) is still substring-only —
+PageRank-biasing that with `repowise-graph`'s in-degree data, one of
+#63's own suggested cheaper intermediate steps, remains a follow-up.
+One honest caveat remains: cost tracking is in-memory per-process
+token counts, not a persisted dollar-cost history (no per-model
+pricing table exists to convert tokens to dollars, and nothing here
+survives a server restart). This still isn't a byte-for-byte
+reproduction of real repowise's dashboard either (e.g. no D3-identical
+graph rendering) — it's parity in what the dashboard *does*, built a
+different way.
 
 ## Testing
 

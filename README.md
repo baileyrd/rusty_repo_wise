@@ -677,30 +677,39 @@ dashboard to genuine parity with repowise's own Next.js-frontend/
 FastAPI-backend architecture, minus the Node.js dependency.
 
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
-  `/api/decisions`, `/api/symbols`, plus (new) `/api/wiki-pages`,
-  `/api/wiki`, and `/api/search` — the same data the static dashboard's
-  sections already compute (`repowise overview`/`health`/`hotspots`/
-  `decisions`, plus the full symbol list), as JSON instead of baked into
-  one static HTML page. File paths are always relative to `PATH`, never
-  absolute host paths. `/api/hotspots` returns `{"available": false}`
-  (not an error) when `PATH` isn't a git repo, same "degrade gracefully"
-  behavior as the static dashboard. `/api/wiki-pages` lists which indexed
-  files already have a `repowise-docs` wiki page on disk; `/api/wiki?
-  path=<rel>` serves one page's raw markdown (matched against that exact
-  set, so a crafted `path` can't escape `.repowise/wiki/` via `..`
-  segments); `/api/search?q=<term>` does a case-insensitive substring
-  match over file paths and symbol names, capped at 20 results each.
+  `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
+  `/api/search`, plus (new) `/api/graph` — the same data the static
+  dashboard's sections already compute (`repowise overview`/`health`/
+  `hotspots`/`decisions`, plus the full symbol list), as JSON instead of
+  baked into one static HTML page. File paths are always relative to
+  `PATH`, never absolute host paths. `/api/hotspots` returns
+  `{"available": false}` (not an error) when `PATH` isn't a git repo,
+  same "degrade gracefully" behavior as the static dashboard.
+  `/api/wiki-pages` lists which indexed files already have a
+  `repowise-docs` wiki page on disk; `/api/wiki?path=<rel>` serves one
+  page's raw markdown (matched against that exact set, so a crafted
+  `path` can't escape `.repowise/wiki/` via `..` segments);
+  `/api/search?q=<term>` does a case-insensitive substring match over
+  file paths and symbol names, capped at 20 results each; `/api/graph`
+  returns the file-level import graph (nodes + edges), truncated to the
+  150 most-connected files (`"truncated": true` when cut down) so a
+  large repo's graph stays renderable.
 - **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
   renders every section the static dashboard has — overview, code
   health, hotspots, architectural decisions, and a symbols table with a
   live (client-side-reactive, not just embedded-JS) kind filter — plus
-  two things the static dashboard didn't have a live version of yet:
-  every rendered file path is now a **drill-down link** (opens that
-  file's wiki page inline, as raw markdown, when `repowise docs` has
-  already generated one — same "check disk, don't generate" convention
-  as the static dashboard), and a **Ctrl/Cmd+K instant search box**
-  live-queries `/api/search` as you type and jumps straight to a
-  matching file's wiki page. It's deliberately **not** a member of the
+  things the static dashboard didn't have a live version of yet: every
+  rendered file path (including graph nodes) is a **drill-down link**
+  (opens that file's wiki page inline, as raw markdown, when
+  `repowise docs` has already generated one — same "check disk, don't
+  generate" convention as the static dashboard), a **Ctrl/Cmd+K instant
+  search box** live-queries `/api/search` as you type and jumps straight
+  to a matching file's wiki page, and a **dependency-graph view** renders
+  `/api/graph` as an SVG, laid out client-side with a small
+  Fruchterman-Reingold-style force-directed simulation (nodes repel each
+  other, edges act as springs, gently pulled back toward center) —
+  colored by language using GitHub's own per-language colors, no D3 or
+  other JS graph library involved. It's deliberately **not** a member of the
   root Cargo workspace (its own `Cargo.toml` has an empty `[workspace]`
   table): it only ever targets `wasm32-unknown-unknown` via
   [`trunk`](https://trunkrs.dev), and pulling a WASM-only crate into the
@@ -721,14 +730,14 @@ FastAPI-backend architecture, minus the Node.js dependency.
 - Chosen deliberately over a real Next.js/React frontend to keep the
   whole project buildable with just `cargo` (no npm/Node dependency for
   contributors or CI) while still getting a live server, a real
-  client-side app, drill-down links, and instant search — repowise's own
-  D3.js dependency-graph view can still be embedded via plain JS interop
-  later without pulling in a JS build toolchain for everything else.
+  client-side app, drill-down links, instant search, and a dependency
+  graph — real repowise reaches for D3.js for its graph view; this port
+  gets there with a hand-rolled force-directed layout instead, so no JS
+  build toolchain is needed for any part of the frontend.
 
-Still not full parity: a dependency-graph view, and eventually
-ownership/dead-code/decision-tracker views and chat (tying into the
-LLM-dependent-features follow-ups from issue #61), are later phases, not
-done here.
+Still not full parity: ownership/dead-code/decision-tracker views and
+chat (tying into the LLM-dependent-features follow-ups from issue #61)
+are later phases, not done here.
 
 ## Testing
 

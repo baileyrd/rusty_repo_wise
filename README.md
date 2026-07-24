@@ -17,7 +17,9 @@ specifics per layer), not full feature parity:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
-  Swift, PHP, Dart, and shell (`.sh`/`.bash`/`.zsh`) files.
+  Swift, PHP, Dart, and shell (`.sh`/`.bash`/`.zsh`) files, plus
+  Objective-C, R, Zig, Julia, Elm, OCaml, Crystal, Nim, and D by name
+  for git-history coverage only (see "Structural-tier languages" below).
 - Parse each file with tree-sitter, extracting function/method/class/struct
   definitions, imports, call expressions, and per-function metrics
   (cyclomatic complexity, parameter count, a duplicate-code body hash).
@@ -106,9 +108,14 @@ specifics per layer), not full feature parity:
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
-Scala, Ruby, Swift, PHP, Dart, and shell scripts are parsed; repowise's
-other languages aren't implemented — see issue #11 for the
-tracking/discussion issue on extending language support. The health scorer covers 12 of repowise's ~25 markers — see
+Scala, Ruby, Swift, PHP, Dart, and shell scripts are tree-sitter parsed
+(symbols/imports/calls/complexity). Nine more — Objective-C, R, Zig,
+Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
+— are recognized by name and get git-history coverage (`hotspots`/
+`ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
+at all: no grammar exists for them, so their hotspot score is always
+`0` (churn × 0 complexity) and they carry no imports/calls to resolve.
+Every other repowise language is unimplemented. The health scorer covers 12 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -413,6 +420,31 @@ time against the repo's real history:
   every touched file's coupling list with noise).
 - **Ownership**: per-author share of a file's lines from `git blame
   --line-porcelain`.
+
+### Structural-tier languages
+
+Objective-C, R, Zig, Julia, Elm, OCaml, Crystal, Nim, and D (issue
+#70) get recognized as named languages (`Language::from_extension`)
+but have no tree-sitter grammar wired up at all — `repowise_parser::
+parse_file` gives them a bare, zero-symbol `FileRecord` (just the
+file's path/language/line count) instead of folding them into the
+`other_files` count like a genuinely unrecognized extension. That's
+enough to make them visible everywhere `RepoIndex.files` drives a
+view:
+
+- `repowise overview` reports real per-language file counts (e.g. "R
+  3", not lumped into "Other").
+- `repowise hotspots` includes them, churn computed from real `git
+  log` history — but always at a `0` score, since there are no
+  symbols to sum complexity over (git-history signal only, no
+  complexity signal, matching repowise's own "Structural tier" naming).
+- The dashboard's Symbols/Health/Dead-code views correctly show
+  nothing for these files (zero symbols, not an error).
+
+`repowise ownership`/`coupled` (and their `/api/ownership`/
+`GET /api/graph` dashboard equivalents) already worked for these
+files even before this — both take an explicit file path and read
+straight from `git blame`/`git log`, bypassing `RepoIndex` entirely.
 
 ## Documentation generation
 

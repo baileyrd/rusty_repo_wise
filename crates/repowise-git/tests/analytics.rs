@@ -265,6 +265,52 @@ fn hotspot_score_multiplies_churn_by_complexity() {
     assert_eq!(hotspots[0].score, 10);
 }
 
+/// Issue #70's "Structural tier" (Objective-C, R, Zig, Julia, Elm,
+/// OCaml, Crystal, Nim, D): these languages get a zero-symbol
+/// `FileRecord` (see `repowise_parser::parse_file`'s own doc comment)
+/// rather than being folded into `RepoIndex.other_files`, so a file in
+/// one of them shows up in `hotspots()` output (churn is real, from
+/// `git log`) with a `score` of `0` (no symbols to sum complexity
+/// over) -- visible, just never ranked above a file with any measured
+/// complexity.
+#[test]
+fn hotspots_includes_a_structural_tier_file_with_a_zero_score() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    init_repo(&root);
+
+    std::fs::write(root.join("main.zig"), "const x = 1;\n").unwrap();
+    git(&root, &["add", "main.zig"]);
+    git(&root, &["commit", "-q", "-m", "Add main.zig"]);
+    std::fs::write(root.join("main.zig"), "const x = 2;\n").unwrap();
+    git(&root, &["add", "main.zig"]);
+    git(&root, &["commit", "-q", "-m", "Tweak main.zig"]);
+
+    let zig_path = root.join("main.zig");
+    let index = RepoIndex {
+        root: root.clone(),
+        files: vec![FileRecord {
+            path: zig_path.clone(),
+            language: Language::Zig,
+            lines: 1,
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            calls: Vec::new(),
+            field_accesses: Vec::new(),
+        }],
+        other_files: 0,
+    };
+
+    let analytics = GitAnalytics::collect(&root).unwrap();
+    let hotspots = repowise_git::hotspots(&index, &analytics);
+
+    assert_eq!(hotspots.len(), 1);
+    assert_eq!(hotspots[0].file, zig_path);
+    assert_eq!(hotspots[0].churn, 2);
+    assert_eq!(hotspots[0].total_complexity, 0);
+    assert_eq!(hotspots[0].score, 0);
+}
+
 #[test]
 fn decayed_score_ranks_recent_churn_above_equally_old_churn() {
     let dir = tempfile::tempdir().unwrap();

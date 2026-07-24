@@ -132,6 +132,7 @@ impl<'a> Walker<'a> {
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
+                        regex_compile_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -166,6 +167,7 @@ impl<'a> Walker<'a> {
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
+                        regex_compile_in_loop: Vec::new(),
                     });
                 }
             }
@@ -361,6 +363,17 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let regex_compile_in_loop = body
+            .map(|b| {
+                metrics::regex_compiles_in_loops(
+                    b,
+                    is_loop,
+                    |n| resource_constructor_callee(n, self.source),
+                    is_regex_compile_call,
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -386,6 +399,7 @@ impl<'a> Walker<'a> {
             // loop-body markers, it doesn't extend to TypeScript/JavaScript.
             list_insert_zero_in_loop: Vec::new(),
             json_parse_in_loop,
+            regex_compile_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -636,6 +650,15 @@ fn qualified_call_name(node: Node, source: &str) -> Option<String> {
 /// coarse, like `is_io_call`.
 fn is_json_parse_call(name: &str) -> bool {
     matches!(name, "JSON.parse")
+}
+
+/// A small fixed table of constructor names recognized as compiling a
+/// regex for `regex_compile_in_loop` (issue #188) -- heuristic and
+/// coarse, like `is_io_call`. Unlike `is_json_parse_call`, a bare
+/// `RegExp` is already distinctive enough (no qualified form needed),
+/// same reasoning as `is_expensive_constructor`'s bare class-name match.
+fn is_regex_compile_call(name: &str) -> bool {
+    matches!(name, "RegExp")
 }
 
 /// A parameter's declared type annotation as source text. TypeScript-only:
@@ -962,5 +985,22 @@ mod tests {
             "JSON.parse"
         );
         assert!(hoisted.json_parse_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_regex_compilation_in_a_loop_but_not_hoisted_out() {
+        let rec = extract_js(
+            "function perIteration(lines) {\n  let count = 0;\n  for (const line of lines) {\n    const re = new RegExp('\\\\d+');\n    if (re.test(line)) {\n      count++;\n    }\n  }\n  return count;\n}\n\nfunction hoisted(lines) {\n  const re = new RegExp('\\\\d+');\n  let count = 0;\n  for (const line of lines) {\n    if (re.test(line)) {\n      count++;\n    }\n  }\n  return count;\n}\n",
+        );
+        let per_iteration = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "perIteration")
+            .unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(per_iteration.regex_compile_in_loop.len(), 1);
+        assert_eq!(per_iteration.regex_compile_in_loop[0].callee_name, "RegExp");
+        assert!(hoisted.regex_compile_in_loop.is_empty());
     }
 }

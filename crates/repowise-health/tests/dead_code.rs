@@ -28,6 +28,7 @@ fn symbol(file: &str, name: &str, kind: SymbolKind, start_line: usize, end_line:
         lock_in_loop: Vec::new(),
         list_insert_zero_in_loop: Vec::new(),
         json_parse_in_loop: Vec::new(),
+        regex_compile_in_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,

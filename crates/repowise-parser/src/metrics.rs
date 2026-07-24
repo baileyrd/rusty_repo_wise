@@ -6,7 +6,7 @@
 
 use repowise_core::{
     ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
-    ResourceConstructionInLoopRef, StringConcatInLoopRef,
+    RegexCompileInLoopRef, ResourceConstructionInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -407,6 +407,24 @@ pub fn json_parses_in_loops(
     )
     .into_iter()
     .map(|(line, callee_name)| JsonParseInLoopRef { line, callee_name })
+    .collect()
+}
+
+pub fn regex_compiles_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    call_callee: impl Fn(Node) -> Option<String>,
+    is_regex_compile_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<RegexCompileInLoopRef> {
+    matches_in_loops(
+        body,
+        is_loop,
+        |n| call_callee(n).filter(|name| is_regex_compile_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| RegexCompileInLoopRef { line, callee_name })
     .collect()
 }
 

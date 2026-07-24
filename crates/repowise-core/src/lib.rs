@@ -263,6 +263,17 @@ pub struct Symbol {
     /// Rust, Python, and TypeScript/JavaScript, matching `io_in_loop`'s
     /// scope.
     pub json_parse_in_loop: Vec<JsonParseInLoopRef>,
+    /// Calls recognized as compiling a regex (`Regex::new`/`re.compile`/
+    /// `new RegExp` and language equivalents -- a small fixed per-language
+    /// name table, heuristic, not type-aware) found inside a loop body
+    /// within the symbol, where hoisting the compile call above the loop
+    /// is usually possible if the pattern doesn't change per iteration.
+    /// Compiling a regex is orders of magnitude more expensive than using
+    /// an already-compiled one. Empty for symbols with no body, and for
+    /// languages this extraction isn't implemented for yet -- currently
+    /// Rust, Python, and TypeScript/JavaScript, matching `io_in_loop`'s
+    /// scope.
+    pub regex_compile_in_loop: Vec<RegexCompileInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -329,6 +340,16 @@ pub struct ListInsertZeroInLoopRef {
 /// or function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonParseInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
+}
+
+/// A single call recognized as compiling a regex (by a small fixed
+/// per-language name table -- heuristic, not type-aware) found inside a
+/// loop body. `line` points at the call itself, not the enclosing loop
+/// or function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegexCompileInLoopRef {
     pub line: usize,
     pub callee_name: String,
 }

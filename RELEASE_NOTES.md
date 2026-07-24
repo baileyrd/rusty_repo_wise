@@ -6,6 +6,52 @@ repo routing work through PRs).
 
 ---
 
+## PR #200 — Add resource_construction_in_loop health marker
+**2026-07-24** · [#200](https://github.com/baileyrd/rusty_repo_wise/pull/200) · closes [#179](https://github.com/baileyrd/rusty_repo_wise/issues/179)
+
+- **Added:** `resource_construction_in_loop`, the third slice of issue
+  #72's Performance-signal cluster. Flags construction of a known
+  expensive resource (an HTTP client, a connection/thread pool) found
+  inside a loop body, where hoisting the construction above the loop is
+  usually possible.
+- **`Symbol` gains `resource_construction_in_loop: Vec<ResourceConstructionInLoopRef>`**
+  (each entry: `line`, `callee_name`), populated at parse time.
+- **Refactor:** extracted a shared generic `repowise-parser::metrics::matches_in_loops<T>`
+  tree-walk out of `calls_in_loops`/`string_concats_in_loops` — with this
+  marker, the third near-identical "X found inside a loop" shape,
+  de-duplicating the walk logic was worth doing now rather than
+  copy-pasting a fourth near-identical function. Both existing functions
+  keep their exact public signature and return type; only their
+  internals now delegate to the shared walk, so no call sites in
+  `rust.rs`/`python.rs`/`javascript.rs` needed to change for #177/#178.
+- **New `repowise-parser::metrics::resource_constructions_in_loops`**
+  built on top of that shared walk.
+- **Scope:** implemented for **Rust, Python, and TypeScript/JavaScript
+  only**, matching `io_in_loop`/`string_concat_in_loop`'s precedent.
+  Rust matches on the *qualified* `Type::method` path (e.g.
+  `HttpClient::new`) rather than a bare method name, since `new` alone
+  would match `Vec::new()`/`String::new()`; Python/JS match on the bare
+  constructor/class name. Deliberately excludes cheap allocation
+  constructors (`Vec::with_capacity`, `String::new`) per the issue's own
+  acceptance criteria, and excludes regex construction (`Regex::new`/
+  `re.compile`/`new RegExp`) — reserved for `regex_compile_in_loop`
+  (issue #188) so the two markers don't double-flag the same call once
+  both exist. The other 13 parsed languages get an empty
+  `resource_construction_in_loop` list and never trigger this marker.
+- **New `FindingKind::ResourceConstructionInLoop`** (penalty −0.3, same
+  weight as `IoInLoop`/`StringConcatInLoop`), one `Finding` per flagged
+  construction, pointing at the construction's own line.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR (#127/#129/#196/#198).
+- 16 of #72's 19 sub-issues remain open — this closes only #179, not
+  #72 itself.
+
+---
+
 ## PR #198 — Add string_concat_in_loop health marker
 **2026-07-24** · [#198](https://github.com/baileyrd/rusty_repo_wise/pull/198) · closes [#178](https://github.com/baileyrd/rusty_repo_wise/issues/178)
 

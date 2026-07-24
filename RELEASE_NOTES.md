@@ -6,6 +6,46 @@ repo routing work through PRs).
 
 ---
 
+## PR #149 — Add ownership, dead-code, and decision-tracker views (Phase 4)
+**2026-07-24** · [#149](https://github.com/baileyrd/rusty_repo_wise/pull/149) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** Phase 4 of the dashboard-server pivot — the last
+  non-LLM-dependent views. Only the chat view (tying into #61's
+  remaining LLM follow-ups) is left after this.
+- **New `repowise-server` endpoints:** `GET /api/ownership?path=<rel>`
+  (one file's git-blame author breakdown, `{"available": false}` for a
+  non-git-repo root or unindexed path); `GET /api/dead-code`
+  (confidence-tiered dead-code candidates with an optional
+  `?min_confidence=low|medium|high` filter, mirroring the
+  `get_dead_code` MCP tool's own shape). `/api/decisions` now takes an
+  optional `?file=<rel>` to filter to decisions linked to one file (a
+  per-file decision tracker); omitted, it behaves exactly as before.
+- **`repowise-web`:** broadens every file-path drill-down from Phase
+  2's wiki-only gating into a **file-detail panel** — wiki content,
+  ownership breakdown, and linked decisions, each loading and failing
+  independently, so a file with no wiki page yet still shows whatever
+  ownership/decision data exists instead of one shared error. Every
+  indexed file is clickable now, not just ones with a wiki page. A new
+  **dead-code section** lists candidates with a minimum-confidence
+  filter; each risk factor is available as a tooltip on the confidence
+  cell.
+- Verified end-to-end manually: built a scratch git repo with a
+  decision-comment above a deliberately-uncalled function, confirmed
+  all three new/changed endpoints' JSON, then drove the live page with
+  headless Chromium — confirmed the file-detail panel shows wiki +
+  ownership + linked decisions together, confirmed Close unmounts it,
+  and confirmed the dead-code section's own file link reopens the same
+  panel.
+- **Fixed (CI):** the `/api/ownership` test fixture's `git commit`
+  relied on this sandbox's ambient git identity, which doesn't exist on
+  the CI runner ("empty ident name") — fixed by setting local
+  `user.name`/`user.email` config explicitly in the test helper.
+- **Scope:** still not full parity. Chat (tying into #61's remaining
+  LLM follow-ups) is the one view left, not done here. This PR does not
+  close #59 or #65.
+
+---
+
 ## PR #147 — Add dependency-graph view (Phase 3)
 **2026-07-24** · [#147](https://github.com/baileyrd/rusty_repo_wise/pull/147) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

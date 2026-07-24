@@ -6,6 +6,42 @@ repo routing work through PRs).
 
 ---
 
+## PR #167 — Add workspace co-change reporting
+**2026-07-24** · [#167](https://github.com/baileyrd/rusty_repo_wise/pull/167) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
+
+- **Added:** the second slice of issue #64. Each workspace repo's own
+  most-coupled file pairs (from `repowise-git`'s existing
+  `GitAnalytics`), shown side by side. This is **not** cross-repo
+  co-change — separate repos have separate git histories, so files in
+  different repos can never literally co-change in the same commit —
+  just each repo's own coupling rendered together in one place, with no
+  new cross-repo dependency resolution required.
+- `repowise-git` gained `GitAnalytics::top_co_changed_pairs(top_n)`,
+  ranking every co-changed pair across a repo's whole history (the
+  existing `coupled_files` was scoped to one file at a time).
+  `repowise-workspace` gained `workspace_co_changes(repos, top_n)` +
+  `RepoCoChanges`/`CoChangePair`, degrading to `available: false` for a
+  repo with no readable git history — same shape as `RepoStatus`.
+- Two new ways to see it: `repowise workspace-co-changes --workspace
+  <path> [--top <N>]` (CLI), and `GET /api/workspace-co-changes` plus a
+  new Workspace Co-Changes dashboard section (opt-in via `repowise
+  serve-dashboard --workspace <path>`).
+- `repowise-workspace` now also depends on `repowise-git` (previously
+  only `repowise-core`) — still deliberately its own crate, not folded
+  into `repowise-core`, so a future cross-repo slice can add a
+  `repowise-graph` dependency too without `repowise-core` ever
+  depending upward.
+- **Still deliberately excluded:** `get_architecture`/`get_blast_radius`
+  (MCP tools) and the dashboard's `/workspace/system-map`,
+  `/workspace/conformance`, `/workspace/contracts` views all need real
+  cross-repo dependency resolution, which doesn't exist anywhere in this
+  port yet — left for a follow-up.
+- No breaking changes — purely additive (new crate function, new CLI
+  subcommand, new route, new dashboard section).
+- **This does not close #64** — cross-repo tools and views remain.
+
+---
+
 ## PR #165 — Add multi-repo workspace repo listing
 **2026-07-24** · [#165](https://github.com/baileyrd/rusty_repo_wise/pull/165) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
 

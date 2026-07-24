@@ -6,6 +6,47 @@ repo routing work through PRs).
 
 ---
 
+## PR #202 — Add lock_in_loop health marker
+**2026-07-24** · [#202](https://github.com/baileyrd/rusty_repo_wise/pull/202) · closes [#180](https://github.com/baileyrd/rusty_repo_wise/issues/180)
+
+- **Added:** `lock_in_loop`, the fourth slice of issue #72's
+  Performance-signal cluster. Flags a mutex/lock acquisition call
+  happening inside a loop body — repeated lock/unlock churn per
+  iteration instead of acquiring the lock once outside the loop.
+- **`Symbol` gains `lock_in_loop: Vec<LockInLoopRef>`** (each entry:
+  `line`, `callee_name`), populated at parse time.
+- **New `repowise-parser::metrics::locks_in_loops`**, built on the
+  shared `matches_in_loops` walk introduced in PR #200 — same shape as
+  `calls_in_loops`/`resource_constructions_in_loops`.
+- **Scope:** implemented for **Rust, Python, and TypeScript/JavaScript
+  only**, matching the other three loop-body markers' precedent.
+  - Rust: `.lock()`/`.try_lock()` — deliberately excludes
+    `RwLock::read`/`write`, since those bare method names are far too
+    generic on their own (shared with `Read`/`Write` trait methods,
+    plain getters/setters) and this port has no type information to
+    know a receiver is actually an `RwLock`.
+  - Python: `.acquire()` (`threading.Lock`/`RLock`) — the `with lock:`
+    shape isn't recognized, since distinguishing a lock context manager
+    from any other `with` statement would need type information this
+    port doesn't have.
+  - TypeScript/JavaScript: `.acquire()`, mirroring common userland lock
+    libraries (e.g. `async-mutex`) since JS has no native mutex.
+  - The other 13 parsed languages get an empty `lock_in_loop` list and
+    never trigger this marker.
+- **New `FindingKind::LockInLoop`** (penalty −0.3, same weight as the
+  other loop-body markers), one `Finding` per flagged acquisition,
+  pointing at the acquisition's own line.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR (#127/#129/#196/#198/#200).
+- 15 of #72's 19 sub-issues remain open — this closes only #180, not
+  #72 itself.
+
+---
+
 ## PR #200 — Add resource_construction_in_loop health marker
 **2026-07-24** · [#200](https://github.com/baileyrd/rusty_repo_wise/pull/200) · closes [#179](https://github.com/baileyrd/rusty_repo_wise/issues/179)
 

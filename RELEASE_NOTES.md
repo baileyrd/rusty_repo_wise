@@ -6,6 +6,51 @@ repo routing work through PRs).
 
 ---
 
+## PR #165 — Add multi-repo workspace repo listing
+**2026-07-24** · [#165](https://github.com/baileyrd/rusty_repo_wise/pull/165) · part of [#64](https://github.com/baileyrd/rusty_repo_wise/issues/64)
+
+- **Added:** the first slice of issue #64 (multi-repo/workspace
+  support). A new `repowise-workspace` crate parses a small standalone
+  TOML file naming a set of repo roots (never inferred from or stored
+  inside any member repo's own `.repowise/` — a workspace spans repos,
+  so no single member repo is a sensible owner of it), and reports each
+  configured repo's indexed status.
+- Three new ways to list a workspace's repos: `repowise workspace-repos
+  --workspace <path>` (CLI), a new `list_repos` MCP tool (opt-in via
+  `repowise serve --workspace <path>`), and `GET /api/workspace-repos`
+  plus a new Workspace repo-cards section on the dashboard (opt-in via
+  `repowise serve-dashboard --workspace <path>`).
+- **Deliberately excluded:** `get_architecture`/`get_blast_radius` (MCP
+  tools) and the dashboard's `/workspace/system-map`,
+  `/workspace/conformance`, `/workspace/contracts`,
+  `/workspace/co-changes` views all need real cross-repo dependency
+  resolution (a symbol in one repo resolving as an import/call target
+  in another), which doesn't exist anywhere in this port yet — left for
+  a follow-up. There's also no way to switch which repo the rest of the
+  dashboard/MCP server operates on.
+- `repowise-workspace` depends only on `repowise-core`, deliberately
+  kept as its own crate (not folded into `repowise-core`) so a future
+  cross-repo slice can grow it a `repowise-graph` dependency without
+  `repowise-core` ever depending upward — a load-bearing invariant the
+  rest of this port relies on.
+- Uses `toml = "0.8"`, already in the dependency tree via
+  `repowise-health`'s `--weights` flag — no new crate added to
+  `Cargo.lock`.
+- **Breaking change (internal API only):** `repowise_mcp::run` and
+  `repowise_server::{app, serve}` gained a new `workspace:
+  Option<PathBuf>` parameter. Every call site was updated in this same
+  PR; no CLI-visible behavior change for invocations without
+  `--workspace`.
+- Verified end-to-end manually: a real compiled `repowise` binary
+  against two scratch git repos (one indexed, one not) and a real
+  workspace TOML file — the CLI subcommand, the dashboard endpoint
+  (with and without `--workspace`), and the rendered Workspace section
+  (screenshot via headless Chromium) all report the correct
+  indexed/unindexed status per repo.
+- **This does not close #64** — cross-repo tools and views remain.
+
+---
+
 ## PR #163 — PageRank-bias /api/search ranking
 **2026-07-24** · [#163](https://github.com/baileyrd/rusty_repo_wise/pull/163) · closes [#63](https://github.com/baileyrd/rusty_repo_wise/issues/63)
 

@@ -1188,6 +1188,7 @@ dependencies = [
  "repowise-git",
  "repowise-graph",
  "repowise-health",
+ "repowise-llm",
  "serde",
  "serde_json",
  "tempfile",

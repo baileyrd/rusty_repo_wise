@@ -11,6 +11,7 @@ repowise-health = { path = "../repowise-health" }
 repowise-git = { path = "../repowise-git" }
 repowise-adr = { path = "../repowise-adr" }
 repowise-docs = { path = "../repowise-docs" }
+repowise-llm = { path = "../repowise-llm" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

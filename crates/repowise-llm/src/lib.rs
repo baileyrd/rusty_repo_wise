@@ -66,7 +66,7 @@ impl LlmConfig {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: Vec<ChatMessage<'a>>,
+    messages: &'a [ChatMessage<'a>],
 }
 
 #[derive(Serialize)]
@@ -90,29 +90,59 @@ struct ChatResponseMessage {
     content: String,
 }
 
-/// One OpenAI-compatible chat-completions round trip: `system`/`user`
-/// messages in, the assistant's reply text out. Synchronous (`ureq`),
-/// matching the HTTP-client choice `repowise-adr`/`repowise-git` already
-/// made for their own opt-in network calls, so a `repowise generate` run
-/// doesn't need to pull an async runtime into an otherwise-synchronous
-/// CLI command the way `repowise serve` does.
-pub fn complete(config: &LlmConfig, system: &str, user: &str) -> anyhow::Result<String> {
+/// One turn in a multi-turn conversation passed to [`complete_messages`].
+/// `role` is `"system"`, `"user"`, or `"assistant"`, matching the
+/// OpenAI-compatible wire format directly.
+#[derive(Debug, Clone)]
+pub struct Turn {
+    pub role: String,
+    pub content: String,
+}
+
+impl Turn {
+    pub fn system(content: impl Into<String>) -> Self {
+        Turn {
+            role: "system".to_string(),
+            content: content.into(),
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Turn {
+            role: "user".to_string(),
+            content: content.into(),
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Turn {
+            role: "assistant".to_string(),
+            content: content.into(),
+        }
+    }
+}
+
+/// One OpenAI-compatible chat-completions round trip over an arbitrary
+/// turn history in, the assistant's reply text out. Synchronous
+/// (`ureq`), matching the HTTP-client choice `repowise-adr`/
+/// `repowise-git` already made for their own opt-in network calls, so
+/// callers don't need to pull an async runtime into an otherwise-
+/// synchronous context the way `repowise serve` does.
+pub fn complete_messages(config: &LlmConfig, turns: &[Turn]) -> anyhow::Result<String> {
     let url = format!(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
+    let messages: Vec<ChatMessage> = turns
+        .iter()
+        .map(|t| ChatMessage {
+            role: &t.role,
+            content: &t.content,
+        })
+        .collect();
     let body = ChatRequest {
         model: &config.model,
-        messages: vec![
-            ChatMessage {
-                role: "system",
-                content: system,
-            },
-            ChatMessage {
-                role: "user",
-                content: user,
-            },
-        ],
+        messages: &messages,
     };
     let mut req = ureq::post(&url).set("Content-Type", "application/json");
     if let Some(key) = &config.api_key {
@@ -125,6 +155,12 @@ pub fn complete(config: &LlmConfig, system: &str, user: &str) -> anyhow::Result<
         .next()
         .map(|c| c.message.content)
         .ok_or_else(|| anyhow::anyhow!("LLM response had no choices"))
+}
+
+/// A single `system`/`user` round trip -- the shape every caller before
+/// the chat view needed. Thin wrapper over [`complete_messages`].
+pub fn complete(config: &LlmConfig, system: &str, user: &str) -> anyhow::Result<String> {
+    complete_messages(config, &[Turn::system(system), Turn::user(user)])
 }
 
 const SUMMARY_SYSTEM_PROMPT: &str = "You are writing a short summary for a code wiki page. \
@@ -274,6 +310,29 @@ mod tests {
 
         let reply = complete(&config, "system prompt", "user prompt").unwrap();
         assert_eq!(reply, "It adds two numbers.");
+    }
+
+    #[test]
+    fn complete_messages_handles_an_arbitrary_length_turn_history() {
+        let response = r#"{"choices": [{"message": {"role": "assistant", "content": "Sure, here's more detail."}}]}"#;
+        let server = FixtureServer::start(vec![response]);
+        let config = LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            api_key: None,
+        };
+
+        let reply = complete_messages(
+            &config,
+            &[
+                Turn::system("You are a helpful assistant."),
+                Turn::user("What does this repo do?"),
+                Turn::assistant("It's a code health analyzer."),
+                Turn::user("Tell me more."),
+            ],
+        )
+        .unwrap();
+        assert_eq!(reply, "Sure, here's more detail.");
     }
 
     #[test]

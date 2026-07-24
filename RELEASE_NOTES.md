@@ -6,6 +6,37 @@ repo routing work through PRs).
 
 ---
 
+## PR #145 — Add wiki drill-down links and instant search (Phase 2)
+**2026-07-24** · [#145](https://github.com/baileyrd/rusty_repo_wise/pull/145) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** Phase 2 of the dashboard-server pivot — wiki-page
+  drill-down links and instant search, the two remaining pieces of the
+  static dashboard's UX Phase 1 hadn't ported yet.
+- **New `repowise-server` endpoints:** `GET /api/wiki-pages` (which
+  indexed files already have a `repowise-docs` wiki page on disk),
+  `GET /api/wiki?path=<rel>` (serves one page's raw markdown, matched
+  against that exact set rather than joined onto the root directly, so
+  a crafted `path` can't escape `.repowise/wiki/` via `..` segments),
+  and `GET /api/search?q=<term>` (case-insensitive substring match over
+  file paths and symbol names, capped at 20 results each).
+- **`repowise-web`:** every rendered file path (overview, health,
+  hotspots, symbols) is now a drill-down link that opens its wiki page
+  inline as raw markdown when one exists. A new Ctrl/Cmd+K-focusable
+  search box live-queries `/api/search` as you type.
+- **Fixed:** the overview section's "Most depended-on files" table —
+  present in the static dashboard, computed by `/api/overview` since
+  Phase 0, but never actually rendered by `repowise-web` until now.
+- Verified end-to-end manually: generated a real wiki page with
+  `repowise docs`, then drove the live page with headless Chromium —
+  clicked a drill-down link and confirmed the markdown rendered inline,
+  confirmed Close unmounts it, typed into the search box and confirmed
+  live results, and confirmed Ctrl+K focuses the search input.
+- **Scope:** still not full parity. A dependency-graph view, and
+  eventually ownership/dead-code/decision-tracker views + chat, are
+  later phases, not done here. This PR does not close #59 or #65.
+
+---
+
 ## PR #143 — Port health/hotspots/decisions/symbols views (Phase 1)
 **2026-07-23** · [#143](https://github.com/baileyrd/rusty_repo_wise/pull/143) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

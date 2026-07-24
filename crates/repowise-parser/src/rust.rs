@@ -177,6 +177,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let regex_compile_in_loop = body
+                        .map(|b| {
+                            metrics::regex_compiles_in_loops(
+                                b,
+                                is_loop,
+                                |n| qualified_call_name(n, self.source),
+                                is_regex_compile_call,
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -205,6 +216,7 @@ impl<'a> Walker<'a> {
                         lock_in_loop,
                         list_insert_zero_in_loop,
                         json_parse_in_loop,
+                        regex_compile_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -243,6 +255,7 @@ impl<'a> Walker<'a> {
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
+                        regex_compile_in_loop: Vec::new(),
                     });
                 }
             }
@@ -271,6 +284,7 @@ impl<'a> Walker<'a> {
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
+                        regex_compile_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -582,6 +596,15 @@ fn is_lock_call(name: &str) -> bool {
 /// hidden behind a wrapper function or an alias this table doesn't name.
 fn is_json_parse_call(name: &str) -> bool {
     matches!(name, "serde_json::from_str" | "serde_json::from_slice")
+}
+
+/// A small fixed table of `Type::method` paths recognized as compiling a
+/// regex for `regex_compile_in_loop` (issue #188) -- heuristic and
+/// coarse, like `is_io_call`. This is exactly the pattern
+/// `is_expensive_constructor`'s doc comment named as reserved for this
+/// marker.
+fn is_regex_compile_call(name: &str) -> bool {
+    matches!(name, "Regex::new")
 }
 
 /// A `.insert(0, ...)` call on a bare identifier for
@@ -1285,5 +1308,47 @@ mod tests {
             "serde_json::from_str"
         );
         assert!(hoisted.json_parse_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_regex_compilation_in_a_loop_but_not_hoisted_out() {
+        let rec = extract_str(
+            r#"
+            fn per_iteration(lines: &[&str]) -> usize {
+                let mut count = 0;
+                for line in lines {
+                    let re = Regex::new(r"\d+").unwrap();
+                    if re.is_match(line) {
+                        count += 1;
+                    }
+                }
+                count
+            }
+
+            fn hoisted(lines: &[&str]) -> usize {
+                let re = Regex::new(r"\d+").unwrap();
+                let mut count = 0;
+                for line in lines {
+                    if re.is_match(line) {
+                        count += 1;
+                    }
+                }
+                count
+            }
+            "#,
+        );
+        let per_iteration = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "per_iteration")
+            .unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(per_iteration.regex_compile_in_loop.len(), 1);
+        assert_eq!(
+            per_iteration.regex_compile_in_loop[0].callee_name,
+            "Regex::new"
+        );
+        assert!(hoisted.regex_compile_in_loop.is_empty());
     }
 }

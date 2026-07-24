@@ -5,8 +5,8 @@
 
 use repowise_core::{
     CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
-    ListInsertZeroInLoopRef, LockInLoopRef, RepoIndex, ResourceConstructionInLoopRef,
-    StringConcatInLoopRef, Symbol, SymbolKind,
+    ListInsertZeroInLoopRef, LockInLoopRef, RegexCompileInLoopRef, RepoIndex,
+    ResourceConstructionInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -46,6 +46,7 @@ fn symbol(
         lock_in_loop: Vec::new(),
         list_insert_zero_in_loop: Vec::new(),
         json_parse_in_loop: Vec::new(),
+        regex_compile_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -611,6 +612,57 @@ fn flags_one_finding_per_json_parse_in_loop_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(4)));
     assert!(lines.contains(&Some(6)));
     assert!(findings_for(&report, "clean", FindingKind::JsonParseInLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_regex_compile_in_loop_pointing_at_its_own_line() {
+    let mut looped = symbol(
+        "regex.rs",
+        "looped",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    looped.regex_compile_in_loop = vec![
+        RegexCompileInLoopRef {
+            line: 4,
+            callee_name: "Regex::new".to_string(),
+        },
+        RegexCompileInLoopRef {
+            line: 6,
+            callee_name: "Regex::new".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "regex.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "regex.rs",
+        vec![looped, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "looped", FindingKind::RegexCompileInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::RegexCompileInLoop).is_empty());
 }
 
 #[test]

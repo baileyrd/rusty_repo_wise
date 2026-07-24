@@ -169,6 +169,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let regex_compile_in_loop = body
+                        .map(|b| {
+                            metrics::regex_compiles_in_loops(
+                                b,
+                                is_loop,
+                                |n| qualified_call_name(n, self.source),
+                                is_regex_compile_call,
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -192,6 +203,7 @@ impl<'a> Walker<'a> {
                         lock_in_loop,
                         list_insert_zero_in_loop,
                         json_parse_in_loop,
+                        regex_compile_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -225,6 +237,7 @@ impl<'a> Walker<'a> {
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
                         json_parse_in_loop: Vec::new(),
+                        regex_compile_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -532,6 +545,17 @@ fn is_json_parse_call(name: &str) -> bool {
     matches!(name, "json.loads" | "json.load")
 }
 
+/// A small fixed table of `module.function` paths recognized as
+/// compiling a regex for `regex_compile_in_loop` (issue #188) --
+/// heuristic and coarse, like `is_io_call`. Uses the qualified
+/// `object.attribute` form rather than the bare last-attribute name
+/// `is_expensive_constructor` matches on, since a bare `compile` alone
+/// is far too generic (many stdlib/third-party modules expose a
+/// `.compile()` method unrelated to regexes).
+fn is_regex_compile_call(name: &str) -> bool {
+    matches!(name, "re.compile")
+}
+
 /// A `.insert(0, ...)` call on a bare identifier for
 /// `list_insert_zero_in_loop` (issue #191): a `call` whose callee is an
 /// `insert` method on an identifier receiver, whose first argument is
@@ -809,5 +833,25 @@ mod tests {
             "json.loads"
         );
         assert!(hoisted.json_parse_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_regex_compilation_in_a_loop_but_not_hoisted_out() {
+        let rec = extract_str(
+            "import re\n\ndef per_iteration(lines):\n    count = 0\n    for line in lines:\n        pattern = re.compile(r'\\d+')\n        if pattern.match(line):\n            count += 1\n    return count\n\ndef hoisted(lines):\n    pattern = re.compile(r'\\d+')\n    count = 0\n    for line in lines:\n        if pattern.match(line):\n            count += 1\n    return count\n",
+        );
+        let per_iteration = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "per_iteration")
+            .unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(per_iteration.regex_compile_in_loop.len(), 1);
+        assert_eq!(
+            per_iteration.regex_compile_in_loop[0].callee_name,
+            "re.compile"
+        );
+        assert!(hoisted.regex_compile_in_loop.is_empty());
     }
 }

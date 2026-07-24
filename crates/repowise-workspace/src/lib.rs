@@ -1,23 +1,29 @@
-//! Multi-repo workspace configuration -- the first slice of issue #64
-//! (`get_architecture`/`get_blast_radius`/`list_repos` MCP tools, and
-//! the dashboard's workspace views). This crate delivers only the
-//! smallest useful piece: naming a set of repo roots and reporting each
-//! one's indexed status. `get_architecture`/`get_blast_radius`/the
-//! system-map/conformance/contracts/co-changes dashboard views all need
-//! real cross-repo dependency resolution (a symbol in one repo
-//! resolving as an import/call target in another), which doesn't exist
-//! anywhere in this port yet and is deliberately left for a follow-up.
+//! Multi-repo workspace configuration -- the ongoing implementation of
+//! issue #64 (`get_architecture`/`get_blast_radius`/`list_repos` MCP
+//! tools, and the dashboard's workspace views). The first slice
+//! delivered only the smallest useful piece: naming a set of repo roots
+//! and reporting each one's indexed status. This slice adds workspace
+//! co-change reporting (`workspace_co_changes`), each repo's own
+//! `repowise_git`-derived file coupling shown side by side -- notably
+//! NOT cross-repo dependency resolution, since separate repos have
+//! separate git histories and can't literally co-change together.
+//! `get_architecture`/`get_blast_radius`/the system-map/conformance/
+//! contracts dashboard views still need real cross-repo dependency
+//! resolution (a symbol in one repo resolving as an import/call target
+//! in another), which doesn't exist anywhere in this port yet and is
+//! deliberately left for a follow-up.
 //!
 //! A workspace is a small standalone TOML file naming member repos by
 //! name and path -- pointed at via a `--workspace <path>` flag on
-//! `repowise serve`/`serve-dashboard`/the new `workspace-repos`
-//! subcommand, never inferred from or stored inside any member repo's
-//! own `.repowise/` directory (a workspace spans repos; no one member
-//! repo is a sensible owner of it). Deliberately kept as its own crate
-//! rather than folded into `repowise-core`: a future cross-repo slice
-//! will need this crate to depend on `repowise-graph`, and
-//! `repowise-core` staying dependency-free of every other `repowise-*`
-//! crate is a load-bearing invariant the rest of this port relies on.
+//! `repowise serve`/`serve-dashboard`/the `workspace-repos`/
+//! `workspace-co-changes` subcommands, never inferred from or stored
+//! inside any member repo's own `.repowise/` directory (a workspace
+//! spans repos; no one member repo is a sensible owner of it).
+//! Deliberately kept as its own crate rather than folded into
+//! `repowise-core`: a future cross-repo slice will need this crate to
+//! depend on `repowise-graph` too, and `repowise-core` staying
+//! dependency-free of every other `repowise-*` crate is a load-bearing
+//! invariant the rest of this port relies on.
 
 use repowise_core::RepoIndex;
 use serde::Deserialize;
@@ -121,6 +127,61 @@ pub fn repo_status(repo: &ResolvedWorkspaceRepo) -> RepoStatus {
             other_file_count: None,
         },
     }
+}
+
+/// One file pair that co-changes within a single repo, and how often.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoChangePair {
+    pub file_a: PathBuf,
+    pub file_b: PathBuf,
+    pub count: usize,
+}
+
+/// One repo's most-coupled file pairs. `available` is `false` when the
+/// repo has no readable git history (e.g. not a git repo, or `git` isn't
+/// on `PATH`) -- the same degrade-rather-than-fail shape as `RepoStatus`.
+#[derive(Debug, Clone)]
+pub struct RepoCoChanges {
+    pub name: String,
+    pub path: PathBuf,
+    pub available: bool,
+    pub pairs: Vec<CoChangePair>,
+}
+
+/// Per-repo file co-change coupling for every repo in the workspace --
+/// "cross-repo" in the sense that one view covers N repos side by side,
+/// not that files literally co-change across repo boundaries (separate
+/// git histories can't share a commit). Each repo's pairs come straight
+/// from its own `repowise_git::GitAnalytics`, independent of any
+/// cross-repo symbol resolution.
+pub fn workspace_co_changes(repos: &[ResolvedWorkspaceRepo], top_n: usize) -> Vec<RepoCoChanges> {
+    repos
+        .iter()
+        .map(
+            |repo| match repowise_git::GitAnalytics::collect(&repo.path) {
+                Ok(analytics) => RepoCoChanges {
+                    name: repo.name.clone(),
+                    path: repo.path.clone(),
+                    available: true,
+                    pairs: analytics
+                        .top_co_changed_pairs(top_n)
+                        .into_iter()
+                        .map(|(file_a, file_b, count)| CoChangePair {
+                            file_a,
+                            file_b,
+                            count,
+                        })
+                        .collect(),
+                },
+                Err(_) => RepoCoChanges {
+                    name: repo.name.clone(),
+                    path: repo.path.clone(),
+                    available: false,
+                    pairs: Vec::new(),
+                },
+            },
+        )
+        .collect()
 }
 
 #[cfg(test)]

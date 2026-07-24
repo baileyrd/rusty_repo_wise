@@ -69,10 +69,11 @@ as a separate service or process (`repowise-mcp`/`repowise-dashboard` are
 libraries invoked by the CLI, not standalone binaries/servers); there's no
 forcing function (scaling, team boundary, fault isolation) that would
 justify it yet. `repowise-workspace` (issue #64's multi-repo/workspace
-support) depends only on `repowise-core` (for `RepoIndex::load`) —
-deliberately kept as its own crate rather than folded into
+support) depends on `repowise-core` (for `RepoIndex::load`) and
+`repowise-git` (for per-repo `GitAnalytics`-derived co-change
+reporting) — deliberately kept as its own crate rather than folded into
 `repowise-core` itself, since a future cross-repo slice of #64 will need
-it to depend on `repowise-graph`, and `repowise-core` staying
+it to depend on `repowise-graph` too, and `repowise-core` staying
 dependency-free of every other `repowise-*` crate is a load-bearing
 invariant the rest of this port relies on.
 

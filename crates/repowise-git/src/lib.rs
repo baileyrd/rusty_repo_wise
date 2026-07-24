@@ -163,6 +163,26 @@ impl GitAnalytics {
         out.truncate(top_n);
         out
     }
+
+    /// The `top_n` file pairs that most often change together across the
+    /// whole walked history, highest coupling count first (alphabetical
+    /// tiebreak for determinism). Unlike `coupled_files`, which is scoped
+    /// to one file, this ranks every pair in the repo -- the shape a
+    /// repo-level "most coupled files" view needs.
+    pub fn top_co_changed_pairs(&self, top_n: usize) -> Vec<(PathBuf, PathBuf, usize)> {
+        let mut out: Vec<(PathBuf, PathBuf, usize)> = self
+            .co_change
+            .iter()
+            .map(|((a, b), count)| (a.clone(), b.clone(), *count))
+            .collect();
+        out.sort_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        out.truncate(top_n);
+        out
+    }
 }
 
 fn ordered_pair(a: &Path, b: &Path) -> (PathBuf, PathBuf) {

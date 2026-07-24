@@ -7,7 +7,14 @@
 //! of the dashboard is viewing -- see `repowise-server`'s own module
 //! doc comment for what's deferred to a follow-up (cross-repo
 //! `get_architecture`/`get_blast_radius`, system-map/conformance/
-//! contracts/co-changes views).
+//! contracts views).
+//!
+//! `CoChangesSection` is the next #64 slice: each workspace repo's own
+//! most-coupled file pairs over `GET /api/workspace-co-changes`, shown
+//! side by side. Not cross-repo co-change -- separate repos have
+//! separate git histories, so files in different repos can never
+//! literally co-change together -- just each repo's own coupling
+//! rendered together in one view.
 //!
 //! Issue #65 (live-server-dependent dashboard features) also tracks
 //! cost tracking, its fifth and last bundled feature: `UsageSection`
@@ -233,6 +240,29 @@ struct WorkspaceRepo {
 struct WorkspaceRepos {
     available: bool,
     repos: Vec<WorkspaceRepo>,
+}
+
+/// Mirrors `repowise-server`'s `CoChangePairDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct CoChangePair {
+    file_a: String,
+    file_b: String,
+    count: usize,
+}
+
+/// Mirrors `repowise-server`'s `RepoCoChangesDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct RepoCoChanges {
+    name: String,
+    available: bool,
+    pairs: Vec<CoChangePair>,
+}
+
+/// Mirrors `repowise-server`'s `WorkspaceCoChangesDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct WorkspaceCoChanges {
+    available: bool,
+    repos: Vec<RepoCoChanges>,
 }
 
 /// Mirrors `repowise-server`'s `UsageTotalsDto` wire shape.
@@ -1312,6 +1342,71 @@ fn WorkspaceSection() -> impl IntoView {
     }
 }
 
+/// The next slice of #64 after `WorkspaceSection`: each workspace
+/// repo's own most-coupled file pairs (from `GET
+/// /api/workspace-co-changes`), shown side by side. NOT cross-repo
+/// co-change -- separate repos have separate git histories, so files in
+/// different repos can never literally co-change together -- just each
+/// repo's own `repowise_git`-derived coupling rendered in one view. A
+/// repo with no readable git history renders a per-card note instead of
+/// an empty table.
+#[component]
+fn CoChangesSection() -> impl IntoView {
+    let co_changes =
+        LocalResource::new(|| fetch_json::<WorkspaceCoChanges>("/api/workspace-co-changes"));
+
+    view! {
+        <h2>"Workspace Co-Changes"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                co_changes
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(w) if !w.available => view! {
+                            <p class="empty">
+                                "No workspace configured (start the server with --workspace)."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(w) => view! {
+                            <div class="repo-cards">
+                                {w.repos.into_iter().map(|r| view! {
+                                    <div class="repo-card">
+                                        <h3>{r.name}</h3>
+                                        {if !r.available {
+                                            view! {
+                                                <p>"No git history found (or not a git repo)."</p>
+                                            }
+                                            .into_any()
+                                        } else if r.pairs.is_empty() {
+                                            view! {
+                                                <p>"No co-change coupling found (or too little history)."</p>
+                                            }
+                                            .into_any()
+                                        } else {
+                                            view! {
+                                                <ul>
+                                                    {r.pairs.into_iter().map(|p| view! {
+                                                        <li>
+                                                            {format!("{} — {} <-> {}", p.count, p.file_a, p.file_b)}
+                                                        </li>
+                                                    }).collect::<Vec<_>>()}
+                                                </ul>
+                                            }
+                                            .into_any()
+                                        }}
+                                    </div>
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// A cost-tracking view over `/api/usage` (#65's last remaining bundled
 /// feature): running token counts tallied across every `/api/chat`
 /// call this server process has handled, not a persisted history and
@@ -1628,6 +1723,7 @@ fn App() -> impl IntoView {
         <UsageSection />
         <SettingsSection />
         <WorkspaceSection />
+        <CoChangesSection />
     }
 }
 

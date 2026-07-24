@@ -113,6 +113,67 @@ fn builds_co_change_coupling_from_shared_commits() {
 }
 
 #[test]
+fn top_co_changed_pairs_ranks_the_whole_repo_by_coupling_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    init_repo(&root);
+
+    // a+b co-change twice; a+c co-change once -- and never all three
+    // together, so exactly two distinct pairs exist.
+    std::fs::write(root.join("a.txt"), "a\n").unwrap();
+    git(&root, &["add", "a.txt"]);
+    git(&root, &["commit", "-q", "-m", "Add a alone"]);
+
+    std::fs::write(root.join("a.txt"), "a\na2\n").unwrap();
+    std::fs::write(root.join("b.txt"), "b\n").unwrap();
+    git(&root, &["add", "a.txt", "b.txt"]);
+    git(&root, &["commit", "-q", "-m", "Add b, touch a"]);
+
+    std::fs::write(root.join("a.txt"), "a\na2\na3\n").unwrap();
+    std::fs::write(root.join("c.txt"), "c\n").unwrap();
+    git(&root, &["add", "a.txt", "c.txt"]);
+    git(&root, &["commit", "-q", "-m", "Add c, touch a"]);
+
+    std::fs::write(root.join("a.txt"), "a\na2\na3\na4\n").unwrap();
+    std::fs::write(root.join("b.txt"), "b\nb2\n").unwrap();
+    git(&root, &["add", "a.txt", "b.txt"]);
+    git(&root, &["commit", "-q", "-m", "Touch a and b again"]);
+
+    let analytics = GitAnalytics::collect(&root).unwrap();
+    let a_path = root.join("a.txt");
+    let b_path = root.join("b.txt");
+    let c_path = root.join("c.txt");
+
+    let top = analytics.top_co_changed_pairs(10);
+
+    assert_eq!(top.len(), 2);
+    let (a, b, count) = &top[0];
+    assert_eq!((a, b), (&a_path, &b_path));
+    assert_eq!(*count, 2);
+    let (a, c, count) = &top[1];
+    assert_eq!((a, c), (&a_path, &c_path));
+    assert_eq!(*count, 1);
+}
+
+#[test]
+fn top_co_changed_pairs_respects_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    init_repo(&root);
+
+    std::fs::write(root.join("a.txt"), "a\n").unwrap();
+    std::fs::write(root.join("b.txt"), "b\n").unwrap();
+    std::fs::write(root.join("c.txt"), "c\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "Add a, b, c together"]);
+
+    let analytics = GitAnalytics::collect(&root).unwrap();
+    let top = analytics.top_co_changed_pairs(1);
+
+    assert_eq!(top.len(), 1);
+}
+
+#[test]
 fn ownership_splits_lines_by_author() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();

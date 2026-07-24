@@ -151,6 +151,18 @@ enum Command {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Show each workspace repo's own most-coupled file pairs (from its
+    /// git history), side by side. Not cross-repo co-change -- separate
+    /// repos have separate git histories -- just each repo's coupling
+    /// shown together in one place. See `repowise-workspace`'s own docs
+    /// for the file format.
+    WorkspaceCoChanges {
+        #[arg(long)]
+        workspace: PathBuf,
+        /// How many co-changing pairs to list per repo.
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -181,6 +193,7 @@ fn main() -> anyhow::Result<()> {
             workspace,
         } => cmd_serve_dashboard(&path, addr, static_dir, workspace),
         Command::WorkspaceRepos { workspace } => cmd_workspace_repos(&workspace),
+        Command::WorkspaceCoChanges { workspace, top } => cmd_workspace_co_changes(&workspace, top),
     }
 }
 
@@ -575,6 +588,35 @@ fn cmd_workspace_repos(workspace: &Path) -> anyhow::Result<()> {
                 status.name,
                 status.path.display()
             ),
+        }
+    }
+    Ok(())
+}
+
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
+fn cmd_workspace_co_changes(workspace: &Path, top: usize) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    if repos.is_empty() {
+        println!("No repos configured in {}", workspace.display());
+        return Ok(());
+    }
+    for report in repowise_workspace::workspace_co_changes(&repos, top) {
+        println!("{} — {}", report.name, report.path.display());
+        if !report.available {
+            println!("  No git history found (or not a git repo).");
+            continue;
+        }
+        if report.pairs.is_empty() {
+            println!("  No co-change coupling found (or too little history).");
+            continue;
+        }
+        for pair in &report.pairs {
+            println!(
+                "  {:<4} {} <-> {}",
+                pair.count,
+                display_path(&pair.file_a, &report.path),
+                display_path(&pair.file_b, &report.path)
+            );
         }
     }
     Ok(())

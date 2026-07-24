@@ -6,6 +6,48 @@ repo routing work through PRs).
 
 ---
 
+## PR #204 — Add list_insert_zero_in_loop health marker
+**2026-07-24** · [#204](https://github.com/baileyrd/rusty_repo_wise/pull/204) · closes [#191](https://github.com/baileyrd/rusty_repo_wise/issues/191)
+
+- **Added:** `list_insert_zero_in_loop`, the fifth slice of issue #72's
+  Performance-signal cluster. Flags `.insert(0, ...)` on a list/vector
+  found inside a loop body — O(n) per call (shifts every element), O(n²)
+  across the whole loop, versus appending and reversing once or using a
+  deque.
+- **`Symbol` gains `list_insert_zero_in_loop: Vec<ListInsertZeroInLoopRef>`**
+  (each entry: `line`, `variable`), populated at parse time.
+- **New `repowise-parser::metrics::list_inserts_zero_in_loops`**, built
+  on the shared `matches_in_loops` walk. Unlike `calls_in_loops`/
+  `locks_in_loops`/`resource_constructions_in_loops` (which filter a
+  plain callee name against a fixed table), this classifier needs to
+  inspect the call's *arguments* too (the first argument must be the
+  literal `0`), so each language gets a single combined classifier
+  rather than a name-table filter step.
+- **Scope:** implemented for **Rust and Python only**, per this issue's
+  own acceptance criteria — unlike the other four Performance-signal
+  loop-body markers (#177/#178/#179/#180), this one's scope doesn't
+  extend to TypeScript/JavaScript.
+  - Rust: `.insert(0, ...)` on an identifier receiver, covering both
+    `Vec::insert`/`VecDeque::insert` since this port has no type
+    information to distinguish the two.
+  - Python: `list.insert(0, ...)` the same way.
+  - The other 14 parsed languages get an empty
+    `list_insert_zero_in_loop` list and never trigger this marker.
+- **New `FindingKind::ListInsertZeroInLoop`** (penalty −0.3, same weight
+  as the other loop-body markers), one `Finding` per flagged insert,
+  pointing at the insert's own line.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202).
+- 14 of #72's 19 sub-issues remain open — this closes only #191, not
+  #72 itself.
+
+---
+
 ## PR #202 — Add lock_in_loop health marker
 **2026-07-24** · [#202](https://github.com/baileyrd/rusty_repo_wise/pull/202) · closes [#180](https://github.com/baileyrd/rusty_repo_wise/issues/180)
 

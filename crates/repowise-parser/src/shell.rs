@@ -110,6 +110,7 @@ impl<'a> Walker<'a> {
                         max_nesting_depth,
                         bumpy_road_bumps,
                         complex_conditionals: Vec::new(),
+                        io_in_loop: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

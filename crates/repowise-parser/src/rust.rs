@@ -113,6 +113,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let io_in_loop = body
+                        .map(|b| {
+                            metrics::calls_in_loops(
+                                b,
+                                is_loop,
+                                |n| call_expression_callee(n, self.source),
+                                is_io_call,
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -135,6 +146,7 @@ impl<'a> Walker<'a> {
                         param_count,
                         primitive_param_count,
                         body_hash,
+                        io_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -167,6 +179,7 @@ impl<'a> Walker<'a> {
                         param_count: 0,
                         primitive_param_count: 0,
                         body_hash: None,
+                        io_in_loop: Vec::new(),
                     });
                 }
             }
@@ -189,6 +202,7 @@ impl<'a> Walker<'a> {
                         param_count: 0,
                         primitive_param_count: 0,
                         body_hash: None,
+                        io_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -337,6 +351,53 @@ fn condition_of(n: Node) -> Option<Node> {
         "if_expression" | "while_expression" => n.child_by_field_name("condition"),
         _ => None,
     }
+}
+
+/// Loop constructs for `io_in_loop` (issue #177): every way Rust repeats
+/// a block. A subset of `is_decision`'s node kinds -- excludes
+/// `if_expression`/`if_let_expression`/`match_arm`, which branch but
+/// don't repeat.
+fn is_loop(n: Node) -> bool {
+    matches!(
+        n.kind(),
+        "while_expression" | "while_let_expression" | "loop_expression" | "for_expression"
+    )
+}
+
+/// If `node` is a `call_expression`, the callee name to match against
+/// `is_io_call` -- same extraction `call_target_name` already does for
+/// the file's general call graph, applied here to a single node rather
+/// than every call in the file.
+fn call_expression_callee(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    node.child_by_field_name("function")
+        .map(|f| call_target_name(f, source))
+}
+
+/// A small fixed table of I/O-shaped callee names (file, network, or
+/// database operations) -- heuristic and coarse, like
+/// `repowise_workspace::contracts`'s route-pattern table: it matches on
+/// the same last-path-segment name `call_target_name` already uses for
+/// the general call graph, so it can't tell `db.execute(..)` from an
+/// unrelated `execute` method on some other type, and it can't recognize
+/// I/O hidden behind a wrapper function this table doesn't name.
+fn is_io_call(name: &str) -> bool {
+    matches!(
+        name,
+        "read_to_string"
+            | "read_to_end"
+            | "read_line"
+            | "read_exact"
+            | "write_all"
+            | "execute"
+            | "query"
+            | "query_row"
+            | "fetch_one"
+            | "fetch_all"
+            | "recv"
+    )
 }
 
 /// A parameter's declared type as source text, with a leading `&`/`&mut`/
@@ -777,5 +838,36 @@ mod tests {
         assert_eq!(one.body_hash, two.body_hash);
         // Too short to be a meaningful duplicate signal.
         assert!(short.body_hash.is_none());
+    }
+
+    #[test]
+    fn flags_io_shaped_calls_found_inside_a_loop_body_but_not_outside_one() {
+        let rec = extract_str(
+            r#"
+            fn hoisted(paths: Vec<String>) -> Vec<String> {
+                let mut out = Vec::new();
+                for p in &paths {
+                    out.push(std::fs::read_to_string(p).unwrap());
+                }
+                out
+            }
+
+            fn fine(items: Vec<i32>) -> i32 {
+                let mut total = 0;
+                for i in &items {
+                    total += i;
+                }
+                std::fs::read_to_string("config.toml").ok();
+                total
+            }
+            "#,
+        );
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+        let fine = rec.symbols.iter().find(|s| s.name == "fine").unwrap();
+
+        assert_eq!(hoisted.io_in_loop.len(), 1);
+        assert_eq!(hoisted.io_in_loop[0].callee_name, "read_to_string");
+        // Same callee, but called after the loop rather than inside it.
+        assert!(fine.io_in_loop.is_empty());
     }
 }

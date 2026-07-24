@@ -4,7 +4,7 @@
 //! a duplicate-code body hash. These feed `repowise-health`'s
 //! deterministic scoring.
 
-use repowise_core::ComplexConditionalRef;
+use repowise_core::{ComplexConditionalRef, IoInLoopRef};
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
 
@@ -214,6 +214,70 @@ pub fn complex_conditionals(
         body,
         &condition_of,
         &is_boolean_operator,
+        &is_nested_function,
+        &mut out,
+    );
+    out
+}
+
+/// Every call within `body` recognized as I/O-shaped (`is_io_call`, applied
+/// to the name `call_callee` extracts for a call-expression node -- `None`
+/// for non-call nodes) that occurs anywhere inside a loop (`is_loop`).
+/// Unlike `complex_conditionals` (which inspects each decision node's own
+/// condition subtree in isolation), this tracks a single "currently inside
+/// a loop" flag down the whole walk so a call nested inside two loops is
+/// still only reported once, at its own line, rather than once per
+/// enclosing loop.
+pub fn calls_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    call_callee: impl Fn(Node) -> Option<String>,
+    is_io_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<IoInLoopRef> {
+    fn walk(
+        node: Node,
+        in_loop: bool,
+        is_loop: &dyn Fn(Node) -> bool,
+        call_callee: &dyn Fn(Node) -> Option<String>,
+        is_io_call: &dyn Fn(&str) -> bool,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<IoInLoopRef>,
+    ) {
+        if in_loop {
+            if let Some(name) = call_callee(node) {
+                if is_io_call(&name) {
+                    out.push(IoInLoopRef {
+                        line: node.start_position().row + 1,
+                        callee_name: name,
+                    });
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            let child_in_loop = in_loop || is_loop(child);
+            walk(
+                child,
+                child_in_loop,
+                is_loop,
+                call_callee,
+                is_io_call,
+                is_nested_function,
+                out,
+            );
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        body,
+        false,
+        &is_loop,
+        &call_callee,
+        &is_io_call,
         &is_nested_function,
         &mut out,
     );

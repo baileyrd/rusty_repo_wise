@@ -7,11 +7,13 @@
 //! Phase 0 proved the architecture with `GET /api/overview` alone.
 //! Phase 1 added the rest of the static dashboard's views onto the same
 //! JSON-API shape: `/api/health`, `/api/hotspots`, `/api/decisions`,
-//! `/api/symbols`. Phase 2 (this module now) adds `/api/wiki-pages` and
-//! `/api/wiki` (wiki-page drill-down, matching the static dashboard's
-//! file-path links) and `/api/search` (instant search over files and
-//! symbols). Still not full parity — the dependency-graph view and the
-//! chat/LLM views are later phases, not done here.
+//! `/api/symbols`. Phase 2 added `/api/wiki-pages` and `/api/wiki`
+//! (wiki-page drill-down, matching the static dashboard's file-path
+//! links) and `/api/search` (instant search over files and symbols).
+//! Phase 3 (this module now) adds `/api/graph`, a file-level import
+//! dependency graph for a visual graph view — the last major static-
+//! dashboard-parity piece. Still not full parity — the chat/LLM views
+//! are a later phase, not done here.
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
@@ -187,6 +189,35 @@ struct SearchDto {
 /// How many matches `/api/search` returns per category -- an instant
 /// search box needs a short, glanceable list, not the whole index.
 const SEARCH_LIMIT: usize = 20;
+
+#[derive(Serialize)]
+struct GraphNodeDto {
+    id: String,
+    language: String,
+}
+
+#[derive(Serialize)]
+struct GraphEdgeDto {
+    from: String,
+    to: String,
+}
+
+#[derive(Serialize)]
+struct GraphDto {
+    nodes: Vec<GraphNodeDto>,
+    edges: Vec<GraphEdgeDto>,
+    /// `true` when this root has more files than `GRAPH_NODE_LIMIT` and
+    /// the graph below was cut down to the most-connected ones -- the
+    /// frontend surfaces this rather than silently rendering a partial
+    /// graph that looks complete.
+    truncated: bool,
+}
+
+/// A force-directed SVG layout of the whole file-import graph gets
+/// unreadable (and the client-side layout expensive) well before most
+/// real repos' file counts; keep the view to the most-connected files,
+/// which is also the most useful part of the graph to look at.
+const GRAPH_NODE_LIMIT: usize = 150;
 
 struct ApiError(anyhow::Error);
 
@@ -378,6 +409,52 @@ async fn get_search(
     Ok(Json(SearchDto { files, symbols }))
 }
 
+async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let graph = repowise_graph::RepoGraph::build(&index);
+
+    let mut ranked: Vec<(&repowise_core::FileRecord, usize)> = index
+        .files
+        .iter()
+        .map(|f| {
+            let degree = graph.dependencies_of(&f.path).len() + graph.dependents_of(&f.path).len();
+            (f, degree)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.path.cmp(&b.0.path)));
+    let truncated = ranked.len() > GRAPH_NODE_LIMIT;
+    ranked.truncate(GRAPH_NODE_LIMIT);
+
+    let included: std::collections::HashSet<&Path> =
+        ranked.iter().map(|(f, _)| f.path.as_path()).collect();
+
+    let nodes = ranked
+        .iter()
+        .map(|(f, _)| GraphNodeDto {
+            id: relative(&state.root, &f.path),
+            language: f.language.label().to_string(),
+        })
+        .collect();
+
+    let mut edges = Vec::new();
+    for (f, _) in &ranked {
+        for dep in graph.dependencies_of(&f.path) {
+            if included.contains(dep.as_path()) {
+                edges.push(GraphEdgeDto {
+                    from: relative(&state.root, &f.path),
+                    to: relative(&state.root, &dep),
+                });
+            }
+        }
+    }
+
+    Ok(Json(GraphDto {
+        nodes,
+        edges,
+        truncated,
+    }))
+}
+
 /// Build the axum `Router` — separated from `serve` so tests can drive
 /// requests directly against it (via `tower::ServiceExt::oneshot`)
 /// without binding a real socket. `static_dir`, if given, serves the
@@ -396,6 +473,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
         .route("/api/wiki-pages", get(get_wiki_pages))
         .route("/api/wiki", get(get_wiki))
         .route("/api/search", get(get_search))
+        .route("/api/graph", get(get_graph))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -527,6 +605,48 @@ mod tests {
                 calls: vec![],
                 field_accesses: vec![],
             }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    /// A repo with two files where `a.rs` imports `b.rs` -- enough to
+    /// exercise `/api/graph`'s nodes/edges without depending on any
+    /// language-specific import-path resolution heuristic (the import
+    /// is pre-resolved via `ImportRef::resolved_file`, same as a real
+    /// parser would set for e.g. Rust's `mod foo;`).
+    fn index_with_one_import_edge(root: &Path) -> RepoIndex {
+        let a = root.join("a.rs");
+        let b = root.join("b.rs");
+        std::fs::write(&a, "mod b;\n").unwrap();
+        std::fs::write(&b, "pub fn helper() {}\n").unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![
+                repowise_core::FileRecord {
+                    path: a.clone(),
+                    language: repowise_core::Language::Rust,
+                    lines: 1,
+                    symbols: vec![],
+                    imports: vec![repowise_core::ImportRef {
+                        path: "b".to_string(),
+                        line: 1,
+                        resolved_file: Some(b.clone()),
+                    }],
+                    calls: vec![],
+                    field_accesses: vec![],
+                },
+                repowise_core::FileRecord {
+                    path: b,
+                    language: repowise_core::Language::Rust,
+                    lines: 1,
+                    symbols: vec![],
+                    imports: vec![],
+                    calls: vec![],
+                    field_accesses: vec![],
+                },
+            ],
             other_files: 0,
         };
         index.save(root).unwrap();
@@ -705,5 +825,43 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["files"], serde_json::json!([]));
         assert_eq!(json["symbols"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_graph_returns_nodes_and_edges_for_an_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_import_edge(&root);
+
+        let (status, json) = get(root, "/api/graph").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["truncated"], false);
+        let nodes: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        assert!(nodes.contains(&"a.rs"));
+        assert!(nodes.contains(&"b.rs"));
+        assert_eq!(
+            json["edges"],
+            serde_json::json!([{"from": "a.rs", "to": "b.rs"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn get_graph_has_no_edges_for_a_file_with_no_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/graph").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["edges"], serde_json::json!([]));
+        assert_eq!(json["nodes"][0]["id"], "busy.rs");
+        assert_eq!(json["nodes"][0]["language"], "Rust");
     }
 }

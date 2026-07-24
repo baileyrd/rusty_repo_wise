@@ -130,6 +130,7 @@ impl<'a> Walker<'a> {
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
+                        list_insert_zero_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -162,6 +163,7 @@ impl<'a> Walker<'a> {
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
+                        list_insert_zero_in_loop: Vec::new(),
                     });
                 }
             }
@@ -366,6 +368,10 @@ impl<'a> Walker<'a> {
             string_concat_in_loop,
             resource_construction_in_loop,
             lock_in_loop,
+            // `list_insert_zero_in_loop` is Rust/Python-only per its own
+            // acceptance criteria (issue #191) -- unlike the other three
+            // loop-body markers, it doesn't extend to TypeScript/JavaScript.
+            list_insert_zero_in_loop: Vec::new(),
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);

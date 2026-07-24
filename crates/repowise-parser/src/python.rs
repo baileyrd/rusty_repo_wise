@@ -148,6 +148,16 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let list_insert_zero_in_loop = body
+                        .map(|b| {
+                            metrics::list_inserts_zero_in_loops(
+                                b,
+                                is_loop,
+                                |n| is_list_insert_zero(n, self.source),
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -169,6 +179,7 @@ impl<'a> Walker<'a> {
                         string_concat_in_loop,
                         resource_construction_in_loop,
                         lock_in_loop,
+                        list_insert_zero_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -200,6 +211,7 @@ impl<'a> Walker<'a> {
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
+                        list_insert_zero_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -477,6 +489,38 @@ fn is_lock_call(name: &str) -> bool {
     matches!(name, "acquire")
 }
 
+/// A `.insert(0, ...)` call on a bare identifier for
+/// `list_insert_zero_in_loop` (issue #191): a `call` whose callee is an
+/// `insert` method on an identifier receiver, whose first argument is
+/// the literal `0`. Returns the receiver's variable name. Unlike
+/// `is_io_call`/`is_lock_call`'s plain name-table shape, this needs to
+/// inspect the call's arguments too, so it's a single combined
+/// classifier rather than a name lookup.
+fn is_list_insert_zero(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let func = node.child_by_field_name("function")?;
+    if func.kind() != "attribute" {
+        return None;
+    }
+    let attribute = func.child_by_field_name("attribute")?;
+    if text(attribute, source) != "insert" {
+        return None;
+    }
+    let object = func.child_by_field_name("object")?;
+    if object.kind() != "identifier" {
+        return None;
+    }
+    let arguments = node.child_by_field_name("arguments")?;
+    let first_arg = arguments.named_child(0)?;
+    if first_arg.kind() == "integer" && text(first_arg, source) == "0" {
+        Some(text(object, source).to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +729,22 @@ mod tests {
         assert_eq!(per_iteration.lock_in_loop.len(), 1);
         assert_eq!(per_iteration.lock_in_loop[0].callee_name, "acquire");
         assert!(hoisted.lock_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_index_zero_insert_in_a_loop_but_not_other_indices() {
+        let rec = extract_str(
+            "def reversed_build(items):\n    out = []\n    for i in items:\n        out.insert(0, i)\n    return out\n\ndef appended(items):\n    out = []\n    for i in items:\n        out.insert(len(out), i)\n    return out\n",
+        );
+        let reversed_build = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "reversed_build")
+            .unwrap();
+        let appended = rec.symbols.iter().find(|s| s.name == "appended").unwrap();
+
+        assert_eq!(reversed_build.list_insert_zero_in_loop.len(), 1);
+        assert_eq!(reversed_build.list_insert_zero_in_loop[0].variable, "out");
+        assert!(appended.list_insert_zero_in_loop.is_empty());
     }
 }

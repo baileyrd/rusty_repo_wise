@@ -295,6 +295,7 @@ mod tests {
             string_concat_in_loop: Vec::new(),
             resource_construction_in_loop: Vec::new(),
             lock_in_loop: Vec::new(),
+            list_insert_zero_in_loop: Vec::new(),
             param_count: 1,
             primitive_param_count: 0,
             // Distinct per symbol (keyed off start_line) so two

@@ -4,8 +4,9 @@
 //! resolution, which isn't relevant here and would otherwise touch disk.
 
 use repowise_core::{
-    CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, Language, LockInLoopRef, RepoIndex,
-    ResourceConstructionInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
+    CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, Language, ListInsertZeroInLoopRef,
+    LockInLoopRef, RepoIndex, ResourceConstructionInLoopRef, StringConcatInLoopRef, Symbol,
+    SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -43,6 +44,7 @@ fn symbol(
         string_concat_in_loop: Vec::new(),
         resource_construction_in_loop: Vec::new(),
         lock_in_loop: Vec::new(),
+        list_insert_zero_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -506,6 +508,57 @@ fn flags_one_finding_per_lock_in_loop_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(4)));
     assert!(lines.contains(&Some(6)));
     assert!(findings_for(&report, "clean", FindingKind::LockInLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_list_insert_zero_in_loop_pointing_at_its_own_line() {
+    let mut looped = symbol(
+        "insert.rs",
+        "looped",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    looped.list_insert_zero_in_loop = vec![
+        ListInsertZeroInLoopRef {
+            line: 4,
+            variable: "out".to_string(),
+        },
+        ListInsertZeroInLoopRef {
+            line: 6,
+            variable: "acc".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "insert.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "insert.rs",
+        vec![looped, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "looped", FindingKind::ListInsertZeroInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::ListInsertZeroInLoop).is_empty());
 }
 
 #[test]

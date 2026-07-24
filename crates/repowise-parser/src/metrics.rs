@@ -5,8 +5,8 @@
 //! deterministic scoring.
 
 use repowise_core::{
-    ComplexConditionalRef, IoInLoopRef, LockInLoopRef, ResourceConstructionInLoopRef,
-    StringConcatInLoopRef,
+    ComplexConditionalRef, IoInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
+    ResourceConstructionInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -365,6 +365,27 @@ pub fn locks_in_loops(
     .into_iter()
     .map(|(line, callee_name)| LockInLoopRef { line, callee_name })
     .collect()
+}
+
+/// Every call within `body` recognized as inserting at index 0 of a
+/// list/vector (`is_list_insert_zero`, applied to each node -- returns
+/// the list/vector variable's name, or `None` if the node isn't a
+/// recognized index-0-insert shape) that occurs anywhere inside a loop
+/// (`is_loop`). Unlike `calls_in_loops`/`locks_in_loops` (which filter a
+/// plain callee name against a fixed table), this classifier needs to
+/// inspect the call's *arguments* too (the first argument must be the
+/// literal `0`), so it's a single combined closure rather than a
+/// name-table `filter` step. See `matches_in_loops`.
+pub fn list_inserts_zero_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    is_list_insert_zero: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<ListInsertZeroInLoopRef> {
+    matches_in_loops(body, is_loop, is_list_insert_zero, is_nested_function)
+        .into_iter()
+        .map(|(line, variable)| ListInsertZeroInLoopRef { line, variable })
+        .collect()
 }
 
 /// Best-effort parameter count: the number of named children of a

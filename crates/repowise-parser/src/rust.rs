@@ -156,6 +156,16 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let list_insert_zero_in_loop = body
+                        .map(|b| {
+                            metrics::list_inserts_zero_in_loops(
+                                b,
+                                is_loop,
+                                |n| is_list_insert_zero(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -182,6 +192,7 @@ impl<'a> Walker<'a> {
                         string_concat_in_loop,
                         resource_construction_in_loop,
                         lock_in_loop,
+                        list_insert_zero_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -218,6 +229,7 @@ impl<'a> Walker<'a> {
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
+                        list_insert_zero_in_loop: Vec::new(),
                     });
                 }
             }
@@ -244,6 +256,7 @@ impl<'a> Walker<'a> {
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
+                        list_insert_zero_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -547,6 +560,40 @@ fn is_expensive_constructor(name: &str) -> bool {
 /// know a given receiver is actually an `RwLock`.
 fn is_lock_call(name: &str) -> bool {
     matches!(name, "lock" | "try_lock")
+}
+
+/// A `.insert(0, ...)` call on a bare identifier for
+/// `list_insert_zero_in_loop` (issue #191): a `call_expression` whose
+/// callee is an `insert` method on an identifier receiver (covers both
+/// `Vec::insert`/`VecDeque::insert`, since this port has no type
+/// information to distinguish the two collection types), whose first
+/// argument is the literal `0`. Returns the receiver's variable name.
+/// Unlike `is_io_call`/`is_lock_call`'s plain name-table shape, this
+/// needs to inspect the call's arguments too, so it's a single combined
+/// classifier rather than a name lookup.
+fn is_list_insert_zero(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let func = node.child_by_field_name("function")?;
+    if func.kind() != "field_expression" {
+        return None;
+    }
+    let field = func.child_by_field_name("field")?;
+    if text(field, source) != "insert" {
+        return None;
+    }
+    let value = func.child_by_field_name("value")?;
+    if value.kind() != "identifier" {
+        return None;
+    }
+    let arguments = node.child_by_field_name("arguments")?;
+    let first_arg = arguments.named_child(0)?;
+    if first_arg.kind() == "integer_literal" && text(first_arg, source) == "0" {
+        Some(text(value, source).to_string())
+    } else {
+        None
+    }
 }
 
 /// A parameter's declared type as source text, with a leading `&`/`&mut`/
@@ -1153,5 +1200,35 @@ mod tests {
         assert_eq!(per_iteration.lock_in_loop.len(), 1);
         assert_eq!(per_iteration.lock_in_loop[0].callee_name, "lock");
         assert!(hoisted.lock_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_index_zero_insert_in_a_loop_but_not_other_indices() {
+        let rec = extract_str(
+            r#"
+            fn reversed(items: &[i32]) -> Vec<i32> {
+                let mut out = Vec::new();
+                for i in items {
+                    out.insert(0, *i);
+                }
+                out
+            }
+
+            fn appended(items: &[i32]) -> Vec<i32> {
+                let mut out = Vec::new();
+                for i in items {
+                    out.insert(out.len(), *i);
+                }
+                out
+            }
+            "#,
+        );
+        let reversed = rec.symbols.iter().find(|s| s.name == "reversed").unwrap();
+        let appended = rec.symbols.iter().find(|s| s.name == "appended").unwrap();
+
+        assert_eq!(reversed.list_insert_zero_in_loop.len(), 1);
+        assert_eq!(reversed.list_insert_zero_in_loop[0].variable, "out");
+        // Insertion at a non-zero index must not match.
+        assert!(appended.list_insert_zero_in_loop.is_empty());
     }
 }

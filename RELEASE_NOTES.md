@@ -6,6 +6,47 @@ repo routing work through PRs).
 
 ---
 
+## PR #151 — Add dashboard chat view over repowise-llm (Phase 5)
+**2026-07-24** · [#151](https://github.com/baileyrd/rusty_repo_wise/pull/151) · closes [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) · part of [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** Phase 5 of the dashboard-server pivot — a chat view over
+  `repowise-llm`. Every view the static `repowise dashboard` page had
+  now has a live equivalent, plus drill-down, search, a dependency
+  graph, and chat the static page never had.
+- **`repowise-llm`:** adds multi-turn support (`Turn`,
+  `complete_messages`); the existing single-turn `complete()` becomes a
+  thin wrapper over it, no breaking change to wiki-summary generation.
+- **New `repowise-server` endpoint:** `POST /api/chat` takes
+  `{"history": [...]}` (the whole conversation, client-owned) and
+  returns `{"available": bool, "reply": string | null}` —
+  `available: false` when `REPOWISE_LLM_BASE_URL` isn't set, the same
+  opt-in convention `repowise generate` (#61) uses. The latest user
+  message is grounded with a lightweight keyword search over indexed
+  files/symbols before reaching the LLM — not real embeddings-based
+  retrieval, which is #63's job. `LlmConfig` is now resolved once at
+  server startup into `AppState` rather than re-read per request, so
+  tests can inject a fixture config without racing on process env vars.
+- **`repowise-web`:** a new chat section keeps history client-side and
+  resends it every turn; shows a plain explanatory message instead of a
+  broken-looking chat box when the server reports the feature isn't
+  configured.
+- Verified end-to-end manually: ran the real compiled server with
+  `REPOWISE_LLM_BASE_URL` pointed at a throwaway fake OpenAI-compatible
+  endpoint, confirmed a grounded reply over `curl` and then in a real
+  browser across two chat turns (history accumulates correctly), then
+  restarted with the env var unset and confirmed the "not configured"
+  message renders instead of a chat box.
+- **Closes #59** (live/instant search — delivered in Phase 2, and this
+  PR's chat view was the last item blocking full closure of the
+  dashboard-server pivot itself).
+- **Does not close #65**: that issue bundles five live-server-dependent
+  features (Present Mode, chat, cost tracking, settings, live job
+  banner). Only chat is done; #65 was reopened after this PR's merge
+  incorrectly auto-closed it, and is now rescoped to the four remaining
+  items.
+
+---
+
 ## PR #149 — Add ownership, dead-code, and decision-tracker views (Phase 4)
 **2026-07-24** · [#149](https://github.com/baileyrd/rusty_repo_wise/pull/149) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

@@ -64,7 +64,7 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from fourteen
+- Score every file's health deterministically (0–10, no LLM/ML) from fifteen
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
@@ -78,19 +78,22 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and two of repowise's Performance-signal
-  cluster: I/O in a loop (`io_in_loop` — a known file/network/database
-  call found inside a loop body where hoisting it above the loop is
-  usually possible) and string concatenation in a loop
-  (`string_concat_in_loop` — `+=`/`s = s + other`/`.push_str(..)`
-  accumulating onto a string variable inside a loop body, quadratic
-  string-building cost since each append reallocates and copies the
-  whole string so far), both Rust/Python/TS+JS only — except for shell
-  scripts, which are deliberately exempt from the dead-code
-  marker: a shell function is routinely invoked only from the command
-  line, another script, or a cron job, none of which this port's call
-  graph can see, making the signal too unreliable to report for that
-  language.
+  declared parameter types), and three of repowise's Performance-signal
+  cluster, all Rust/Python/TS+JS only: I/O in a loop (`io_in_loop` — a
+  known file/network/database call found inside a loop body where
+  hoisting it above the loop is usually possible), string concatenation
+  in a loop (`string_concat_in_loop` — `+=`/`s = s + other`/
+  `.push_str(..)` accumulating onto a string variable inside a loop
+  body, quadratic string-building cost since each append reallocates
+  and copies the whole string so far), and expensive resource
+  construction in a loop (`resource_construction_in_loop` — a known
+  expensive-to-construct resource, e.g. an HTTP client or connection/
+  thread pool, built inside a loop body where hoisting it above the
+  loop is usually possible) — except for shell scripts, which are
+  deliberately exempt from the dead-code marker: a shell function is
+  routinely invoked only from the command line, another script, or a
+  cron job, none of which this port's call graph can see, making the
+  signal too unreliable to report for that language.
 - Derive git-history analytics — churn, hotspot score (churn × complexity),
   bug-fix commit frequency, co-change coupling, and per-author line
   ownership — by shelling out to `git log`/`git blame`, joined against the
@@ -122,7 +125,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 14 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 15 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -148,9 +151,10 @@ dashboard is one static page with no per-file drill-down or live search
   (feeds LCOM4), per-condition boolean-operator-chain detection for
   Rust/Python/TS+JS (feeds `complex_conditional`), declared-parameter-type
   extraction for Rust/TypeScript (feeds `primitive_obsession`), and a
-  shared loop-classifier for Rust/Python/TS+JS feeding both a small
-  per-language I/O-callee-name table (`io_in_loop`) and a per-language
-  string-append-expression classifier (`string_concat_in_loop`).
+  shared loop-classifier for Rust/Python/TS+JS feeding a per-language
+  I/O-callee-name table (`io_in_loop`), a per-language string-append-
+  expression classifier (`string_concat_in_loop`), and a per-language
+  expensive-resource-constructor-name table (`resource_construction_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -247,6 +251,7 @@ to `[0, 10]`:
 | Primitive obsession (`primitive_obsession`) | >= 3 bare-primitive-typed parameters | −0.3 |
 | I/O in loop (`io_in_loop`) | a known I/O-shaped call found inside a loop body | −0.3 |
 | String concat in loop (`string_concat_in_loop`) | a string-append expression accumulating inside a loop body | −0.3 |
+| Resource construction in loop (`resource_construction_in_loop`) | a known expensive-to-construct resource built inside a loop body | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -262,7 +267,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the fourteen; everything else keeps its default
+# only overriding two of the fifteen; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -414,6 +419,35 @@ append reallocates and copies the whole string built so far, so this is a
 genuine performance-risk signal, not just a style nit. The other 13
 languages have no per-language classifier yet and so never produce any
 entries for this marker.
+
+**Resource construction in loop (`resource_construction_in_loop`)** flags
+construction of a known expensive resource (an HTTP client, a connection/
+thread pool) found anywhere inside a loop body — the third slice of the
+Performance-signal cluster, reusing `io_in_loop`'s `is_loop` classifier
+and, like it, implemented for **Rust, Python, and TypeScript/JavaScript
+only**. The tricky part is distinguishing "expensive resource
+construction" from ordinary object construction: a small fixed table of
+constructor names per language (e.g. `HttpClient::new`/`Client::new`/
+`ThreadPool::new` for Rust, `Session`/`ThreadPoolExecutor`/`Pool` for
+Python, `HttpClient`/`Client`/`ThreadPool`/`Pool` for TypeScript/
+JavaScript) is matched against each call/constructor node's callee name,
+deliberately excluding cheap allocation constructors (`Vec::with_capacity`,
+`String::new`) and regex construction (`Regex::new`/`re.compile`/
+`new RegExp`, reserved for `regex_compile_in_loop`, issue #188, so the
+two markers don't double-flag the same call once both exist). Rust's
+table match is on the *qualified* `Type::method` path rather than
+`call_target_name`'s plain last-segment match, since a bare method name
+like `new` alone is far too generic (`Vec::new()` must not match);
+Python/JS match on the bare constructor name since class names are
+already distinctive enough there. `repowise-parser::metrics::resource_constructions_in_loops`
+reuses the exact same "currently inside a loop" tracking shape as
+`io_in_loop`/`string_concat_in_loop` (`Symbol::resource_construction_in_loop:
+Vec<ResourceConstructionInLoopRef>`, each entry carrying the call's own
+`line` and `callee_name`). Like the other two, this is deliberately
+coarse and heuristic: it can't recognize an expensive constructor hidden
+behind a type alias or a wrapper function the table doesn't name. The
+other 13 languages have no per-language table yet and so never produce
+any entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

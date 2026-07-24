@@ -126,6 +126,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let resource_construction_in_loop = body
+                        .map(|b| {
+                            metrics::resource_constructions_in_loops(
+                                b,
+                                is_loop,
+                                |n| call_expression_callee(n, self.source),
+                                is_expensive_constructor,
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -145,6 +156,7 @@ impl<'a> Walker<'a> {
                         body_hash,
                         io_in_loop,
                         string_concat_in_loop,
+                        resource_construction_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -174,6 +186,7 @@ impl<'a> Walker<'a> {
                         body_hash: None,
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
+                        resource_construction_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -425,6 +438,22 @@ fn is_string_concat(node: Node, source: &str) -> Option<String> {
     }
 }
 
+/// A small fixed table of constructor-shaped callee names recognized as
+/// building an expensive resource (an HTTP session, a connection/thread
+/// pool) for `resource_construction_in_loop` (issue #179) -- heuristic
+/// and coarse, like `is_io_call`. Uses the same last-attribute-segment
+/// name `call_expression_callee` already extracts for the general call
+/// graph, so it can't tell a class named `Session` for one purpose from
+/// an unrelated class of the same name. Deliberately excludes regex
+/// construction (`re.compile`) -- reserved for `regex_compile_in_loop`
+/// (issue #188) -- and plain, cheap constructors (`list`, `dict`, etc.).
+fn is_expensive_constructor(name: &str) -> bool {
+    matches!(
+        name,
+        "Session" | "ThreadPoolExecutor" | "ProcessPoolExecutor" | "Pool"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +629,21 @@ mod tests {
         assert_eq!(reassignment.string_concat_in_loop[0].variable, "s");
         // The append after the loop is not flagged, only the one inside it.
         assert_eq!(fine.string_concat_in_loop.len(), 1);
+    }
+
+    #[test]
+    fn flags_expensive_constructors_in_a_loop_but_not_cheap_ones() {
+        let rec = extract_str(
+            "def hoisted(urls):\n    for u in urls:\n        s = requests.Session()\n        s.get(u)\n\ndef cheap(items):\n    out = []\n    for i in items:\n        d = dict()\n        out.append(d)\n    return out\n",
+        );
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+        let cheap = rec.symbols.iter().find(|s| s.name == "cheap").unwrap();
+
+        assert_eq!(hoisted.resource_construction_in_loop.len(), 1);
+        assert_eq!(
+            hoisted.resource_construction_in_loop[0].callee_name,
+            "Session"
+        );
+        assert!(cheap.resource_construction_in_loop.is_empty());
     }
 }

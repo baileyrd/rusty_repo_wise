@@ -5,7 +5,7 @@
 
 use repowise_core::{
     CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, Language, RepoIndex,
-    StringConcatInLoopRef, Symbol, SymbolKind,
+    ResourceConstructionInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -41,6 +41,7 @@ fn symbol(
         complex_conditionals: Vec::new(),
         io_in_loop: Vec::new(),
         string_concat_in_loop: Vec::new(),
+        resource_construction_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -402,6 +403,57 @@ fn flags_one_finding_per_string_concat_in_loop_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(4)));
     assert!(lines.contains(&Some(6)));
     assert!(findings_for(&report, "clean", FindingKind::StringConcatInLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_resource_construction_in_loop_pointing_at_its_own_line() {
+    let mut looped = symbol(
+        "resource.rs",
+        "looped",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    looped.resource_construction_in_loop = vec![
+        ResourceConstructionInLoopRef {
+            line: 4,
+            callee_name: "HttpClient::new".to_string(),
+        },
+        ResourceConstructionInLoopRef {
+            line: 6,
+            callee_name: "ThreadPool::new".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "resource.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "resource.rs",
+        vec![looped, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "looped", FindingKind::ResourceConstructionInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::ResourceConstructionInLoop).is_empty());
 }
 
 #[test]

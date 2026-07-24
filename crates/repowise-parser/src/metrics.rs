@@ -4,7 +4,9 @@
 //! a duplicate-code body hash. These feed `repowise-health`'s
 //! deterministic scoring.
 
-use repowise_core::{ComplexConditionalRef, IoInLoopRef, StringConcatInLoopRef};
+use repowise_core::{
+    ComplexConditionalRef, IoInLoopRef, ResourceConstructionInLoopRef, StringConcatInLoopRef,
+};
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
 
@@ -220,14 +222,72 @@ pub fn complex_conditionals(
     out
 }
 
+/// Every node within `body` for which `classify` returns `Some(value)`
+/// (`None` for a non-match), found anywhere inside a loop (`is_loop`),
+/// paired with its own line. Tracks a single "currently inside a loop"
+/// flag down the whole walk -- unlike `complex_conditionals` (which
+/// inspects each decision node's own condition subtree in isolation) --
+/// so a match nested inside two loops is still only reported once, at
+/// its own line, rather than once per enclosing loop. Shared by every
+/// "X found inside a loop" health marker in repowise's Performance-signal
+/// cluster (issue #72 and friends, starting with #177's `io_in_loop`):
+/// each caller supplies its own per-language `is_loop`/`classify` and
+/// maps the `(line, value)` pairs into its own dedicated `Vec<...Ref>`
+/// type, so `Symbol`/`Finding` still get a marker-specific, self-describing
+/// shape rather than a shared generic one.
+fn matches_in_loops<T>(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    classify: impl Fn(Node) -> Option<T>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<(usize, T)> {
+    fn walk<T>(
+        node: Node,
+        in_loop: bool,
+        is_loop: &dyn Fn(Node) -> bool,
+        classify: &dyn Fn(Node) -> Option<T>,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<(usize, T)>,
+    ) {
+        if in_loop {
+            if let Some(value) = classify(node) {
+                out.push((node.start_position().row + 1, value));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            let child_in_loop = in_loop || is_loop(child);
+            walk(
+                child,
+                child_in_loop,
+                is_loop,
+                classify,
+                is_nested_function,
+                out,
+            );
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        body,
+        false,
+        &is_loop,
+        &classify,
+        &is_nested_function,
+        &mut out,
+    );
+    out
+}
+
 /// Every call within `body` recognized as I/O-shaped (`is_io_call`, applied
 /// to the name `call_callee` extracts for a call-expression node -- `None`
 /// for non-call nodes) that occurs anywhere inside a loop (`is_loop`).
-/// Unlike `complex_conditionals` (which inspects each decision node's own
-/// condition subtree in isolation), this tracks a single "currently inside
-/// a loop" flag down the whole walk so a call nested inside two loops is
-/// still only reported once, at its own line, rather than once per
-/// enclosing loop.
+/// See `matches_in_loops` for the shared "currently inside a loop"
+/// tracking shape this (and every sibling `*_in_loops` marker function)
+/// builds on.
 pub fn calls_in_loops(
     body: Node,
     is_loop: impl Fn(Node) -> bool,
@@ -235,109 +295,53 @@ pub fn calls_in_loops(
     is_io_call: impl Fn(&str) -> bool,
     is_nested_function: impl Fn(Node) -> bool,
 ) -> Vec<IoInLoopRef> {
-    fn walk(
-        node: Node,
-        in_loop: bool,
-        is_loop: &dyn Fn(Node) -> bool,
-        call_callee: &dyn Fn(Node) -> Option<String>,
-        is_io_call: &dyn Fn(&str) -> bool,
-        is_nested_function: &dyn Fn(Node) -> bool,
-        out: &mut Vec<IoInLoopRef>,
-    ) {
-        if in_loop {
-            if let Some(name) = call_callee(node) {
-                if is_io_call(&name) {
-                    out.push(IoInLoopRef {
-                        line: node.start_position().row + 1,
-                        callee_name: name,
-                    });
-                }
-            }
-        }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if is_nested_function(child) {
-                continue;
-            }
-            let child_in_loop = in_loop || is_loop(child);
-            walk(
-                child,
-                child_in_loop,
-                is_loop,
-                call_callee,
-                is_io_call,
-                is_nested_function,
-                out,
-            );
-        }
-    }
-    let mut out = Vec::new();
-    walk(
+    matches_in_loops(
         body,
-        false,
-        &is_loop,
-        &call_callee,
-        &is_io_call,
-        &is_nested_function,
-        &mut out,
-    );
-    out
+        is_loop,
+        |n| call_callee(n).filter(|name| is_io_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| IoInLoopRef { line, callee_name })
+    .collect()
 }
 
 /// Every string-append expression within `body` (`is_string_concat`,
 /// applied to each node -- returns the appended-onto variable's name, or
 /// `None` if the node isn't a recognized append shape) that occurs
-/// anywhere inside a loop (`is_loop`). Same "currently inside a loop"
-/// flag-tracking shape as `calls_in_loops` (issue #177) -- a nested
-/// append is still only reported once, at its own line.
+/// anywhere inside a loop (`is_loop`). See `matches_in_loops`.
 pub fn string_concats_in_loops(
     body: Node,
     is_loop: impl Fn(Node) -> bool,
     is_string_concat: impl Fn(Node) -> Option<String>,
     is_nested_function: impl Fn(Node) -> bool,
 ) -> Vec<StringConcatInLoopRef> {
-    fn walk(
-        node: Node,
-        in_loop: bool,
-        is_loop: &dyn Fn(Node) -> bool,
-        is_string_concat: &dyn Fn(Node) -> Option<String>,
-        is_nested_function: &dyn Fn(Node) -> bool,
-        out: &mut Vec<StringConcatInLoopRef>,
-    ) {
-        if in_loop {
-            if let Some(variable) = is_string_concat(node) {
-                out.push(StringConcatInLoopRef {
-                    line: node.start_position().row + 1,
-                    variable,
-                });
-            }
-        }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if is_nested_function(child) {
-                continue;
-            }
-            let child_in_loop = in_loop || is_loop(child);
-            walk(
-                child,
-                child_in_loop,
-                is_loop,
-                is_string_concat,
-                is_nested_function,
-                out,
-            );
-        }
-    }
-    let mut out = Vec::new();
-    walk(
+    matches_in_loops(body, is_loop, is_string_concat, is_nested_function)
+        .into_iter()
+        .map(|(line, variable)| StringConcatInLoopRef { line, variable })
+        .collect()
+}
+
+/// Every call within `body` recognized as constructing an expensive
+/// resource (`is_expensive_constructor`, applied to the name
+/// `constructor_callee` extracts -- `None` for non-matching nodes) that
+/// occurs anywhere inside a loop (`is_loop`). See `matches_in_loops`.
+pub fn resource_constructions_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    constructor_callee: impl Fn(Node) -> Option<String>,
+    is_expensive_constructor: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<ResourceConstructionInLoopRef> {
+    matches_in_loops(
         body,
-        false,
-        &is_loop,
-        &is_string_concat,
-        &is_nested_function,
-        &mut out,
-    );
-    out
+        is_loop,
+        |n| constructor_callee(n).filter(|name| is_expensive_constructor(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| ResourceConstructionInLoopRef { line, callee_name })
+    .collect()
 }
 
 /// Best-effort parameter count: the number of named children of a

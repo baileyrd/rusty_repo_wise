@@ -734,7 +734,11 @@ FastAPI-backend architecture, minus the Node.js dependency.
   **chat section** talks to `POST /api/chat`, with full conversation
   history kept client-side and resent every turn; if the server reports
   the LLM isn't configured, it shows a plain explanatory message instead
-  of a broken-looking chat box.
+  of a broken-looking chat box. A **Present Mode** (button, top of the
+  page) steps full-screen through Overview/Health/Hotspots/Decisions/
+  Graph with the arrow keys (`Esc` to exit) — the current slide is
+  reflected in the URL as `#present/<n>`, so a link to a specific slide
+  is shareable/bookmarkable. Frontend-only, no new server endpoint.
   It's deliberately **not** a member of the root Cargo workspace (its
   own `Cargo.toml` has an empty `[workspace]` table): it only ever
   targets `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev),
@@ -761,14 +765,18 @@ FastAPI-backend architecture, minus the Node.js dependency.
   gets there with a hand-rolled force-directed layout instead, so no JS
   build toolchain is needed for any part of the frontend.
 
-This closes out the dashboard-server pivot (issues #59/#65): every view
-the static dashboard had now has a live equivalent, plus drill-down,
-search, a dependency graph, and chat the static page never had. Two
-honest caveats: chat's retrieval is keyword search, not real
-embeddings-based RAG (issue #63), and this still isn't a byte-for-byte
-reproduction of real repowise's dashboard (e.g. no Cmd+K palette
-overlay, no D3-identical graph rendering) — it's parity in what the
-dashboard *does*, built a different way.
+This closes out issue #59 and the dashboard-server pivot's static-parity
+scope: every view the static dashboard had now has a live equivalent,
+plus drill-down, search, a dependency graph, chat, and Present Mode the
+static page never had. Two honest caveats: chat's retrieval is keyword
+search, not real embeddings-based RAG (issue #63), and this still isn't
+a byte-for-byte reproduction of real repowise's dashboard (e.g. no
+D3-identical graph rendering) — it's parity in what the dashboard
+*does*, built a different way. Issue #65 (which also tracks Present
+Mode) stays open for its three other bundled, still-undone features:
+cost tracking, Settings, and a live job banner — each needs its own
+design pass (persistence for cost history, a write-capable settings
+API, a background-reindex-job concept the server doesn't have yet).
 
 ## Testing
 

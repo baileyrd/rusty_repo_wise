@@ -13,6 +13,7 @@ repowise-adr = { path = "../repowise-adr" }
 repowise-docs = { path = "../repowise-docs" }
 repowise-llm = { path = "../repowise-llm" }
 repowise-parser = { path = "../repowise-parser" }
+repowise-workspace = { path = "../repowise-workspace" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

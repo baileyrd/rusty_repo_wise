@@ -1046,6 +1046,7 @@ dependencies = [
  "repowise-mcp",
  "repowise-parser",
  "repowise-server",
+ "repowise-workspace",
  "tokio",
 ]
 
@@ -1143,6 +1144,7 @@ dependencies = [
  "repowise-graph",
  "repowise-health",
  "repowise-parser",
+ "repowise-workspace",
  "rmcp",
  "schemars",
  "serde",
@@ -1190,12 +1192,24 @@ dependencies = [
  "repowise-health",
  "repowise-llm",
  "repowise-parser",
+ "repowise-workspace",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
  "tower-http",
+]
+
+[[package]]
+name = "repowise-workspace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "repowise-core",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

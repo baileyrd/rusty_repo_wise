@@ -62,6 +62,20 @@
 //! across sessions) and token counts, not a dollar cost -- this port
 //! has no per-model pricing table.
 //!
+//! `GET /api/workspace-repos` is the first slice of issue #64 (multi-
+//! repo/workspace support): when this server was started with
+//! `--workspace <path>` (a `repowise-workspace` TOML file naming member
+//! repos), it reports every configured repo's name/path/indexed status
+//! (`{"available": true, "repos": [...]}`), or `{"available": false}`
+//! when no `--workspace` was given -- same degrade-gracefully shape as
+//! every other optional-data endpoint here. This is deliberately just a
+//! listing: no cross-repo dependency resolution exists anywhere in this
+//! port, so `get_architecture`/`get_blast_radius` and the dashboard's
+//! system-map/conformance/contracts/co-changes views (also #64) are
+//! left for a follow-up, and there's no way to switch which repo the
+//! rest of this server's endpoints operate on -- `root` stays fixed for
+//! the life of the process, same as before this endpoint existed.
+//!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
 
@@ -97,6 +111,12 @@ struct AppState {
     /// mutating process env vars (which would race across parallel
     /// tests).
     llm_config: Arc<Option<repowise_llm::LlmConfig>>,
+    /// Resolved once at server startup from `--workspace <path>`
+    /// (`None` if that flag was omitted, `Some(vec![])` for a
+    /// workspace file naming zero repos) -- see this module's own
+    /// module doc comment for the #64 workspace-listing feature this
+    /// backs.
+    workspace_repos: Arc<Option<Vec<repowise_workspace::ResolvedWorkspaceRepo>>>,
     reindex_job: ReindexJob,
     usage: UsageTracker,
 }
@@ -1019,6 +1039,56 @@ async fn get_usage(State(state): State<AppState>) -> Json<UsageTotalsDto> {
     Json(state.usage.snapshot())
 }
 
+#[derive(Serialize)]
+struct WorkspaceRepoDto {
+    name: String,
+    path: String,
+    indexed: bool,
+    file_count: Option<usize>,
+    other_file_count: Option<usize>,
+}
+
+impl From<repowise_workspace::RepoStatus> for WorkspaceRepoDto {
+    fn from(s: repowise_workspace::RepoStatus) -> Self {
+        WorkspaceRepoDto {
+            name: s.name,
+            path: s.path.display().to_string(),
+            indexed: s.indexed,
+            file_count: s.file_count,
+            other_file_count: s.other_file_count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WorkspaceReposDto {
+    available: bool,
+    repos: Vec<WorkspaceRepoDto>,
+}
+
+/// Issue #64's first slice: reports every repo the server was started
+/// with (`--workspace <path>`), each with its indexed status and file
+/// count. `available: false` (empty `repos`) when no workspace was
+/// configured -- same degrade-gracefully shape as every other
+/// optional-data endpoint in this module.
+async fn get_workspace_repos(State(state): State<AppState>) -> Json<WorkspaceReposDto> {
+    let dto = match state.workspace_repos.as_ref() {
+        Some(repos) => WorkspaceReposDto {
+            available: true,
+            repos: repos
+                .iter()
+                .map(repowise_workspace::repo_status)
+                .map(WorkspaceRepoDto::from)
+                .collect(),
+        },
+        None => WorkspaceReposDto {
+            available: false,
+            repos: Vec::new(),
+        },
+    };
+    Json(dto)
+}
+
 async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
@@ -1078,10 +1148,12 @@ async fn get_reindex_status(State(state): State<AppState>) -> Json<ReindexStatus
 /// without binding a real socket. `static_dir`, if given, serves the
 /// built `repowise-web` frontend (e.g. `crates/repowise-web/dist` after
 /// `trunk build`) as a fallback for any path the JSON API doesn't claim.
-pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
+pub fn app(root: PathBuf, static_dir: Option<PathBuf>, workspace: Option<PathBuf>) -> Router {
+    let workspace_repos = workspace.and_then(|path| repowise_workspace::load_resolved(&path).ok());
     let state = AppState {
         root: Arc::new(root),
         llm_config: Arc::new(repowise_llm::LlmConfig::from_env()),
+        workspace_repos: Arc::new(workspace_repos),
         reindex_job: ReindexJob::new(),
         usage: UsageTracker::new(),
     };
@@ -1105,6 +1177,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
         .route("/api/settings", get(get_settings))
         .route("/api/usage", get(get_usage))
+        .route("/api/workspace-repos", get(get_workspace_repos))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -1112,17 +1185,19 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     }
 }
 
-/// Bind `addr` and serve `app(root, static_dir)` until the process is
-/// killed. `repowise-cli` drives this from a `tokio::runtime::Runtime`
-/// it builds just for this command, the same "rest of the CLI stays
-/// synchronous" pattern `repowise serve` (the MCP server) already uses.
+/// Bind `addr` and serve `app(root, static_dir, workspace)` until the
+/// process is killed. `repowise-cli` drives this from a
+/// `tokio::runtime::Runtime` it builds just for this command, the same
+/// "rest of the CLI stays synchronous" pattern `repowise serve` (the
+/// MCP server) already uses.
 pub async fn serve(
     root: PathBuf,
     addr: SocketAddr,
     static_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(root, static_dir)).await?;
+    axum::serve(listener, app(root, static_dir, workspace)).await?;
     Ok(())
 }
 
@@ -1168,7 +1243,7 @@ mod tests {
         };
         index.save(&root).unwrap();
 
-        let response = app(root, None)
+        let response = app(root, None, None)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/overview")
@@ -1190,7 +1265,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        let response = app(root, None)
+        let response = app(root, None, None)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/overview")
@@ -1337,7 +1412,7 @@ mod tests {
     }
 
     async fn get(root: PathBuf, uri: &str) -> (StatusCode, serde_json::Value) {
-        let response = app(root, None)
+        let response = app(root, None, None)
             .oneshot(
                 axum::http::Request::builder()
                     .uri(uri)
@@ -1944,6 +2019,7 @@ mod tests {
         let state = AppState {
             root: Arc::new(root),
             llm_config: Arc::new(llm_config),
+            workspace_repos: Arc::new(None),
             reindex_job: ReindexJob::new(),
             usage: UsageTracker::new(),
         };
@@ -2042,6 +2118,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_workspace_repos_is_unavailable_without_a_workspace_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/workspace-repos").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["repos"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_workspace_repos_reports_indexed_and_unindexed_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let indexed_repo = dir.path().join("indexed");
+        let unindexed_repo = dir.path().join("unindexed");
+        std::fs::create_dir_all(&indexed_repo).unwrap();
+        std::fs::create_dir_all(&unindexed_repo).unwrap();
+        index_with_one_busy_symbol(&indexed_repo);
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "indexed"
+                    path = "{}"
+
+                    [[repo]]
+                    name = "unindexed"
+                    path = "{}"
+                "#,
+                indexed_repo.display(),
+                unindexed_repo.display(),
+            ),
+        )
+        .unwrap();
+
+        let router = app(root, None, Some(workspace_path));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/workspace-repos")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["available"], true);
+        let repos = json["repos"].as_array().unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0]["name"], "indexed");
+        assert_eq!(repos[0]["indexed"], true);
+        assert_eq!(repos[0]["file_count"], 1);
+        assert_eq!(repos[1]["name"], "unindexed");
+        assert_eq!(repos[1]["indexed"], false);
+        assert_eq!(repos[1]["file_count"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
     async fn post_chat_tallies_reported_usage_into_api_usage() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -2109,7 +2253,7 @@ mod tests {
     }
 
     /// Like `get`, but drives an already-built `Router` instead of
-    /// constructing a fresh `app(root, None)` -- needed to observe a
+    /// constructing a fresh `app(root, None, None)` -- needed to observe a
     /// background job's state transitions, since a fresh `app()` call
     /// would build a brand-new `AppState` (and reindex job) each time.
     async fn get_on(router: Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -2165,7 +2309,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         index_with_one_busy_symbol(&root);
 
-        let router = app(root, None);
+        let router = app(root, None, None);
         let (status, json) =
             post_json(router.clone(), "/api/reindex", serde_json::Value::Null).await;
         assert_eq!(status, StatusCode::OK);
@@ -2193,7 +2337,7 @@ mod tests {
         index_with_one_busy_symbol(&root);
         std::fs::remove_dir_all(&root).unwrap();
 
-        let router = app(root, None);
+        let router = app(root, None, None);
         let (status, _json) =
             post_json(router.clone(), "/api/reindex", serde_json::Value::Null).await;
         assert_eq!(status, StatusCode::OK);

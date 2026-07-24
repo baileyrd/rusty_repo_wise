@@ -103,6 +103,11 @@ enum Command {
     Serve {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Path to a workspace TOML file (see `repowise workspace-repos`
+        /// and `repowise-workspace`'s own docs for the format) -- opts
+        /// into the `list_repos` tool. Omit to run single-repo only.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Generate a static HTML dashboard (overview, health, hotspots,
     /// decisions) under `.repowise/dashboard/index.html`.
@@ -132,6 +137,19 @@ enum Command {
         /// run the JSON API alone, with no static frontend served.
         #[arg(long)]
         static_dir: Option<PathBuf>,
+        /// Path to a workspace TOML file -- opts into `GET
+        /// /api/workspace-repos` and the dashboard's Workspace section.
+        /// Omit to run single-repo only.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// List every repo configured in a workspace TOML file, each with
+    /// its indexed status and file count if a prior `repowise init`/
+    /// `update` has run there. See `repowise-workspace`'s own docs for
+    /// the file format.
+    WorkspaceRepos {
+        #[arg(long)]
+        workspace: PathBuf,
     },
 }
 
@@ -153,14 +171,16 @@ fn main() -> anyhow::Result<()> {
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Docs { path } => cmd_docs(&path),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
-        Command::Serve { path } => cmd_serve(&path),
+        Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
         Command::Generate { path } => cmd_generate(&path),
         Command::ServeDashboard {
             path,
             addr,
             static_dir,
-        } => cmd_serve_dashboard(&path, addr, static_dir),
+            workspace,
+        } => cmd_serve_dashboard(&path, addr, static_dir, workspace),
+        Command::WorkspaceRepos { workspace } => cmd_workspace_repos(&workspace),
     }
 }
 
@@ -503,18 +523,19 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_serve(path: &Path) -> anyhow::Result<()> {
+fn cmd_serve(path: &Path, workspace: Option<PathBuf>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     // The rest of the CLI is synchronous; only the MCP server needs an
     // async runtime, so build one here rather than making `main` async.
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(repowise_mcp::run(root))
+    runtime.block_on(repowise_mcp::run(root, workspace))
 }
 
 fn cmd_serve_dashboard(
     path: &Path,
     addr: std::net::SocketAddr,
     static_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     if static_dir.is_none() {
@@ -526,7 +547,37 @@ fn cmd_serve_dashboard(
     }
     println!("Dashboard server listening on http://{addr}");
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(repowise_server::serve(root, addr, static_dir))
+    runtime.block_on(repowise_server::serve(root, addr, static_dir, workspace))
+}
+
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
+fn cmd_workspace_repos(workspace: &Path) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    if repos.is_empty() {
+        println!("No repos configured in {}", workspace.display());
+        return Ok(());
+    }
+    println!(
+        "{} repo(s) configured in {}:",
+        repos.len(),
+        workspace.display()
+    );
+    for repo in &repos {
+        let status = repowise_workspace::repo_status(repo);
+        match status.file_count {
+            Some(file_count) => println!(
+                "  {} — {} ({file_count} file(s) indexed)",
+                status.name,
+                status.path.display()
+            ),
+            None => println!(
+                "  {} — {} (not indexed; run `repowise init` there)",
+                status.name,
+                status.path.display()
+            ),
+        }
+    }
+    Ok(())
 }
 
 fn cmd_dashboard(path: &Path) -> anyhow::Result<()> {

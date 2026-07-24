@@ -12,6 +12,7 @@ members = [
     "crates/repowise-dashboard",
     "crates/repowise-llm",
     "crates/repowise-server",
+    "crates/repowise-workspace",
     "crates/repowise-cli",
 ]
 

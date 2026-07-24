@@ -1,3 +1,14 @@
+//! `WorkspaceSection` is issue #64's first slice (multi-repo/workspace
+//! support): a read-only "repo cards" view over `GET
+//! /api/workspace-repos`, listing every repo the server was started
+//! with (`--workspace <path>`) and each one's indexed status. Shows an
+//! explanatory message instead of empty cards when no workspace was
+//! configured. Deliberately doesn't let you switch which repo the rest
+//! of the dashboard is viewing -- see `repowise-server`'s own module
+//! doc comment for what's deferred to a follow-up (cross-repo
+//! `get_architecture`/`get_blast_radius`, system-map/conformance/
+//! contracts/co-changes views).
+//!
 //! Issue #65 (live-server-dependent dashboard features) also tracks
 //! cost tracking, its fifth and last bundled feature: `UsageSection`
 //! polls `GET /api/usage` every 3s for running chat-call and
@@ -205,6 +216,23 @@ struct Settings {
     wiki_pages_available: bool,
     llm_configured: bool,
     llm_model: Option<String>,
+}
+
+/// Mirrors `repowise-server`'s `WorkspaceRepoDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct WorkspaceRepo {
+    name: String,
+    path: String,
+    indexed: bool,
+    file_count: Option<usize>,
+    other_file_count: Option<usize>,
+}
+
+/// Mirrors `repowise-server`'s `WorkspaceReposDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct WorkspaceRepos {
+    available: bool,
+    repos: Vec<WorkspaceRepo>,
 }
 
 /// Mirrors `repowise-server`'s `UsageTotalsDto` wire shape.
@@ -1230,6 +1258,60 @@ fn SettingsSection() -> impl IntoView {
     }
 }
 
+/// Issue #64's first slice: a read-only "repo cards" view over
+/// `/api/workspace-repos`, listing every repo the server was started
+/// with (`--workspace <path>`) and each one's indexed status. Shows a
+/// plain explanatory message instead of empty cards when no workspace
+/// was configured. Deliberately does NOT let you switch which repo the
+/// rest of the dashboard is viewing -- that's separate future work; the
+/// rest of this page keeps showing whatever repo the server's `root`
+/// argument points at, same as before this section existed.
+#[component]
+fn WorkspaceSection() -> impl IntoView {
+    let workspace = LocalResource::new(|| fetch_json::<WorkspaceRepos>("/api/workspace-repos"));
+
+    view! {
+        <h2>"Workspace"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                workspace
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(w) if !w.available => view! {
+                            <p class="empty">
+                                "No workspace configured (start the server with --workspace)."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(w) => view! {
+                            <div class="repo-cards">
+                                {w.repos.into_iter().map(|r| view! {
+                                    <div class="repo-card">
+                                        <h3>{r.name}</h3>
+                                        <p>{r.path}</p>
+                                        <p>
+                                            {if r.indexed {
+                                                format!(
+                                                    "{} file(s) indexed ({} other)",
+                                                    r.file_count.unwrap_or(0),
+                                                    r.other_file_count.unwrap_or(0),
+                                                )
+                                            } else {
+                                                "not indexed".to_string()
+                                            }}
+                                        </p>
+                                    </div>
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// A cost-tracking view over `/api/usage` (#65's last remaining bundled
 /// feature): running token counts tallied across every `/api/chat`
 /// call this server process has handled, not a persisted history and
@@ -1545,6 +1627,7 @@ fn App() -> impl IntoView {
         <ChatSection />
         <UsageSection />
         <SettingsSection />
+        <WorkspaceSection />
     }
 }
 

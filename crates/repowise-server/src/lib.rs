@@ -29,9 +29,15 @@
 //! chat reply is never blocked by that. No vector index or persistence
 //! -- every chat call re-embeds the whole corpus in one batched
 //! request, an honest cost/latency tradeoff for a first slice.
-//! `/api/search` (the instant search box) is unaffected and stays
-//! substring-only; #63's own open questions suggest PageRank-biasing it
-//! with `repowise-graph`'s in-degree data as a cheaper follow-up.
+//!
+//! `/api/search` stays substring-only (no embeddings there -- an API
+//! call per keystroke would make instant search not instant) but is
+//! now PageRank-biased, #63's second slice and the cheaper alternative
+//! its own open questions suggested: matched files/symbols are ranked
+//! by `repowise-graph`'s already-computed `dependents_of`/
+//! `call_in_degree` rather than plain alphabetical, so a
+//! heavily-depended-on file or heavily-called symbol surfaces above an
+//! equally-matching but less-connected one, no new analysis needed.
 //!
 //! Issue #65 (the live-server-dependent dashboard features, split out
 //! after the #59/#65 pivot phases) also tracks a live job banner. `GET
@@ -788,29 +794,47 @@ async fn get_search(
         }));
     }
 
-    let mut files: Vec<String> = index
+    // PageRank-biased ranking (issue #63's cheaper-than-embeddings
+    // intermediate step): among substring matches, files/symbols with
+    // more dependents/callers -- already computed by `repowise-graph`,
+    // no new analysis needed -- rank above equally-matching but less-
+    // depended-on ones. No network call, so instant search stays
+    // instant; real embeddings-based retrieval is `/api/chat`'s job
+    // (see this module's own doc comment).
+    let graph = repowise_graph::RepoGraph::build(&index);
+
+    let mut files: Vec<(usize, String)> = index
         .files
         .iter()
-        .map(|f| relative(&state.root, &f.path))
-        .filter(|rel| rel.to_lowercase().contains(&needle))
+        .filter_map(|f| {
+            let rel = relative(&state.root, &f.path);
+            rel.to_lowercase()
+                .contains(&needle)
+                .then(|| (graph.dependents_of(&f.path).len(), rel))
+        })
         .collect();
-    files.sort();
+    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     files.truncate(SEARCH_LIMIT);
+    let files: Vec<String> = files.into_iter().map(|(_, rel)| rel).collect();
 
-    let mut symbols: Vec<SymbolDto> = index
+    let mut symbols: Vec<(usize, SymbolDto)> = index
         .files
         .iter()
         .flat_map(|f| f.symbols.iter())
         .filter(|s| s.name.to_lowercase().contains(&needle))
-        .map(|s| SymbolDto {
-            name: s.name.clone(),
-            kind: s.kind.label().to_string(),
-            file: relative(&state.root, &s.file),
-            start_line: s.start_line,
+        .map(|s| {
+            let dto = SymbolDto {
+                name: s.name.clone(),
+                kind: s.kind.label().to_string(),
+                file: relative(&state.root, &s.file),
+                start_line: s.start_line,
+            };
+            (graph.call_in_degree(&s.id), dto)
         })
         .collect();
-    symbols.sort_by(|a, b| a.name.cmp(&b.name));
+    symbols.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     symbols.truncate(SEARCH_LIMIT);
+    let symbols: Vec<SymbolDto> = symbols.into_iter().map(|(_, dto)| dto).collect();
 
     Ok(Json(SearchDto { files, symbols }))
 }
@@ -1260,6 +1284,58 @@ mod tests {
         index
     }
 
+    /// A caller (`task_aardvark`, never called) and a callee
+    /// (`task_zebra`, called once) sharing a `task_` name prefix so a
+    /// single search matches both -- named so plain alphabetical order
+    /// would rank the caller first, letting a test distinguish "still
+    /// alphabetical" from "actually re-ranked by call in-degree".
+    fn index_with_a_caller_and_a_more_called_symbol(root: &Path) -> RepoIndex {
+        let file = root.join("lib.rs");
+        std::fs::write(
+            &file,
+            "fn task_aardvark() { task_zebra(); }\nfn task_zebra() {}\n",
+        )
+        .unwrap();
+        let symbol = |id: &str, name: &str, line: usize| repowise_core::Symbol {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: repowise_core::SymbolKind::Function,
+            file: file.clone(),
+            start_line: line,
+            end_line: line,
+            parent: None,
+            complexity: 1,
+            max_nesting_depth: 0,
+            bumpy_road_bumps: 0,
+            complex_conditionals: Vec::new(),
+            param_count: 0,
+            primitive_param_count: 0,
+            body_hash: None,
+        };
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![repowise_core::FileRecord {
+                path: file.clone(),
+                language: repowise_core::Language::Rust,
+                lines: 2,
+                symbols: vec![
+                    symbol("lib.rs::task_aardvark::1", "task_aardvark", 1),
+                    symbol("lib.rs::task_zebra::2", "task_zebra", 2),
+                ],
+                imports: vec![],
+                calls: vec![repowise_core::CallRef {
+                    caller: Some("lib.rs::task_aardvark::1".to_string()),
+                    callee_name: "task_zebra".to_string(),
+                    line: 1,
+                }],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
     async fn get(root: PathBuf, uri: &str) -> (StatusCode, serde_json::Value) {
         let response = app(root, None)
             .oneshot(
@@ -1432,6 +1508,38 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["files"], serde_json::json!([]));
         assert_eq!(json["symbols"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_search_ranks_files_by_dependents_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_import_edge(&root);
+
+        // "a.rs" imports "b.rs", so "b.rs" has one dependent and "a.rs"
+        // has none; plain alphabetical order would put "a.rs" first.
+        let (status, json) = get(root, "/api/search?q=rs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["files"], serde_json::json!(["b.rs", "a.rs"]));
+    }
+
+    #[tokio::test]
+    async fn get_search_ranks_symbols_by_call_in_degree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_a_caller_and_a_more_called_symbol(&root);
+
+        let (status, json) = get(root, "/api/search?q=task_").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = json["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["task_zebra", "task_aardvark"]);
     }
 
     #[tokio::test]

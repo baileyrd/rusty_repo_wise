@@ -6,6 +6,55 @@ repo routing work through PRs).
 
 ---
 
+## PR #208 — Add regex_compile_in_loop health marker
+**2026-07-24** · [#208](https://github.com/baileyrd/rusty_repo_wise/pull/208) · closes [#188](https://github.com/baileyrd/rusty_repo_wise/issues/188)
+
+- **Added:** `regex_compile_in_loop`, the seventh slice of issue #72's
+  Performance-signal cluster. Flags a known regex-compilation call
+  (`Regex::new`, `re.compile`, `new RegExp`) found inside a loop body —
+  compiling a regex is orders of magnitude more expensive than using an
+  already-compiled one, so doing it once per loop iteration instead of
+  once before the loop is a common, easily-fixed performance mistake.
+- **`Symbol` gains `regex_compile_in_loop: Vec<RegexCompileInLoopRef>`**
+  (each entry: `line`, `callee_name`), populated at parse time.
+- **New `repowise-parser::metrics::regex_compiles_in_loops`**, a thin
+  wrapper on the shared `matches_in_loops` walk — no new walking logic
+  needed, same shape as the five other loop-body markers already built
+  on it.
+- **Scope:** implemented for **Rust, Python, and TypeScript/JavaScript**,
+  matching `io_in_loop`'s scope.
+  - Rust: reuses `qualified_call_name` (already extracting `Type::method`
+    qualified paths for `resource_construction_in_loop`/
+    `json_parse_in_loop`) for `Regex::new`'s qualified form — a bare
+    `new` alone would match `Vec::new()`.
+  - Python: reuses `qualified_call_name` (`object.attribute`, e.g.
+    `re.compile`) — a bare `compile` alone is too generic (`ast.compile`,
+    other `.compile()` methods).
+  - TypeScript/JavaScript: reuses `resource_constructor_callee` (handles
+    both `call_expression` and `new_expression`) with a new
+    `is_regex_compile_call` table matching the bare `RegExp` constructor
+    name — unlike Rust/Python, `RegExp` is already distinctive enough on
+    its own, no qualified form needed.
+  - The other 13 parsed languages get an empty `regex_compile_in_loop`
+    list and never trigger this marker.
+- **New `FindingKind::RegexCompileInLoop`** (penalty −0.3, same weight as
+  the other loop-body markers), one `Finding` per flagged call, pointing
+  at the call's own line.
+- This is the marker `resource_construction_in_loop`'s own table already
+  excluded `Regex::new`/`re.compile`/`new RegExp` for (issue #179), so
+  the two markers don't double-flag the same call now that both exist.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206).
+- 12 of #72's 19 sub-issues remain open — this closes only #188, not
+  #72 itself.
+
+---
+
 ## PR #206 — Add json_parse_in_loop health marker
 **2026-07-24** · [#206](https://github.com/baileyrd/rusty_repo_wise/pull/206) · closes [#193](https://github.com/baileyrd/rusty_repo_wise/issues/193)
 

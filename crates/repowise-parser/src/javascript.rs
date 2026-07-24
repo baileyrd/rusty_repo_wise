@@ -129,6 +129,7 @@ impl<'a> Walker<'a> {
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
+                        lock_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -160,6 +161,7 @@ impl<'a> Walker<'a> {
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
+                        lock_in_loop: Vec::new(),
                     });
                 }
             }
@@ -333,6 +335,17 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let lock_in_loop = body
+            .map(|b| {
+                metrics::locks_in_loops(
+                    b,
+                    is_loop,
+                    |n| call_expression_callee(n, self.source),
+                    is_lock_call,
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -352,6 +365,7 @@ impl<'a> Walker<'a> {
             io_in_loop,
             string_concat_in_loop,
             resource_construction_in_loop,
+            lock_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -564,6 +578,14 @@ fn resource_constructor_callee(node: Node, source: &str) -> Option<String> {
 /// reserved for `regex_compile_in_loop` (issue #188).
 fn is_expensive_constructor(name: &str) -> bool {
     matches!(name, "ThreadPool" | "Pool" | "HttpClient" | "Client")
+}
+
+/// A small fixed table of lock-acquisition method names for
+/// `lock_in_loop` (issue #180): JS has no native mutex, but common
+/// userland lock libraries (e.g. `async-mutex`) expose an `.acquire()`
+/// method, mirroring the Python shape.
+fn is_lock_call(name: &str) -> bool {
+    matches!(name, "acquire")
 }
 
 /// A parameter's declared type annotation as source text. TypeScript-only:
@@ -853,5 +875,22 @@ mod tests {
             "HttpClient"
         );
         assert!(cheap.resource_construction_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_lock_acquisition_in_a_loop_but_not_hoisted_out() {
+        let rec = extract_js(
+            "function perIteration(lock, items) {\n  for (const i of items) {\n    lock.acquire();\n    doWork(i);\n  }\n}\n\nfunction hoisted(lock, items) {\n  lock.acquire();\n  for (const i of items) {\n    doWork(i);\n  }\n}\n",
+        );
+        let per_iteration = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "perIteration")
+            .unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(per_iteration.lock_in_loop.len(), 1);
+        assert_eq!(per_iteration.lock_in_loop[0].callee_name, "acquire");
+        assert!(hoisted.lock_in_loop.is_empty());
     }
 }

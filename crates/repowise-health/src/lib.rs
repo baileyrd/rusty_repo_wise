@@ -15,15 +15,17 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and three of
+//! `repowise_core::Symbol::primitive_param_count`), and four of
 //! repowise's Performance-signal cluster (issue #72), all Rust/Python/
 //! TS+JS-only: I/O-shaped calls found inside a loop body (`io_in_loop`
 //! — see `repowise_core::Symbol::io_in_loop`), string concatenation
 //! accumulating inside a loop body (`string_concat_in_loop` — see
-//! `repowise_core::Symbol::string_concat_in_loop`), and expensive-resource
+//! `repowise_core::Symbol::string_concat_in_loop`), expensive-resource
 //! construction inside a loop body (`resource_construction_in_loop` —
-//! see `repowise_core::Symbol::resource_construction_in_loop`).
-//! Git-history-based markers (churn, hotspots, bug-fix history) aren't
+//! see `repowise_core::Symbol::resource_construction_in_loop`), and lock
+//! acquisition inside a loop body (`lock_in_loop` — see
+//! `repowise_core::Symbol::lock_in_loop`). Git-history-based markers
+//! (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
 //!
@@ -136,6 +138,11 @@ fn default_string_concat_in_loop() -> f64 {
 fn default_resource_construction_in_loop() -> f64 {
     0.3
 }
+// Same per-occurrence weight as the other loop-body markers (issue
+// #180): same rough severity.
+fn default_lock_in_loop() -> f64 {
+    0.3
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -184,6 +191,8 @@ pub struct HealthWeights {
     pub string_concat_in_loop: f64,
     #[serde(default = "default_resource_construction_in_loop")]
     pub resource_construction_in_loop: f64,
+    #[serde(default = "default_lock_in_loop")]
+    pub lock_in_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -204,6 +213,7 @@ impl Default for HealthWeights {
             io_in_loop: default_io_in_loop(),
             string_concat_in_loop: default_string_concat_in_loop(),
             resource_construction_in_loop: default_resource_construction_in_loop(),
+            lock_in_loop: default_lock_in_loop(),
         }
     }
 }
@@ -234,6 +244,7 @@ impl HealthWeights {
             FindingKind::IoInLoop => self.io_in_loop,
             FindingKind::StringConcatInLoop => self.string_concat_in_loop,
             FindingKind::ResourceConstructionInLoop => self.resource_construction_in_loop,
+            FindingKind::LockInLoop => self.lock_in_loop,
         }
     }
 }
@@ -255,6 +266,7 @@ pub enum FindingKind {
     IoInLoop,
     StringConcatInLoop,
     ResourceConstructionInLoop,
+    LockInLoop,
 }
 
 impl FindingKind {
@@ -275,6 +287,7 @@ impl FindingKind {
             FindingKind::IoInLoop => "io-in-loop",
             FindingKind::StringConcatInLoop => "string-concat-in-loop",
             FindingKind::ResourceConstructionInLoop => "resource-construction-in-loop",
+            FindingKind::LockInLoop => "lock-in-loop",
         }
     }
 }
@@ -499,6 +512,23 @@ fn check_function_markers(
                 "`{}` (expensive resource construction) found inside a loop body -- \
                  consider hoisting it out",
                 construction.callee_name
+            ),
+        });
+    }
+    // Already filtered to lock-acquisition calls found inside a loop body
+    // at extraction time (see `repowise_parser::metrics::locks_in_loops`);
+    // every entry here is already flagged, same as the other loop-body
+    // markers above.
+    for lock in &sym.lock_in_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(lock.line),
+            kind: FindingKind::LockInLoop,
+            detail: format!(
+                "`{}` (lock acquisition) found inside a loop body -- \
+                 consider acquiring it once outside the loop",
+                lock.callee_name
             ),
         });
     }

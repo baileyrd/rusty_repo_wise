@@ -198,13 +198,14 @@ repowise dashboard [PATH]           # generate a static HTML dashboard under .re
 repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
 repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
-                                     #   --workspace <FILE> to opt into the Workspace/Workspace Co-Changes/System Map/Conformance sections
+                                     #   --workspace <FILE> to opt into the Workspace/Workspace Co-Changes/System Map/Conformance/Contracts sections
 repowise workspace-repos --workspace <FILE>  # list every repo in a workspace TOML file + indexed status
 repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own most-coupled file pairs
                                      #   --top <N> (default 10) how many pairs to list per repo
 repowise workspace-architecture --workspace <FILE>  # cross-repo Rust `use` resolution: which repos depend on which
 repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  # direct cross-repo importers of one file
 repowise workspace-conformance --workspace <FILE>  # circular cross-repo dependencies (repo A imports B imports A)
+repowise workspace-contracts --workspace <FILE>  # regex-based HTTP producer/consumer route matching across repos
 ```
 
 ## Health scoring
@@ -937,13 +938,33 @@ further human-specified rule set to detect.
 - `repowise serve-dashboard --workspace <path>` gains `GET
   /api/workspace-conformance` and the dashboard gets a **Conformance
   section**.
-- **Still deliberately not included**: the dashboard's
-  `/workspace/contracts` (producer/consumer API contract matching)
-  view — the last remaining #64 item, needing a new route-detection
-  capability this port doesn't have yet. There's also still no way to
-  switch which repo the rest of the dashboard/MCP server operates on —
-  `root` stays fixed for the life of the process, same as before this
-  slice existed.
+
+The final slice adds contracts: producer/consumer API contract
+matching. Unlike every other #64 slice, this needs no cross-repo
+symbol resolution at all — it's a regex-based scan of each indexed
+file's raw text for a small, fixed table of HTTP route-registration
+patterns (axum `.route("/path", get(...))`, Flask/FastAPI
+`@app.get("/path")`, Express `app.get("/path", ...)`) and HTTP-call
+patterns (JS `fetch("/path")`/`axios.get("/path")`, Python
+`requests.get("/path")`, Rust `ureq::get("/path")`), matching each
+consumer call against producer routes registered in *other* repos
+(segment-wise, treating a producer path segment like `:id`/`{id}` as a
+wildcard). Coarse and heuristic by design — a real implementation would
+need to parse each web framework's actual route-registration semantics
+per language, which this port has no such capability for. False
+negatives (an unrecognized framework idiom) and false positives (a
+route-shaped string that isn't actually a route) are both expected.
+
+- `repowise workspace-contracts --workspace <path>` prints matched
+  producer/consumer pairs and any consumer calls with no known producer
+  in the workspace (not necessarily a problem — may be a genuinely
+  external API, or a producer this heuristic doesn't recognize).
+- `repowise serve-dashboard --workspace <path>` gains `GET
+  /api/workspace-contracts` and the dashboard gets a **Contracts
+  section**.
+- This closes out all five items #64 originally bundled. There's still
+  no way to switch which repo the rest of the dashboard/MCP server
+  operates on — `root` stays fixed for the life of the process.
 
 ## Testing
 

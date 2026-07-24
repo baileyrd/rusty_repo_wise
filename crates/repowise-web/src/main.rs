@@ -16,9 +16,7 @@
 //! `SystemMapSection` is the next #64 slice: real cross-repo Rust `use`
 //! resolution over `GET /api/workspace-architecture`, rendered as a
 //! plain repo-pair table with the individual import sites listed
-//! underneath. Rust-only -- see `repowise-workspace`'s own module doc
-//! comment for what's deferred to a follow-up (contracts is the last
-//! remaining #64 view).
+//! underneath. Rust-only.
 //!
 //! `ConformanceSection` is the next #64 slice: circular cross-repo
 //! dependencies over `GET /api/workspace-conformance`, reusing exactly
@@ -26,6 +24,13 @@
 //! repo-level dependency graph should form a DAG, so a cycle is a
 //! concrete "pattern divergence" finding needing no further
 //! human-specified rule set.
+//!
+//! `ContractsSection` is the last of #64's five bundled items: regex-
+//! based HTTP producer/consumer route matching over `GET
+//! /api/workspace-contracts`. Fully independent of the other #64 views
+//! -- no cross-repo symbol resolution involved, just a fixed pattern
+//! table over raw source text (see `repowise-workspace`'s `contracts`
+//! module doc comment for the coarse/heuristic caveat).
 //!
 //! Issue #65 (live-server-dependent dashboard features) also tracks
 //! cost tracking, its fifth and last bundled feature: `UsageSection`
@@ -308,6 +313,32 @@ struct WorkspaceArchitecture {
 struct WorkspaceConformance {
     available: bool,
     cycles: Vec<Vec<String>>,
+}
+
+/// Mirrors `repowise-server`'s `ContractMatchDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct ContractMatch {
+    producer_repo: String,
+    producer_file: String,
+    consumer_repo: String,
+    consumer_file: String,
+    path: String,
+}
+
+/// Mirrors `repowise-server`'s `UnmatchedConsumerDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct UnmatchedConsumer {
+    repo: String,
+    file: String,
+    path: String,
+}
+
+/// Mirrors `repowise-server`'s `WorkspaceContractsDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct WorkspaceContracts {
+    available: bool,
+    matches: Vec<ContractMatch>,
+    unmatched_consumers: Vec<UnmatchedConsumer>,
 }
 
 /// Mirrors `repowise-server`'s `UsageTotalsDto` wire shape.
@@ -1575,6 +1606,77 @@ fn ConformanceSection() -> impl IntoView {
     }
 }
 
+/// The last of #64's five bundled items: regex-based HTTP producer/
+/// consumer route matching over `GET /api/workspace-contracts`. Fully
+/// independent of the other #64 views -- no cross-repo symbol
+/// resolution involved, just a fixed pattern table over raw source
+/// text (see `repowise-workspace`'s `contracts` module doc comment for
+/// the coarse/heuristic caveat). Renders matched producer/consumer
+/// pairs and unmatched consumer calls (not necessarily a problem -- may
+/// be a genuinely external API, or a producer this heuristic's pattern
+/// table doesn't recognize) as two separate lists.
+#[component]
+fn ContractsSection() -> impl IntoView {
+    let contracts =
+        LocalResource::new(|| fetch_json::<WorkspaceContracts>("/api/workspace-contracts"));
+
+    view! {
+        <h2>"Contracts"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                contracts
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(c) if !c.available => view! {
+                            <p class="empty">
+                                "No workspace configured (start the server with --workspace)."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(c) => view! {
+                            <div>
+                                <h3>"Matched"</h3>
+                                {if c.matches.is_empty() {
+                                    view! { <p class="empty">"No cross-repo API contracts matched."</p> }.into_any()
+                                } else {
+                                    view! {
+                                        <ul>
+                                            {c.matches.into_iter().map(|m| view! {
+                                                <li>
+                                                    {format!(
+                                                        "{}: {} ({}) <- {} ({})",
+                                                        m.path, m.producer_repo, m.producer_file,
+                                                        m.consumer_repo, m.consumer_file,
+                                                    )}
+                                                </li>
+                                            }).collect::<Vec<_>>()}
+                                        </ul>
+                                    }
+                                    .into_any()
+                                }}
+                                <h3>"Unmatched consumer calls"</h3>
+                                {if c.unmatched_consumers.is_empty() {
+                                    view! { <p class="empty">"None found."</p> }.into_any()
+                                } else {
+                                    view! {
+                                        <ul>
+                                            {c.unmatched_consumers.into_iter().map(|u| view! {
+                                                <li>{format!("{} ({} :: {})", u.path, u.repo, u.file)}</li>
+                                            }).collect::<Vec<_>>()}
+                                        </ul>
+                                    }
+                                    .into_any()
+                                }}
+                            </div>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// A cost-tracking view over `/api/usage` (#65's last remaining bundled
 /// feature): running token counts tallied across every `/api/chat`
 /// call this server process has handled, not a persisted history and
@@ -1894,6 +1996,7 @@ fn App() -> impl IntoView {
         <CoChangesSection />
         <SystemMapSection />
         <ConformanceSection />
+        <ContractsSection />
     }
 }
 

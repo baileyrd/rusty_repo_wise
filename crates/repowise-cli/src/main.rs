@@ -195,6 +195,17 @@ enum Command {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Regex-scan every workspace repo's indexed files for HTTP
+    /// producer routes (axum/Flask/FastAPI/Express-style route
+    /// registration) and consumer calls (fetch/axios/requests/ureq-
+    /// style), matching consumer calls against producer routes in
+    /// OTHER repos. Coarse and heuristic by design -- no cross-repo
+    /// symbol resolution involved, just a fixed pattern table over raw
+    /// source text. See `repowise-workspace`'s own docs for the caveat.
+    WorkspaceContracts {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -233,6 +244,7 @@ fn main() -> anyhow::Result<()> {
             file,
         } => cmd_workspace_blast_radius(&workspace, &repo, &file),
         Command::WorkspaceConformance { workspace } => cmd_workspace_conformance(&workspace),
+        Command::WorkspaceContracts { workspace } => cmd_workspace_contracts(&workspace),
     }
 }
 
@@ -751,6 +763,40 @@ fn cmd_workspace_conformance(workspace: &Path) -> anyhow::Result<()> {
     println!("Circular cross-repo dependencies found:");
     for cycle in &cycles {
         println!("  {}", cycle.join(" <-> "));
+    }
+    Ok(())
+}
+
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
+fn cmd_workspace_contracts(workspace: &Path) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    if repos.is_empty() {
+        println!("No repos configured in {}", workspace.display());
+        return Ok(());
+    }
+    let report = repowise_workspace::workspace_contracts(&repos);
+
+    if report.matches.is_empty() {
+        println!("No cross-repo API contracts matched.");
+    } else {
+        println!("Matched cross-repo API contracts:");
+        for m in &report.matches {
+            println!(
+                "  {}: {} ({}) <- {} ({})",
+                m.path,
+                m.producer_repo,
+                m.producer_file.display(),
+                m.consumer_repo,
+                m.consumer_file.display()
+            );
+        }
+    }
+
+    if !report.unmatched_consumers.is_empty() {
+        println!("\nConsumer calls with no known producer in this workspace:");
+        for c in &report.unmatched_consumers {
+            println!("  {} ({} :: {})", c.path, c.repo, c.file.display());
+        }
     }
     Ok(())
 }

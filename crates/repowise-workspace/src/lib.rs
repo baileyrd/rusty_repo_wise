@@ -19,9 +19,15 @@
 //! conformance view. Rust-only for now -- the only language this port
 //! anchors to a `Cargo.toml`-derived crate name; every other language's
 //! cross-repo imports are left unresolved, deliberately, for a future
-//! slice. Contracts (producer/consumer API matching) is still a
-//! separate, unrelated capability with no cross-repo resolution
-//! dependency at all.
+//! slice.
+//!
+//! `workspace_contracts` (in `contracts.rs`) is the last of #64's five
+//! bundled items, and fully independent of the rest of this crate: a
+//! regex-based scan of each indexed file's raw text for a small, fixed
+//! table of HTTP route-registration/HTTP-call patterns, matched
+//! producer-to-consumer across repos. No cross-repo symbol resolution
+//! involved -- see that module's own doc comment for why this is
+//! coarse and heuristic by design.
 //!
 //! A workspace is a small standalone TOML file naming member repos by
 //! name and path -- pointed at via a `--workspace <path>` flag on
@@ -35,6 +41,12 @@
 //! own doc comment always anticipated), and `repowise-core` staying
 //! dependency-free of every other `repowise-*` crate is a load-bearing
 //! invariant the rest of this port relies on.
+
+mod contracts;
+
+pub use contracts::{
+    workspace_contracts, ConsumerCall, ContractMatch, ContractsReport, ProducerRoute,
+};
 
 use repowise_core::RepoIndex;
 use repowise_graph::CrossRepoImportEdge;

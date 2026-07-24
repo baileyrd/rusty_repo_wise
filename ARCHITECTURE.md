@@ -82,7 +82,14 @@ whose entire reason to exist is owning name/path resolution and
 petgraph-based graph algorithms — `repowise-workspace` stays a pure
 orchestrator, composing calls into `repowise-git`/`repowise-graph`
 across every configured repo rather than implementing any resolution
-logic itself.
+logic itself. The one exception is `repowise-workspace`'s `contracts`
+module (producer/consumer API matching, the last of #64's five bundled
+items): a self-contained regex scan over raw file text with no
+cross-repo symbol resolution to delegate to `repowise-graph` at all, so
+it lives directly in `repowise-workspace`. Its `regex = "1"` dependency
+was already fully resolved in `Cargo.lock` (pulled in transitively via
+`tree-sitter`, a `repowise-parser` dependency), so adding it added no
+new crate version to the dependency tree.
 
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`

@@ -6,6 +6,39 @@ repo routing work through PRs).
 
 ---
 
+## PR #143 — Port health/hotspots/decisions/symbols views (Phase 1)
+**2026-07-23** · [#143](https://github.com/baileyrd/rusty_repo_wise/pull/143) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
+
+- **Added:** Phase 1 of the dashboard-server pivot — porting every view
+  the static `repowise dashboard` page already had onto Phase 0's live
+  JSON API and Leptos frontend.
+- **New `repowise-server` endpoints:** `GET /api/health`,
+  `/api/hotspots`, `/api/decisions`, `/api/symbols`, mirroring the
+  static dashboard's own sections (`repowise health`/`hotspots`/
+  `decisions`, plus the full symbol list). `/api/hotspots` returns
+  `{"available": false}` (not an error) when the root has no git
+  history, same graceful-degradation behavior as the static page.
+- **Fixed:** `/api/overview`'s `most_depended_on` now returns paths
+  relative to the indexed root, like every other endpoint — Phase 0
+  had it leaking this host's absolute filesystem layout.
+- **`repowise-web`:** now renders all five sections, each fetching and
+  suspending independently so one slow/failing section doesn't block
+  the rest. The symbols table's kind filter is a real Leptos signal
+  (client-side-reactive), not the static dashboard's embedded
+  vanilla-JS toggle.
+- Verified end-to-end manually: indexed a scratch git repo with a
+  deliberately complex function, ran `trunk build` + the real compiled
+  server, `curl`'d all five endpoints for correct relative-path JSON,
+  then loaded the page in headless Chromium and confirmed every
+  section renders real data with no console errors.
+- **Scope:** still not full parity. Rendered file paths don't drill
+  down to their `repowise-docs` wiki pages yet (the static dashboard's
+  do); instant/Cmd+K search, a dependency-graph view, and
+  ownership/dead-code/decision-tracker views + chat are later phases,
+  not done here. This PR does not close #59 or #65.
+
+---
+
 ## PR #141 — Add live dashboard server scaffolding (Phase 0)
 **2026-07-23** · [#141](https://github.com/baileyrd/rusty_repo_wise/pull/141) · part of [#59](https://github.com/baileyrd/rusty_repo_wise/issues/59) and [#65](https://github.com/baileyrd/rusty_repo_wise/issues/65)
 

@@ -1155,6 +1155,103 @@ async fn get_workspace_co_changes(State(state): State<AppState>) -> Json<Workspa
     Json(dto)
 }
 
+const WORKSPACE_ARCHITECTURE_EDGES_LIMIT: usize = 200;
+
+#[derive(Serialize)]
+struct RepoEdgeSummaryDto {
+    from_repo: String,
+    to_repo: String,
+    edge_count: usize,
+}
+
+impl From<repowise_workspace::RepoEdgeSummary> for RepoEdgeSummaryDto {
+    fn from(e: repowise_workspace::RepoEdgeSummary) -> Self {
+        RepoEdgeSummaryDto {
+            from_repo: e.from_repo,
+            to_repo: e.to_repo,
+            edge_count: e.edge_count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CrossRepoEdgeDto {
+    from_repo: String,
+    from_file: String,
+    line: usize,
+    to_repo: String,
+    to_file: String,
+    import_path: String,
+}
+
+impl From<repowise_graph::CrossRepoImportEdge> for CrossRepoEdgeDto {
+    fn from(e: repowise_graph::CrossRepoImportEdge) -> Self {
+        CrossRepoEdgeDto {
+            from_repo: e.from_repo,
+            from_file: e.from_file.display().to_string(),
+            line: e.line,
+            to_repo: e.to_repo,
+            to_file: e.to_file.display().to_string(),
+            import_path: e.import_path,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WorkspaceArchitectureDto {
+    available: bool,
+    repos: Vec<WorkspaceRepoDto>,
+    repo_edges: Vec<RepoEdgeSummaryDto>,
+    edges: Vec<CrossRepoEdgeDto>,
+    total_edges: usize,
+}
+
+/// Real cross-repo Rust `use` resolution across every workspace repo --
+/// which repos depend on which others, and the individual import sites
+/// behind each dependency. `edges` is capped at
+/// `WORKSPACE_ARCHITECTURE_EDGES_LIMIT`; `total_edges` reports the
+/// uncapped count. `available: false` (empty lists) when no workspace
+/// was configured, same shape as `/api/workspace-repos`.
+async fn get_workspace_architecture(
+    State(state): State<AppState>,
+) -> Json<WorkspaceArchitectureDto> {
+    let dto = match state.workspace_repos.as_ref() {
+        Some(repos) => {
+            let report = repowise_workspace::workspace_architecture(repos);
+            let total_edges = report.edges.len();
+            let edges = report
+                .edges
+                .into_iter()
+                .take(WORKSPACE_ARCHITECTURE_EDGES_LIMIT)
+                .map(CrossRepoEdgeDto::from)
+                .collect();
+            WorkspaceArchitectureDto {
+                available: true,
+                repos: report
+                    .repos
+                    .into_iter()
+                    .map(WorkspaceRepoDto::from)
+                    .collect(),
+                repo_edges: report
+                    .repo_edges
+                    .into_iter()
+                    .map(RepoEdgeSummaryDto::from)
+                    .collect(),
+                edges,
+                total_edges,
+            }
+        }
+        None => WorkspaceArchitectureDto {
+            available: false,
+            repos: Vec::new(),
+            repo_edges: Vec::new(),
+            edges: Vec::new(),
+            total_edges: 0,
+        },
+    };
+    Json(dto)
+}
+
 async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
@@ -1245,6 +1342,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/usage", get(get_usage))
         .route("/api/workspace-repos", get(get_workspace_repos))
         .route("/api/workspace-co-changes", get(get_workspace_co_changes))
+        .route(
+            "/api/workspace-architecture",
+            get(get_workspace_architecture),
+        )
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -2322,6 +2423,141 @@ mod tests {
         assert_eq!(repos[1]["name"], "no-git");
         assert_eq!(repos[1]["available"], false);
         assert_eq!(repos[1]["pairs"], serde_json::json!([]));
+    }
+
+    /// Writes a minimal real Rust crate on disk (a `Cargo.toml` +
+    /// `src/foo.rs` defining `bar()`) and saves an index for it -- the
+    /// file's real on-disk location matters here since
+    /// `repowise_graph::modpath::rust_module_path` scans the filesystem
+    /// for the nearest `Cargo.toml`, independent of anything in the
+    /// `RepoIndex` itself.
+    fn index_rust_crate_with_foo_bar(root: &Path) -> RepoIndex {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"repo-a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let file = root.join("src/foo.rs");
+        std::fs::write(&file, "pub fn bar() -> i32 { 42 }\n").unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![repowise_core::FileRecord {
+                path: file,
+                language: repowise_core::Language::Rust,
+                lines: 1,
+                symbols: vec![],
+                imports: vec![],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    /// Writes a minimal real Rust crate importing `repo_a::foo::bar` --
+    /// the `ImportRef` is hand-constructed (unresolved, exactly as a
+    /// real `use` statement would parse) rather than parsed from source,
+    /// consistent with this file's established "no `repowise-parser`
+    /// dependency" convention.
+    fn index_rust_crate_importing_repo_a(root: &Path) -> RepoIndex {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"repo-b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let file = root.join("src/lib.rs");
+        std::fs::write(&file, "use repo_a::foo::bar;\n").unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![repowise_core::FileRecord {
+                path: file,
+                language: repowise_core::Language::Rust,
+                lines: 1,
+                symbols: vec![],
+                imports: vec![repowise_core::ImportRef {
+                    path: "repo_a::foo::bar".to_string(),
+                    line: 1,
+                    resolved_file: None,
+                }],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    #[tokio::test]
+    async fn get_workspace_architecture_is_unavailable_without_a_workspace_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/workspace-architecture").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["edges"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_workspace_architecture_reports_cross_repo_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let repo_a_path = dir.path().join("repo-a");
+        index_rust_crate_with_foo_bar(&repo_a_path);
+        let repo_b_path = dir.path().join("repo-b");
+        index_rust_crate_importing_repo_a(&repo_b_path);
+
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "repo-a"
+                    path = "{}"
+
+                    [[repo]]
+                    name = "repo-b"
+                    path = "{}"
+                "#,
+                repo_a_path.display(),
+                repo_b_path.display(),
+            ),
+        )
+        .unwrap();
+
+        let router = app(root, None, Some(workspace_path));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/workspace-architecture")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["available"], true);
+        assert_eq!(json["total_edges"], 1);
+        let edges = json["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["from_repo"], "repo-b");
+        assert_eq!(edges[0]["to_repo"], "repo-a");
+        let repo_edges = json["repo_edges"].as_array().unwrap();
+        assert_eq!(repo_edges.len(), 1);
+        assert_eq!(repo_edges[0]["edge_count"], 1);
     }
 
     #[tokio::test]

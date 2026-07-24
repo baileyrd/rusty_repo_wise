@@ -1,32 +1,45 @@
 //! Multi-repo workspace configuration -- the ongoing implementation of
-//! issue #64 (`get_architecture`/`get_blast_radius`/`list_repos` MCP
-//! tools, and the dashboard's workspace views). The first slice
-//! delivered only the smallest useful piece: naming a set of repo roots
-//! and reporting each one's indexed status. This slice adds workspace
-//! co-change reporting (`workspace_co_changes`), each repo's own
-//! `repowise_git`-derived file coupling shown side by side -- notably
-//! NOT cross-repo dependency resolution, since separate repos have
-//! separate git histories and can't literally co-change together.
-//! `get_architecture`/`get_blast_radius`/the system-map/conformance/
-//! contracts dashboard views still need real cross-repo dependency
-//! resolution (a symbol in one repo resolving as an import/call target
-//! in another), which doesn't exist anywhere in this port yet and is
-//! deliberately left for a follow-up.
+//! issue #64. Earlier slices delivered: naming a set of repo roots and
+//! reporting each one's indexed status (`repo_status`/`list_repos`);
+//! and per-repo git-history co-change coupling shown side by side
+//! (`workspace_co_changes`) -- notably NOT cross-repo dependency
+//! resolution, since separate repos have separate git histories and
+//! can't literally co-change together.
+//!
+//! This slice adds the real thing: `workspace_architecture` resolves
+//! Rust `use` imports across repo boundaries (via
+//! `repowise_graph::cross_repo_import_edges`), powering the
+//! `get_architecture` MCP tool and the dashboard's system-map view.
+//! `workspace_blast_radius` answers "which other repos would be
+//! affected if this file changed" (direct cross-repo importers only --
+//! matching `RepoGraph::dependents_of`'s existing single-repo
+//! precedent, which is also one-hop, not transitive), powering
+//! `get_blast_radius`. `detect_workspace_cycles` flags circular
+//! cross-repo dependencies over the same edge data, for the
+//! conformance view. Rust-only for now -- the only language this port
+//! anchors to a `Cargo.toml`-derived crate name; every other language's
+//! cross-repo imports are left unresolved, deliberately, for a future
+//! slice. Contracts (producer/consumer API matching) is still a
+//! separate, unrelated capability with no cross-repo resolution
+//! dependency at all.
 //!
 //! A workspace is a small standalone TOML file naming member repos by
 //! name and path -- pointed at via a `--workspace <path>` flag on
 //! `repowise serve`/`serve-dashboard`/the `workspace-repos`/
-//! `workspace-co-changes` subcommands, never inferred from or stored
+//! `workspace-co-changes`/`workspace-architecture`/
+//! `workspace-blast-radius` subcommands, never inferred from or stored
 //! inside any member repo's own `.repowise/` directory (a workspace
 //! spans repos; no one member repo is a sensible owner of it).
 //! Deliberately kept as its own crate rather than folded into
-//! `repowise-core`: a future cross-repo slice will need this crate to
-//! depend on `repowise-graph` too, and `repowise-core` staying
+//! `repowise-core`: this crate now depends on `repowise-graph` (as its
+//! own doc comment always anticipated), and `repowise-core` staying
 //! dependency-free of every other `repowise-*` crate is a load-bearing
 //! invariant the rest of this port relies on.
 
 use repowise_core::RepoIndex;
+use repowise_graph::CrossRepoImportEdge;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The raw shape of a workspace TOML file:
@@ -182,6 +195,124 @@ pub fn workspace_co_changes(repos: &[ResolvedWorkspaceRepo], top_n: usize) -> Ve
             },
         )
         .collect()
+}
+
+/// One repo-pair's cross-repo import count -- the compact "system map"
+/// summary. Small by construction (bounded by repo_count^2), never
+/// capped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoEdgeSummary {
+    pub from_repo: String,
+    pub to_repo: String,
+    pub edge_count: usize,
+}
+
+/// Cross-repo Rust import resolution across an entire workspace: each
+/// configured repo's own indexed status (reusing `RepoStatus`, same
+/// shape `list_repos`/`workspace_co_changes` already report), the raw
+/// resolved edges, and a repo-pair summary. Repos with no prior
+/// `repowise init`/`update` are reported as `indexed: false` in `repos`
+/// and simply contribute no edges -- same degrade-rather-than-fail
+/// shape as every other workspace-wide view.
+pub struct ArchitectureReport {
+    pub repos: Vec<RepoStatus>,
+    pub repo_edges: Vec<RepoEdgeSummary>,
+    pub edges: Vec<CrossRepoImportEdge>,
+}
+
+pub fn workspace_architecture(repos: &[ResolvedWorkspaceRepo]) -> ArchitectureReport {
+    let mut statuses = Vec::with_capacity(repos.len());
+    let mut indices: Vec<(String, RepoIndex)> = Vec::new();
+    for repo in repos {
+        match RepoIndex::load(&repo.path) {
+            Ok(index) => {
+                statuses.push(RepoStatus {
+                    name: repo.name.clone(),
+                    path: repo.path.clone(),
+                    indexed: true,
+                    file_count: Some(index.files.len()),
+                    other_file_count: Some(index.other_files),
+                });
+                indices.push((repo.name.clone(), index));
+            }
+            Err(_) => statuses.push(RepoStatus {
+                name: repo.name.clone(),
+                path: repo.path.clone(),
+                indexed: false,
+                file_count: None,
+                other_file_count: None,
+            }),
+        }
+    }
+
+    let edges = repowise_graph::cross_repo_import_edges(&indices);
+
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for e in &edges {
+        *counts
+            .entry((e.from_repo.clone(), e.to_repo.clone()))
+            .or_default() += 1;
+    }
+    let mut repo_edges: Vec<RepoEdgeSummary> = counts
+        .into_iter()
+        .map(|((from_repo, to_repo), edge_count)| RepoEdgeSummary {
+            from_repo,
+            to_repo,
+            edge_count,
+        })
+        .collect();
+    repo_edges.sort_by(|a, b| {
+        a.from_repo
+            .cmp(&b.from_repo)
+            .then(a.to_repo.cmp(&b.to_repo))
+    });
+
+    ArchitectureReport {
+        repos: statuses,
+        repo_edges,
+        edges,
+    }
+}
+
+/// Direct-only cross-repo importers of `file` (within `repo_name`) --
+/// matches `RepoGraph::dependents_of`'s existing single-repo precedent
+/// (one hop, not transitive), just resolved across repo boundaries
+/// instead of within one. `file` must already be an absolute, canonical
+/// path within `repo_name`'s own root.
+pub fn workspace_blast_radius(
+    repos: &[ResolvedWorkspaceRepo],
+    repo_name: &str,
+    file: &Path,
+) -> Vec<CrossRepoImportEdge> {
+    let indices: Vec<(String, RepoIndex)> = repos
+        .iter()
+        .filter_map(|r| {
+            RepoIndex::load(&r.path)
+                .ok()
+                .map(|idx| (r.name.clone(), idx))
+        })
+        .collect();
+    repowise_graph::cross_repo_import_edges(&indices)
+        .into_iter()
+        .filter(|e| e.to_repo == repo_name && e.to_file == file)
+        .collect()
+}
+
+/// Circular cross-repo dependencies (e.g. repo A imports repo B imports
+/// repo A) -- a workspace's repo-level dependency graph should form a
+/// DAG; a cycle is a concrete, deterministic "pattern divergence"
+/// finding that needs no further human-specified rule set to detect,
+/// reusing exactly the same edges `workspace_architecture` already
+/// computes. Thin wrapper over `repowise_graph::detect_repo_cycles` so
+/// `repowise-graph` stays decoupled from `ResolvedWorkspaceRepo`.
+pub fn detect_workspace_cycles(repos: &[ResolvedWorkspaceRepo]) -> Vec<Vec<String>> {
+    let report = workspace_architecture(repos);
+    let pairs: Vec<(String, String)> = report
+        .repo_edges
+        .into_iter()
+        .map(|e| (e.from_repo, e.to_repo))
+        .collect();
+    repowise_graph::detect_repo_cycles(&pairs)
 }
 
 #[cfg(test)]

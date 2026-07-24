@@ -69,13 +69,20 @@ as a separate service or process (`repowise-mcp`/`repowise-dashboard` are
 libraries invoked by the CLI, not standalone binaries/servers); there's no
 forcing function (scaling, team boundary, fault isolation) that would
 justify it yet. `repowise-workspace` (issue #64's multi-repo/workspace
-support) depends on `repowise-core` (for `RepoIndex::load`) and
+support) depends on `repowise-core` (for `RepoIndex::load`),
 `repowise-git` (for per-repo `GitAnalytics`-derived co-change
-reporting) — deliberately kept as its own crate rather than folded into
-`repowise-core` itself, since a future cross-repo slice of #64 will need
-it to depend on `repowise-graph` too, and `repowise-core` staying
-dependency-free of every other `repowise-*` crate is a load-bearing
-invariant the rest of this port relies on.
+reporting), and now `repowise-graph` (for cross-repo Rust `use`
+resolution, via `repowise_graph::cross_repo_import_edges`) —
+deliberately kept as its own crate rather than folded into
+`repowise-core` itself: `repowise-core` staying dependency-free of
+every other `repowise-*` crate is a load-bearing invariant the rest of
+this port relies on. The cross-repo resolution logic itself lives in
+`repowise-graph` (not `repowise-workspace`), since that's the one crate
+whose entire reason to exist is owning name/path resolution and
+petgraph-based graph algorithms — `repowise-workspace` stays a pure
+orchestrator, composing calls into `repowise-git`/`repowise-graph`
+across every configured repo rather than implementing any resolution
+logic itself.
 
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`

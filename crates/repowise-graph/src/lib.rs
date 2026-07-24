@@ -5,7 +5,12 @@
 //! best-effort matching, not real compiler name resolution — see
 //! `repowise-parser` for why that tradeoff is made.
 
+mod cross_repo;
 mod modpath;
+
+pub use cross_repo::{
+    cross_repo_import_edges, detect_repo_cycles, rust_module_map, CrossRepoImportEdge,
+};
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;

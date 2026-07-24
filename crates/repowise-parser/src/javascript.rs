@@ -126,6 +126,7 @@ impl<'a> Walker<'a> {
                         param_count: 0,
                         primitive_param_count: 0,
                         body_hash: None,
+                        io_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -154,6 +155,7 @@ impl<'a> Walker<'a> {
                         param_count: 0,
                         primitive_param_count: 0,
                         body_hash: None,
+                        io_in_loop: Vec::new(),
                     });
                 }
             }
@@ -295,6 +297,17 @@ impl<'a> Walker<'a> {
             |n| param_type(n, self.source),
             is_primitive_type,
         );
+        let io_in_loop = body
+            .map(|b| {
+                metrics::calls_in_loops(
+                    b,
+                    is_loop,
+                    |n| call_expression_callee(n, self.source),
+                    is_io_call,
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -311,6 +324,7 @@ impl<'a> Walker<'a> {
             param_count,
             primitive_param_count,
             body_hash,
+            io_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -416,6 +430,41 @@ fn condition_of(n: Node) -> Option<Node> {
         "if_statement" | "while_statement" => n.child_by_field_name("condition"),
         _ => None,
     }
+}
+
+/// Loop constructs for `io_in_loop` (issue #177): a subset of
+/// `is_decision`'s node kinds, excluding the branching-but-not-repeating
+/// ones (`if`/`catch`/ternary/`switch` case).
+fn is_loop(n: Node) -> bool {
+    matches!(
+        n.kind(),
+        "for_statement" | "for_in_statement" | "while_statement" | "do_statement"
+    )
+}
+
+/// If `node` is a `call_expression`, the callee name to match against
+/// `is_io_call` -- same extraction `call_target_name` already does for
+/// the file's general call graph, applied here to a single node.
+fn call_expression_callee(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    node.child_by_field_name("function")
+        .map(|f| call_target_name(f, source))
+}
+
+/// A small fixed table of I/O-shaped callee names (file, network, or
+/// database operations) -- heuristic and coarse, like
+/// `repowise_workspace::contracts`'s route-pattern table: it matches on
+/// the same last-property name `call_target_name` already uses for the
+/// general call graph, so it can't tell `fs.readFile` from an unrelated
+/// `readFile` method on some other object, and it can't recognize I/O
+/// hidden behind a wrapper function this table doesn't name.
+fn is_io_call(name: &str) -> bool {
+    matches!(
+        name,
+        "readFile" | "readFileSync" | "writeFile" | "writeFileSync" | "fetch" | "query" | "execute"
+    )
 }
 
 /// A parameter's declared type annotation as source text. TypeScript-only:
@@ -652,5 +701,18 @@ mod tests {
         assert!(one.body_hash.is_some());
         assert_eq!(one.body_hash, two.body_hash);
         assert!(short.body_hash.is_none());
+    }
+
+    #[test]
+    fn flags_io_shaped_calls_found_inside_a_loop_body_but_not_outside_one() {
+        let rec = extract_js(
+            "function hoisted(paths) {\n  const out = [];\n  for (const p of paths) {\n    out.push(fs.readFileSync(p));\n  }\n  return out;\n}\n\nfunction fine(items) {\n  let total = 0;\n  for (const i of items) {\n    total += i;\n  }\n  return total;\n}\n",
+        );
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+        let fine = rec.symbols.iter().find(|s| s.name == "fine").unwrap();
+
+        assert_eq!(hoisted.io_in_loop.len(), 1);
+        assert_eq!(hoisted.io_in_loop[0].callee_name, "readFileSync");
+        assert!(fine.io_in_loop.is_empty());
     }
 }

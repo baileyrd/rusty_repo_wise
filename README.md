@@ -64,7 +64,7 @@ specifics per layer), not full feature parity:
   idiom for a script sourcing something relative to its own directory;
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
-- Score every file's health deterministically (0–10, no LLM/ML) from twelve
+- Score every file's health deterministically (0–10, no LLM/ML) from thirteen
   rule-based markers: long functions, high cyclomatic complexity, oversized
   parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
@@ -75,11 +75,14 @@ specifics per layer), not full feature parity:
   "bumpy road" (`bumpy_road` — count of distinct nested-block regions,
   complementing nesting depth's single deepest-point view), complex
   conditionals (`complex_conditional` — a single `if`/`while`/etc. condition
-  chaining 3+ boolean operators, Rust/Python/TS+JS only), and primitive
+  chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types) — except for shell scripts, which are
-  deliberately exempt from the dead-code
+  declared parameter types), and I/O in a loop (`io_in_loop` — a known
+  file/network/database call found inside a loop body where hoisting it
+  above the loop is usually possible, Rust/Python/TS+JS only; the first
+  slice of repowise's Performance-signal cluster) — except for shell
+  scripts, which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
   graph can see, making the signal too unreliable to report for that
@@ -115,7 +118,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 12 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 13 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -139,8 +142,10 @@ dashboard is one static page with no per-file drill-down or live search
   complexity/nesting-depth/bumpy-road/param-count/body-hash metrics, plus
   per-method `self`/`this` field-access tracking for Rust/Python/TS+JS
   (feeds LCOM4), per-condition boolean-operator-chain detection for
-  Rust/Python/TS+JS (feeds `complex_conditional`), and declared-parameter-type
-  extraction for Rust/TypeScript (feeds `primitive_obsession`).
+  Rust/Python/TS+JS (feeds `complex_conditional`), declared-parameter-type
+  extraction for Rust/TypeScript (feeds `primitive_obsession`), and a
+  shared loop-classifier plus a small per-language I/O-callee-name table
+  for Rust/Python/TS+JS (feeds `io_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -235,6 +240,7 @@ to `[0, 10]`:
 | Bumpy road (`bumpy_road`) | >= 3 separate nested-block regions | −0.5 |
 | Complex conditional (`complex_conditional`) | single condition chains >= 3 boolean operators | −0.3 |
 | Primitive obsession (`primitive_obsession`) | >= 3 bare-primitive-typed parameters | −0.3 |
+| I/O in loop (`io_in_loop`) | a known I/O-shaped call found inside a loop body | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -250,7 +256,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twelve; everything else keeps its default
+# only overriding two of the thirteen; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -356,6 +362,30 @@ common case and would need type inference this port doesn't have) get an
 empty parameter-type extraction and so never trigger this marker;
 extending it to the remaining statically-typed languages (Java, Kotlin,
 Go, C, C++, C#, Scala, Swift, Dart) is a natural follow-up, not done here.
+
+**I/O in loop (`io_in_loop`)** flags a known file/network/database call
+found anywhere inside a loop body — the first slice of repowise's
+Performance-signal cluster (issue #72), and, like LCOM4/`complex_conditional`,
+implemented for **Rust, Python, and TypeScript/JavaScript only** for this
+first pass. Needs two new pieces of per-language logic: an `is_loop`
+classifier (a subset of each language's existing `is_decision` node
+kinds — loops only, not `if`/`match`/etc., which branch but don't
+repeat) and a small fixed table of I/O-shaped callee names (e.g.
+`read_to_string`/`execute`/`query` for Rust, `read`/`execute`/`urlopen`
+for Python, `readFileSync`/`fetch`/`query` for TypeScript/JavaScript).
+`repowise-parser::metrics::calls_in_loops` walks a function body tracking
+a single "currently inside a loop" flag (so a call nested inside two
+loops is still only reported once, at its own line, rather than once per
+enclosing loop), matching each call node's callee name against that
+table (`Symbol::io_in_loop: Vec<IoInLoopRef>`, each entry carrying the
+call's own `line` and `callee_name`). Like `unresolved_import_stems` and
+`repowise-workspace::contracts`'s route-matching table, this is
+deliberately coarse and heuristic: matching on a call's last name/segment
+means it can't tell a database cursor's `.execute(..)` from an unrelated
+`execute` method on some other type, and it can't recognize I/O hidden
+behind a wrapper function the table doesn't name. The other 13 languages
+have no `is_loop`/I/O-callee-table logic yet and so never produce any
+entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

@@ -208,6 +208,14 @@ pub struct Symbol {
     /// this extraction isn't implemented for yet (see each language's
     /// own extraction logic in `repowise-parser`).
     pub complex_conditionals: Vec<ComplexConditionalRef>,
+    /// Calls to a known I/O-shaped operation (file/network/database) found
+    /// inside a loop body within the symbol, where hoisting the call above
+    /// the loop is usually possible. Empty for symbols with no body, and
+    /// for languages this extraction isn't implemented for yet (see each
+    /// language's own extraction logic in `repowise-parser`) -- currently
+    /// Rust, Python, and TypeScript/JavaScript, matching the scope
+    /// LCOM4/`complex_conditional` already established.
+    pub io_in_loop: Vec<IoInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -217,6 +225,15 @@ pub struct Symbol {
 pub struct ComplexConditionalRef {
     pub line: usize,
     pub operator_count: usize,
+}
+
+/// A single call recognized as I/O-shaped (by a small fixed per-language
+/// name table -- heuristic, not type-aware) found inside a loop body.
+/// `line` points at the call itself, not the enclosing loop or function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
 }
 
 impl Symbol {

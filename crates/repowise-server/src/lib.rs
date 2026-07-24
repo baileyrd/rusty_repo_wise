@@ -5,22 +5,24 @@
 //! long-running server an SPA can poll/query live.
 //!
 //! Phase 0 proved the architecture with `GET /api/overview` alone.
-//! Phase 1 (this module now) adds the rest of the static dashboard's
-//! views onto the same JSON-API shape: `/api/health`, `/api/hotspots`,
-//! `/api/decisions`, `/api/symbols`. Still not full parity — instant
-//! search, the dependency-graph view, and the chat/LLM views are later
-//! phases, not done here.
+//! Phase 1 added the rest of the static dashboard's views onto the same
+//! JSON-API shape: `/api/health`, `/api/hotspots`, `/api/decisions`,
+//! `/api/symbols`. Phase 2 (this module now) adds `/api/wiki-pages` and
+//! `/api/wiki` (wiki-page drill-down, matching the static dashboard's
+//! file-path links) and `/api/search` (instant search over files and
+//! symbols). Still not full parity — the dependency-graph view and the
+//! chat/LLM views are later phases, not done here.
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use repowise_core::RepoIndex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -140,13 +142,51 @@ struct DecisionDto {
     linked_file_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SymbolDto {
     name: String,
     kind: String,
     file: String,
     start_line: usize,
 }
+
+/// Every indexed file's path relative to `root`, restricted to those
+/// with a `repowise-docs` wiki page already on disk -- the same
+/// "check disk, don't generate" convention the static dashboard uses.
+fn wiki_indexed_files(root: &Path, index: &RepoIndex) -> Vec<(String, PathBuf)> {
+    index
+        .files
+        .iter()
+        .map(|f| (relative(root, &f.path), f.path.clone()))
+        .filter(|(_, path)| repowise_docs::wiki_page_path(root, path).is_file())
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct WikiQuery {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct WikiDto {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+#[derive(Serialize)]
+struct SearchDto {
+    files: Vec<String>,
+    symbols: Vec<SymbolDto>,
+}
+
+/// How many matches `/api/search` returns per category -- an instant
+/// search box needs a short, glanceable list, not the whole index.
+const SEARCH_LIMIT: usize = 20;
 
 struct ApiError(anyhow::Error);
 
@@ -267,6 +307,77 @@ async fn get_symbols(State(state): State<AppState>) -> Result<Json<Vec<SymbolDto
     Ok(Json(symbols))
 }
 
+async fn get_wiki_pages(State(state): State<AppState>) -> Result<Json<Vec<String>>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let mut pages: Vec<String> = wiki_indexed_files(&state.root, &index)
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+    pages.sort();
+    Ok(Json(pages))
+}
+
+/// Serves the raw markdown of a single indexed file's wiki page.
+/// `path` is matched against the exact set of indexed-and-has-a-wiki-page
+/// relative paths (the same set `/api/wiki-pages` returns) rather than
+/// joined onto `root` directly, so an arbitrary `path` query value can't
+/// escape `.repowise/wiki/` via `..` segments.
+async fn get_wiki(
+    State(state): State<AppState>,
+    Query(query): Query<WikiQuery>,
+) -> Result<Response, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let found = wiki_indexed_files(&state.root, &index)
+        .into_iter()
+        .find(|(rel, _)| *rel == query.path);
+    let Some((rel, file)) = found else {
+        return Ok((StatusCode::NOT_FOUND, "no wiki page for that path").into_response());
+    };
+    let wiki_path = repowise_docs::wiki_page_path(&state.root, &file);
+    let content = std::fs::read_to_string(&wiki_path)?;
+    Ok(Json(WikiDto { path: rel, content }).into_response())
+}
+
+async fn get_search(
+    State(state): State<AppState>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<SearchDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let needle = query.q.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Json(SearchDto {
+            files: Vec::new(),
+            symbols: Vec::new(),
+        }));
+    }
+
+    let mut files: Vec<String> = index
+        .files
+        .iter()
+        .map(|f| relative(&state.root, &f.path))
+        .filter(|rel| rel.to_lowercase().contains(&needle))
+        .collect();
+    files.sort();
+    files.truncate(SEARCH_LIMIT);
+
+    let mut symbols: Vec<SymbolDto> = index
+        .files
+        .iter()
+        .flat_map(|f| f.symbols.iter())
+        .filter(|s| s.name.to_lowercase().contains(&needle))
+        .map(|s| SymbolDto {
+            name: s.name.clone(),
+            kind: s.kind.label().to_string(),
+            file: relative(&state.root, &s.file),
+            start_line: s.start_line,
+        })
+        .collect();
+    symbols.sort_by(|a, b| a.name.cmp(&b.name));
+    symbols.truncate(SEARCH_LIMIT);
+
+    Ok(Json(SearchDto { files, symbols }))
+}
+
 /// Build the axum `Router` — separated from `serve` so tests can drive
 /// requests directly against it (via `tower::ServiceExt::oneshot`)
 /// without binding a real socket. `static_dir`, if given, serves the
@@ -282,6 +393,9 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>) -> Router {
         .route("/api/hotspots", get(get_hotspots))
         .route("/api/decisions", get(get_decisions))
         .route("/api/symbols", get(get_symbols))
+        .route("/api/wiki-pages", get(get_wiki_pages))
+        .route("/api/wiki", get(get_wiki))
+        .route("/api/search", get(get_search))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -434,7 +548,11 @@ mod tests {
         let json = if body.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::from_slice(&body).unwrap()
+            // Error responses carry a plain-text body, not JSON --
+            // callers checking those only care about `status`.
+            serde_json::from_slice(&body).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
+            })
         };
         (status, json)
     }
@@ -501,5 +619,91 @@ mod tests {
         assert_eq!(json[0]["kind"], "function");
         assert_eq!(json[0]["file"], "busy.rs");
         assert_eq!(json[0]["start_line"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_wiki_pages_lists_only_files_with_a_wiki_page_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root.clone(), "/api/wiki-pages").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!([]));
+
+        let wiki_path = repowise_docs::wiki_page_path(&root, &root.join("busy.rs"));
+        std::fs::create_dir_all(wiki_path.parent().unwrap()).unwrap();
+        std::fs::write(&wiki_path, "# busy.rs\n").unwrap();
+
+        let (status, json) = get(root, "/api/wiki-pages").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!(["busy.rs"]));
+    }
+
+    #[tokio::test]
+    async fn get_wiki_returns_page_content_for_an_indexed_file_with_a_wiki_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        let wiki_path = repowise_docs::wiki_page_path(&root, &root.join("busy.rs"));
+        std::fs::create_dir_all(wiki_path.parent().unwrap()).unwrap();
+        std::fs::write(&wiki_path, "# busy.rs\n\nSome notes.\n").unwrap();
+
+        let (status, json) = get(root, "/api/wiki?path=busy.rs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["path"], "busy.rs");
+        assert_eq!(json["content"], "# busy.rs\n\nSome notes.\n");
+    }
+
+    #[tokio::test]
+    async fn get_wiki_is_not_found_for_a_path_with_no_wiki_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, _json) = get(root, "/api/wiki?path=busy.rs").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_wiki_is_not_found_for_a_path_traversal_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        let wiki_path = repowise_docs::wiki_page_path(&root, &root.join("busy.rs"));
+        std::fs::create_dir_all(wiki_path.parent().unwrap()).unwrap();
+        std::fs::write(&wiki_path, "# busy.rs\n").unwrap();
+
+        let (status, _json) = get(root, "/api/wiki?path=..%2F..%2F..%2Fetc%2Fpasswd").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_search_matches_files_and_symbols_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/search?q=BUSY").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["files"], serde_json::json!(["busy.rs"]));
+        assert_eq!(json["symbols"][0]["name"], "busy");
+    }
+
+    #[tokio::test]
+    async fn get_search_returns_nothing_for_an_empty_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/search?q=").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["files"], serde_json::json!([]));
+        assert_eq!(json["symbols"], serde_json::json!([]));
     }
 }

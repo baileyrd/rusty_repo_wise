@@ -1184,6 +1184,7 @@ dependencies = [
  "http-body-util",
  "repowise-adr",
  "repowise-core",
+ "repowise-docs",
  "repowise-git",
  "repowise-graph",
  "repowise-health",

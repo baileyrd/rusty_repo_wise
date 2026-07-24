@@ -192,16 +192,18 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code/list_repos)
-                                     #   --workspace <FILE> to opt into list_repos (see "Multi-repo workspace support")
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code/list_repos/get_architecture/get_blast_radius)
+                                     #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
 repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
-                                     #   --workspace <FILE> to opt into the Workspace section
+                                     #   --workspace <FILE> to opt into the Workspace/Workspace Co-Changes/System Map sections
 repowise workspace-repos --workspace <FILE>  # list every repo in a workspace TOML file + indexed status
 repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own most-coupled file pairs
                                      #   --top <N> (default 10) how many pairs to list per repo
+repowise workspace-architecture --workspace <FILE>  # cross-repo Rust `use` resolution: which repos depend on which
+repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  # direct cross-repo importers of one file
 ```
 
 ## Health scoring
@@ -895,16 +897,38 @@ no new dependency resolution required.
   /api/workspace-co-changes` (same `{"available", "repos": [{"name",
   "path", "available", "pairs": [{"file_a", "file_b", "count"}]}]}`
   shape) and the dashboard gets a **Workspace Co-Changes section**.
-- **Still deliberately not included**, because they all need real
-  cross-repo dependency resolution (a symbol in one repo resolving as an
-  import/call target in another) that doesn't exist anywhere in this
-  port yet: the `get_architecture`/`get_blast_radius` MCP tools, and the
-  dashboard's `/workspace/system-map` (cross-repo dependency picture +
-  design-structure matrix), `/workspace/conformance` (pattern
-  divergence), and `/workspace/contracts` (producer/consumer API
-  contract matching) views. There's also still no way to switch which
-  repo the rest of the dashboard/MCP server operates on — `root` stays
-  fixed for the life of the process, same as before this slice existed.
+
+The next slice adds the real thing: cross-repo Rust `use` resolution.
+`repowise-graph` already builds a per-crate Rust module-path map
+(`crate::path` -> file) from each repo's `Cargo.toml`; merging those
+maps across workspace repos lets an unresolved `use other_crate::Thing`
+in one repo resolve to a real file in another. Rust-only for now — the
+only language this port anchors to a `Cargo.toml`-derived crate name;
+every other language's cross-repo imports are left unresolved,
+deliberately, for a future slice.
+
+- `repowise workspace-architecture --workspace <path>` prints each
+  repo's indexed status, a repo-pair dependency summary, and the
+  individual cross-repo import sites behind each dependency.
+- `repowise workspace-blast-radius --workspace <path> --repo <name>
+  --file <path>` prints the other repos' files that directly (one hop,
+  not transitive — matching `RepoGraph::dependents_of`'s existing
+  single-repo precedent) cross-repo-import the given file.
+- `repowise serve --workspace <path>` (the MCP server) gains
+  `get_architecture` (degrades to empty lists like `list_repos`) and
+  `get_blast_radius` (errors like `get_context` on an unknown repo or
+  unindexed file — it targets one specific file, not a repo-wide view).
+- `repowise serve-dashboard --workspace <path>` gains `GET
+  /api/workspace-architecture` and the dashboard gets a **System Map
+  section** (a repo-pair table with the individual import sites listed
+  underneath — a plain table, not a force-directed graph, since
+  repo-level granularity is small).
+- **Still deliberately not included**: the dashboard's
+  `/workspace/conformance` (pattern divergence) and `/workspace/contracts`
+  (producer/consumer API contract matching) views. There's also still no
+  way to switch which repo the rest of the dashboard/MCP server operates
+  on — `root` stays fixed for the life of the process, same as before
+  this slice existed.
 
 ## Testing
 

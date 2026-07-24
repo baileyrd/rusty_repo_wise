@@ -4,10 +4,7 @@
 //! with (`--workspace <path>`) and each one's indexed status. Shows an
 //! explanatory message instead of empty cards when no workspace was
 //! configured. Deliberately doesn't let you switch which repo the rest
-//! of the dashboard is viewing -- see `repowise-server`'s own module
-//! doc comment for what's deferred to a follow-up (cross-repo
-//! `get_architecture`/`get_blast_radius`, system-map/conformance/
-//! contracts views).
+//! of the dashboard is viewing.
 //!
 //! `CoChangesSection` is the next #64 slice: each workspace repo's own
 //! most-coupled file pairs over `GET /api/workspace-co-changes`, shown
@@ -15,6 +12,13 @@
 //! separate git histories, so files in different repos can never
 //! literally co-change together -- just each repo's own coupling
 //! rendered together in one view.
+//!
+//! `SystemMapSection` is the next #64 slice: real cross-repo Rust `use`
+//! resolution over `GET /api/workspace-architecture`, rendered as a
+//! plain repo-pair table with the individual import sites listed
+//! underneath. Rust-only -- see `repowise-workspace`'s own module doc
+//! comment for what's deferred to a follow-up (`get_blast_radius` is
+//! MCP/CLI only so far, plus conformance/contracts views).
 //!
 //! Issue #65 (live-server-dependent dashboard features) also tracks
 //! cost tracking, its fifth and last bundled feature: `UsageSection`
@@ -263,6 +267,33 @@ struct RepoCoChanges {
 struct WorkspaceCoChanges {
     available: bool,
     repos: Vec<RepoCoChanges>,
+}
+
+/// Mirrors `repowise-server`'s `RepoEdgeSummaryDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct RepoEdgeSummary {
+    from_repo: String,
+    to_repo: String,
+    edge_count: usize,
+}
+
+/// Mirrors `repowise-server`'s `CrossRepoEdgeDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct CrossRepoEdge {
+    from_repo: String,
+    from_file: String,
+    to_repo: String,
+    to_file: String,
+    import_path: String,
+}
+
+/// Mirrors `repowise-server`'s `WorkspaceArchitectureDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct WorkspaceArchitecture {
+    available: bool,
+    repo_edges: Vec<RepoEdgeSummary>,
+    edges: Vec<CrossRepoEdge>,
+    total_edges: usize,
 }
 
 /// Mirrors `repowise-server`'s `UsageTotalsDto` wire shape.
@@ -1407,6 +1438,85 @@ fn CoChangesSection() -> impl IntoView {
     }
 }
 
+/// The next slice of #64 after co-changes: real cross-repo Rust `use`
+/// resolution over `GET /api/workspace-architecture`, rendered as a
+/// plain repo-pair table (from/to/edge count) with the individual
+/// import sites listed underneath -- a table is more honest than
+/// forcing this into `GraphSection`'s SVG force-layout machinery given
+/// repo-level granularity is small. Rust-only -- see
+/// `repowise-workspace`'s own doc comment for why every other
+/// language's cross-repo imports are left unresolved.
+#[component]
+fn SystemMapSection() -> impl IntoView {
+    let architecture =
+        LocalResource::new(|| fetch_json::<WorkspaceArchitecture>("/api/workspace-architecture"));
+
+    view! {
+        <h2>"System Map"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                architecture
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(a) if !a.available => view! {
+                            <p class="empty">
+                                "No workspace configured (start the server with --workspace)."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(a) if a.repo_edges.is_empty() => view! {
+                            <p class="empty">
+                                "No cross-repo Rust imports resolved between the configured repos."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(a) => {
+                            let shown = a.edges.len();
+                            let total = a.total_edges;
+                            view! {
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>"From repo"</th>
+                                            <th>"To repo"</th>
+                                            <th>"Edges"</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {a.repo_edges.iter().map(|e| view! {
+                                            <tr>
+                                                <td>{e.from_repo.clone()}</td>
+                                                <td>{e.to_repo.clone()}</td>
+                                                <td>{e.edge_count}</td>
+                                            </tr>
+                                        }).collect::<Vec<_>>()}
+                                    </tbody>
+                                </table>
+                                <ul>
+                                    {a.edges.into_iter().map(|e| view! {
+                                        <li>
+                                            {format!(
+                                                "{} :: {} -> {} :: {} ({})",
+                                                e.from_repo, e.from_file, e.to_repo, e.to_file, e.import_path,
+                                            )}
+                                        </li>
+                                    }).collect::<Vec<_>>()}
+                                </ul>
+                                {(shown < total).then(|| view! {
+                                    <p class="empty">
+                                        {format!("Showing the first {shown} of {total} edges.")}
+                                    </p>
+                                })}
+                            }
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// A cost-tracking view over `/api/usage` (#65's last remaining bundled
 /// feature): running token counts tallied across every `/api/chat`
 /// call this server process has handled, not a persisted history and
@@ -1724,6 +1834,7 @@ fn App() -> impl IntoView {
         <SettingsSection />
         <WorkspaceSection />
         <CoChangesSection />
+        <SystemMapSection />
     }
 }
 

@@ -163,6 +163,29 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         top: usize,
     },
+    /// Resolve Rust `use` imports across workspace repo boundaries:
+    /// which repos depend on which others, and the individual import
+    /// sites behind each dependency. Rust-only -- see
+    /// `repowise-workspace`'s own docs for why every other language's
+    /// cross-repo imports are left unresolved.
+    WorkspaceArchitecture {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+    /// Direct (one-hop, not transitive) cross-repo importers of one
+    /// file in one workspace repo: which OTHER repos' files would need
+    /// review if this file's public API changed.
+    WorkspaceBlastRadius {
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Name of the workspace repo the target file lives in.
+        #[arg(long)]
+        repo: String,
+        /// Path to the file within that repo, absolute or relative to
+        /// that repo's own root.
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -194,6 +217,12 @@ fn main() -> anyhow::Result<()> {
         } => cmd_serve_dashboard(&path, addr, static_dir, workspace),
         Command::WorkspaceRepos { workspace } => cmd_workspace_repos(&workspace),
         Command::WorkspaceCoChanges { workspace, top } => cmd_workspace_co_changes(&workspace, top),
+        Command::WorkspaceArchitecture { workspace } => cmd_workspace_architecture(&workspace),
+        Command::WorkspaceBlastRadius {
+            workspace,
+            repo,
+            file,
+        } => cmd_workspace_blast_radius(&workspace, &repo, &file),
     }
 }
 
@@ -618,6 +647,81 @@ fn cmd_workspace_co_changes(workspace: &Path, top: usize) -> anyhow::Result<()> 
                 display_path(&pair.file_b, &report.path)
             );
         }
+    }
+    Ok(())
+}
+
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
+fn cmd_workspace_architecture(workspace: &Path) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    if repos.is_empty() {
+        println!("No repos configured in {}", workspace.display());
+        return Ok(());
+    }
+    let report = repowise_workspace::workspace_architecture(&repos);
+
+    for status in &report.repos {
+        let indexed = if status.indexed {
+            format!("{} file(s) indexed", status.file_count.unwrap_or(0))
+        } else {
+            "not indexed".to_string()
+        };
+        println!("{} — {} ({indexed})", status.name, status.path.display());
+    }
+
+    if report.repo_edges.is_empty() {
+        println!("\nNo cross-repo Rust imports resolved between the configured repos.");
+        return Ok(());
+    }
+
+    println!("\nCross-repo dependencies:");
+    for e in &report.repo_edges {
+        println!(
+            "  {} -> {} ({} edge(s))",
+            e.from_repo, e.to_repo, e.edge_count
+        );
+    }
+
+    println!("\nImport sites:");
+    for e in &report.edges {
+        println!(
+            "  {} :: {} -> {} :: {} ({})",
+            e.from_repo,
+            e.from_file.display(),
+            e.to_repo,
+            e.to_file.display(),
+            e.import_path
+        );
+    }
+    Ok(())
+}
+
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
+fn cmd_workspace_blast_radius(workspace: &Path, repo: &str, file: &Path) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    let Some(target_repo) = repos.iter().find(|r| r.name == repo) else {
+        anyhow::bail!("no repo named {repo:?} in {}", workspace.display());
+    };
+
+    let target_file = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        target_repo.path.join(file)
+    };
+    let target_file = target_file.canonicalize().unwrap_or(target_file);
+
+    let importers = repowise_workspace::workspace_blast_radius(&repos, repo, &target_file);
+    if importers.is_empty() {
+        println!("No cross-repo importers found for this file.");
+        return Ok(());
+    }
+    for e in &importers {
+        println!(
+            "{} :: {} ({})",
+            e.from_repo,
+            e.from_file.display(),
+            e.import_path
+        );
     }
     Ok(())
 }

@@ -1208,6 +1208,8 @@ dependencies = [
  "anyhow",
  "repowise-core",
  "repowise-git",
+ "repowise-graph",
+ "repowise-parser",
  "serde",
  "tempfile",
  "toml",

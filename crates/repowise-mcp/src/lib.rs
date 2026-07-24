@@ -25,18 +25,27 @@
 //! and always-correct; if this ever needs to serve large repos with high
 //! call volume, that's the first thing to revisit.
 //!
-//! `list_repos` is the first slice of issue #64 (multi-repo/workspace
+//! `list_repos` was the first slice of issue #64 (multi-repo/workspace
 //! support): when this server was started with `--workspace <path>`, it
 //! reports every repo that workspace file configures, each with its
 //! indexed status and file count if a prior `repowise init`/`update`
 //! has run there (via `repowise_workspace::repo_status`). Returns an
 //! empty list rather than an error when no workspace was given, same
-//! degrade-gracefully shape as every other optional-data tool/endpoint
-//! in this port. `get_architecture`/`get_blast_radius` and the rest of
-//! #64's workspace-level tools need real cross-repo dependency
-//! resolution (a symbol in one repo resolving as an import/call target
-//! in another) that doesn't exist anywhere in this port yet, and are
-//! deliberately left for a follow-up.
+//! degrade-gracefully shape as every other optional-data tool in this
+//! port.
+//!
+//! `get_architecture`/`get_blast_radius` are the next slice: real
+//! cross-repo Rust `use` resolution (via
+//! `repowise_workspace::workspace_architecture`/`workspace_blast_radius`,
+//! themselves built on `repowise_graph::cross_repo_import_edges`).
+//! `get_architecture` degrades to empty lists like `list_repos` (no
+//! specific target, nothing to error about). `get_blast_radius` takes a
+//! specific repo+file target, so it errors like `get_context` instead:
+//! no workspace configured, an unknown repo name, or an unindexed
+//! file/repo are all reported as errors rather than an empty result.
+//! Both are Rust-only for now -- the only language this port anchors to
+//! a `Cargo.toml`-derived crate name; every other language's cross-repo
+//! imports are left unresolved, deliberately, for a future slice.
 
 use repowise_core::{RepoIndex, SymbolKind};
 use repowise_graph::RepoGraph;
@@ -105,6 +114,20 @@ impl RepowiseServer {
             .find(|s| s.id == target)
             .map(|s| s.file.clone())
             .unwrap_or_else(|| self.resolve_file(target))
+    }
+
+    /// Resolve a `get_blast_radius` file argument against a NAMED
+    /// workspace repo's own root, not `self.root` (this server's own
+    /// single indexed root, which is almost always a different repo
+    /// entirely from the one a cross-repo blast-radius query targets).
+    fn resolve_file_in_repo(&self, file: &str, repo_root: &Path) -> PathBuf {
+        let path = Path::new(file);
+        let target = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repo_root.join(path)
+        };
+        target.canonicalize().unwrap_or(target)
     }
 }
 
@@ -400,6 +423,78 @@ impl From<repowise_workspace::RepoStatus> for RepoStatusOutput {
 #[derive(Serialize, schemars::JsonSchema)]
 struct ListReposOutput {
     repos: Vec<RepoStatusOutput>,
+}
+
+const ARCHITECTURE_EDGES_LIMIT: usize = 200;
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct RepoEdgeSummaryOutput {
+    from_repo: String,
+    to_repo: String,
+    edge_count: usize,
+}
+
+impl From<repowise_workspace::RepoEdgeSummary> for RepoEdgeSummaryOutput {
+    fn from(e: repowise_workspace::RepoEdgeSummary) -> Self {
+        RepoEdgeSummaryOutput {
+            from_repo: e.from_repo,
+            to_repo: e.to_repo,
+            edge_count: e.edge_count,
+        }
+    }
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct CrossRepoEdgeOutput {
+    from_repo: String,
+    from_file: String,
+    line: usize,
+    to_repo: String,
+    to_file: String,
+    import_path: String,
+}
+
+impl From<repowise_graph::CrossRepoImportEdge> for CrossRepoEdgeOutput {
+    fn from(e: repowise_graph::CrossRepoImportEdge) -> Self {
+        CrossRepoEdgeOutput {
+            from_repo: e.from_repo,
+            from_file: e.from_file.display().to_string(),
+            line: e.line,
+            to_repo: e.to_repo,
+            to_file: e.to_file.display().to_string(),
+            import_path: e.import_path,
+        }
+    }
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct ArchitectureOutput {
+    repos: Vec<RepoStatusOutput>,
+    repo_edges: Vec<RepoEdgeSummaryOutput>,
+    edges: Vec<CrossRepoEdgeOutput>,
+    /// Total resolved cross-repo edges before `edges` was truncated to
+    /// `ARCHITECTURE_EDGES_LIMIT` -- lets a caller tell "there were only
+    /// 3" from "there were 300 and you're seeing the first 200", same
+    /// transparency `DeadCodeOutput.total_matching` gives.
+    total_edges: usize,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+struct BlastRadiusParams {
+    /// Name of the workspace repo the target file lives in, as
+    /// configured in the workspace TOML this server was started with.
+    repo: String,
+    /// Path to the file within that repo, absolute or relative to that
+    /// repo's own root -- NOT this server's own indexed root.
+    file: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct BlastRadiusOutput {
+    /// Other workspace repos' files that directly (one hop, not
+    /// transitive) cross-repo-import the target file -- files that
+    /// would need review if the target's public API changed.
+    importers: Vec<CrossRepoEdgeOutput>,
 }
 
 fn display_rel(path: &Path, root: &Path) -> String {
@@ -796,7 +891,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "list_repos",
-        description = "List every repo configured in the workspace file this server was started with (`--workspace <path>`), each with its name, path, and indexed status (file counts if a prior `repowise init`/`update` has run there). Returns an empty list if no --workspace was given. First step toward cross-repo tools (get_architecture, get_blast_radius -- not yet implemented, see issue #64)."
+        description = "List every repo configured in the workspace file this server was started with (`--workspace <path>`), each with its name, path, and indexed status (file counts if a prior `repowise init`/`update` has run there). Returns an empty list if no --workspace was given."
     )]
     fn list_repos(&self) -> Result<Json<ListReposOutput>, ErrorData> {
         let repos = self
@@ -811,6 +906,86 @@ impl RepowiseServer {
             })
             .unwrap_or_default();
         Ok(Json(ListReposOutput { repos }))
+    }
+
+    #[tool(
+        name = "get_architecture",
+        description = "Workspace-wide cross-repo Rust import resolution: which workspace repos depend on which others, and the individual `use` sites behind each dependency. Rust-only (the only language this port anchors to a Cargo.toml-derived crate name); every other language's cross-repo imports are left unresolved. Returns empty lists (not an error) when no --workspace was given, same degrade-gracefully shape as list_repos."
+    )]
+    fn get_architecture(&self) -> Result<Json<ArchitectureOutput>, ErrorData> {
+        let Some(repos) = self.workspace_repos.as_ref() else {
+            return Ok(Json(ArchitectureOutput {
+                repos: Vec::new(),
+                repo_edges: Vec::new(),
+                edges: Vec::new(),
+                total_edges: 0,
+            }));
+        };
+
+        let report = repowise_workspace::workspace_architecture(repos);
+        let total_edges = report.edges.len();
+        let edges = report
+            .edges
+            .into_iter()
+            .take(ARCHITECTURE_EDGES_LIMIT)
+            .map(CrossRepoEdgeOutput::from)
+            .collect();
+
+        Ok(Json(ArchitectureOutput {
+            repos: report
+                .repos
+                .into_iter()
+                .map(RepoStatusOutput::from)
+                .collect(),
+            repo_edges: report
+                .repo_edges
+                .into_iter()
+                .map(RepoEdgeSummaryOutput::from)
+                .collect(),
+            edges,
+            total_edges,
+        }))
+    }
+
+    #[tool(
+        name = "get_blast_radius",
+        description = "Direct (one-hop, not transitive -- matching get_context's dependents_of) cross-repo importers of one file in one workspace repo: which OTHER repos' files would need review if this file's public API changed. Requires --workspace; errors if no workspace is configured, the repo name is unknown, or the file isn't indexed there."
+    )]
+    fn get_blast_radius(
+        &self,
+        Parameters(BlastRadiusParams { repo, file }): Parameters<BlastRadiusParams>,
+    ) -> Result<Json<BlastRadiusOutput>, ErrorData> {
+        let Some(repos) = self.workspace_repos.as_ref() else {
+            return Err(ErrorData::invalid_params(
+                "no workspace configured; start the MCP server with --workspace",
+                None,
+            ));
+        };
+
+        let Some(target_repo) = repos.iter().find(|r| r.name == repo) else {
+            return Err(ErrorData::resource_not_found(
+                format!("no repo named {repo:?} in the configured workspace"),
+                None,
+            ));
+        };
+
+        let target_file = self.resolve_file_in_repo(&file, &target_repo.path);
+        let indexed = RepoIndex::load(&target_repo.path)
+            .map(|index| index.files.iter().any(|f| f.path == target_file))
+            .unwrap_or(false);
+        if !indexed {
+            return Err(ErrorData::resource_not_found(
+                format!("{file} is not an indexed file under repo {repo:?}"),
+                None,
+            ));
+        }
+
+        let importers = repowise_workspace::workspace_blast_radius(repos, &repo, &target_file)
+            .into_iter()
+            .map(CrossRepoEdgeOutput::from)
+            .collect();
+
+        Ok(Json(BlastRadiusOutput { importers }))
     }
 }
 
@@ -1564,5 +1739,147 @@ mod tests {
         assert_eq!(output.repos[1].name, "unindexed");
         assert!(!output.repos[1].indexed);
         assert_eq!(output.repos[1].file_count, None);
+    }
+
+    fn write_crate(root: &Path, crate_name: &str, files: &[(&str, &str)]) {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+            ),
+        )
+        .unwrap();
+        for (rel_path, contents) in files {
+            std::fs::write(root.join(rel_path), contents).unwrap();
+        }
+    }
+
+    fn two_repo_workspace(dir: &Path) -> Vec<repowise_workspace::ResolvedWorkspaceRepo> {
+        let repo_a = dir.join("repo-a");
+        write_crate(
+            &repo_a,
+            "repo-a",
+            &[("src/foo.rs", "pub fn bar() -> i32 { 42 }\n")],
+        );
+        build_and_save_index(&repo_a);
+
+        let repo_b = dir.join("repo-b");
+        write_crate(
+            &repo_b,
+            "repo-b",
+            &[("src/lib.rs", "use repo_a::foo::bar;\n")],
+        );
+        build_and_save_index(&repo_b);
+
+        vec![
+            repowise_workspace::ResolvedWorkspaceRepo {
+                name: "repo-a".to_string(),
+                path: repo_a,
+            },
+            repowise_workspace::ResolvedWorkspaceRepo {
+                name: "repo-b".to_string(),
+                path: repo_b,
+            },
+        ]
+    }
+
+    #[test]
+    fn get_architecture_returns_empty_without_a_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer {
+            root,
+            workspace_repos: None,
+        };
+        let Json(output) = server.get_architecture().unwrap();
+
+        assert!(output.repos.is_empty());
+        assert!(output.edges.is_empty());
+        assert_eq!(output.total_edges, 0);
+    }
+
+    #[test]
+    fn get_architecture_reports_cross_repo_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace(&root);
+
+        let server = RepowiseServer {
+            root: root.clone(),
+            workspace_repos: Some(workspace_repos),
+        };
+        let Json(output) = server.get_architecture().unwrap();
+
+        assert_eq!(output.repos.len(), 2);
+        assert_eq!(output.total_edges, 1);
+        assert_eq!(output.edges.len(), 1);
+        assert_eq!(output.edges[0].from_repo, "repo-b");
+        assert_eq!(output.edges[0].to_repo, "repo-a");
+        assert_eq!(output.repo_edges.len(), 1);
+        assert_eq!(output.repo_edges[0].edge_count, 1);
+    }
+
+    #[test]
+    fn get_blast_radius_errors_without_a_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer {
+            root,
+            workspace_repos: None,
+        };
+        let result = server.get_blast_radius(Parameters(BlastRadiusParams {
+            repo: "repo-a".to_string(),
+            file: "src/foo.rs".to_string(),
+        }));
+        let Err(err) = result else {
+            panic!("expected an error with no workspace configured");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn get_blast_radius_errors_on_unknown_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace(&root);
+
+        let server = RepowiseServer {
+            root,
+            workspace_repos: Some(workspace_repos),
+        };
+        let result = server.get_blast_radius(Parameters(BlastRadiusParams {
+            repo: "nonexistent".to_string(),
+            file: "src/foo.rs".to_string(),
+        }));
+        let Err(err) = result else {
+            panic!("expected an error for an unknown repo name");
+        };
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn get_blast_radius_returns_direct_importers() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace(&root);
+
+        let server = RepowiseServer {
+            root,
+            workspace_repos: Some(workspace_repos),
+        };
+        let Json(output) = server
+            .get_blast_radius(Parameters(BlastRadiusParams {
+                repo: "repo-a".to_string(),
+                file: "src/foo.rs".to_string(),
+            }))
+            .unwrap();
+
+        assert_eq!(output.importers.len(), 1);
+        assert_eq!(output.importers[0].from_repo, "repo-b");
     }
 }

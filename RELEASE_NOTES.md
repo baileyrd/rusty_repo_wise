@@ -6,6 +6,49 @@ repo routing work through PRs).
 
 ---
 
+## PR #198 — Add string_concat_in_loop health marker
+**2026-07-24** · [#198](https://github.com/baileyrd/rusty_repo_wise/pull/198) · closes [#178](https://github.com/baileyrd/rusty_repo_wise/issues/178)
+
+- **Added:** `string_concat_in_loop`, the second slice of issue #72's
+  Performance-signal cluster. Flags a string-append expression (`+=`,
+  `s = s + other`, `.push_str(..)`) accumulating onto a variable inside
+  a loop body — quadratic string-building cost, since each append
+  reallocates and copies the whole string built so far.
+- **`Symbol` gains `string_concat_in_loop: Vec<StringConcatInLoopRef>`**
+  (each entry: `line`, `variable`), populated at parse time.
+- **New `repowise-parser::metrics::string_concats_in_loops`**, reusing
+  `io_in_loop`'s (#177) `is_loop` classifier and mirroring
+  `calls_in_loops`'s "currently inside a loop" tracking shape exactly —
+  just matching a different per-language classifier (a string-append
+  expression instead of an I/O-shaped call).
+- **Scope:** implemented for **Rust, Python, and TypeScript/JavaScript
+  only**, matching `io_in_loop`/LCOM4/`complex_conditional`'s precedent.
+  Each language recognizes a compound `+=` assignment onto a bare
+  identifier, and a `s = s + other` reassignment (an assignment whose
+  right side is a `+` binary expression naming the left-hand identifier
+  on either side); Rust additionally recognizes `s.push_str(other)`,
+  since Python/JS strings are immutable and have no equivalent mutating
+  method. The other 13 parsed languages get an empty
+  `string_concat_in_loop` list and never trigger this marker.
+- **New `FindingKind::StringConcatInLoop`** (penalty −0.3, same weight
+  as `IoInLoop`), one `Finding` per flagged append, pointing at the
+  append's own line.
+- **Incidental fix:** boxed `repowise-graph::Node`'s `Symbol` variant
+  (`Symbol(Symbol)` → `Symbol(Box<Symbol>)`) — `Symbol` growing another
+  `Vec` field tripped `clippy::large_enum_variant`. `Node` is a private
+  implementation detail used only inside `repowise-graph`, so this only
+  touched 4 call sites, all in that one file.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR (#127/#129/#196).
+- 17 of #72's 19 sub-issues remain open — this closes only #178, not
+  #72 itself.
+
+---
+
 ## PR #196 — Add io_in_loop health marker
 **2026-07-24** · [#196](https://github.com/baileyrd/rusty_repo_wise/pull/196) · closes [#177](https://github.com/baileyrd/rusty_repo_wise/issues/177)
 

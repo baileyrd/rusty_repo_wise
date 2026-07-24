@@ -1206,6 +1206,7 @@ name = "repowise-workspace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "regex",
  "repowise-core",
  "repowise-git",
  "repowise-graph",

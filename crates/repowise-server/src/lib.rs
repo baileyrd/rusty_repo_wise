@@ -1283,6 +1283,85 @@ async fn get_workspace_conformance(State(state): State<AppState>) -> Json<Worksp
     Json(dto)
 }
 
+#[derive(Serialize)]
+struct ContractMatchDto {
+    producer_repo: String,
+    producer_file: String,
+    consumer_repo: String,
+    consumer_file: String,
+    path: String,
+}
+
+impl From<repowise_workspace::ContractMatch> for ContractMatchDto {
+    fn from(m: repowise_workspace::ContractMatch) -> Self {
+        ContractMatchDto {
+            producer_repo: m.producer_repo,
+            producer_file: m.producer_file.display().to_string(),
+            consumer_repo: m.consumer_repo,
+            consumer_file: m.consumer_file.display().to_string(),
+            path: m.path,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UnmatchedConsumerDto {
+    repo: String,
+    file: String,
+    path: String,
+}
+
+impl From<repowise_workspace::ConsumerCall> for UnmatchedConsumerDto {
+    fn from(c: repowise_workspace::ConsumerCall) -> Self {
+        UnmatchedConsumerDto {
+            repo: c.repo,
+            file: c.file.display().to_string(),
+            path: c.path,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WorkspaceContractsDto {
+    available: bool,
+    matches: Vec<ContractMatchDto>,
+    unmatched_consumers: Vec<UnmatchedConsumerDto>,
+}
+
+/// Regex-based HTTP producer/consumer route matching across every
+/// workspace repo -- see `repowise_workspace::workspace_contracts`'s
+/// own doc comment for why this is coarse and heuristic by design
+/// (no cross-repo symbol resolution involved, just a fixed pattern
+/// table over raw source text). `available: false` (empty lists) when
+/// no workspace was configured, same shape as every other workspace
+/// endpoint.
+async fn get_workspace_contracts(State(state): State<AppState>) -> Json<WorkspaceContractsDto> {
+    let dto = match state.workspace_repos.as_ref() {
+        Some(repos) => {
+            let report = repowise_workspace::workspace_contracts(repos);
+            WorkspaceContractsDto {
+                available: true,
+                matches: report
+                    .matches
+                    .into_iter()
+                    .map(ContractMatchDto::from)
+                    .collect(),
+                unmatched_consumers: report
+                    .unmatched_consumers
+                    .into_iter()
+                    .map(UnmatchedConsumerDto::from)
+                    .collect(),
+            }
+        }
+        None => WorkspaceContractsDto {
+            available: false,
+            matches: Vec::new(),
+            unmatched_consumers: Vec::new(),
+        },
+    };
+    Json(dto)
+}
+
 async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
@@ -1378,6 +1457,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             get(get_workspace_architecture),
         )
         .route("/api/workspace-conformance", get(get_workspace_conformance))
+        .route("/api/workspace-contracts", get(get_workspace_contracts))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -2748,6 +2828,171 @@ mod tests {
             .collect();
         cycle.sort();
         assert_eq!(cycle, vec!["repo-a".to_string(), "repo-b".to_string()]);
+    }
+
+    /// Writes a file with an axum-style `.route(...)` call and a
+    /// minimal hand-built index pointing at it -- `workspace_contracts`
+    /// regex-scans the file's raw text directly, so the `FileRecord`'s
+    /// own symbols/imports are irrelevant, consistent with this file's
+    /// established "no `repowise-parser` dependency" convention.
+    fn index_repo_with_producer_route(root: &Path) -> RepoIndex {
+        let file = root.join("routes.rs");
+        std::fs::write(
+            &file,
+            "router.route(\"/api/hotspots\", get(get_hotspots));\n",
+        )
+        .unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![repowise_core::FileRecord {
+                path: file,
+                language: repowise_core::Language::Rust,
+                lines: 1,
+                symbols: vec![],
+                imports: vec![],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    /// Writes a file with a `fetch(...)` call and a minimal hand-built
+    /// index pointing at it.
+    fn index_repo_with_consumer_call(root: &Path, path: &str) -> RepoIndex {
+        let file = root.join("app.js");
+        std::fs::write(&file, format!("fetch(\"{path}\");\n")).unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![repowise_core::FileRecord {
+                path: file,
+                language: repowise_core::Language::JavaScript,
+                lines: 1,
+                symbols: vec![],
+                imports: vec![],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    #[tokio::test]
+    async fn get_workspace_contracts_is_unavailable_without_a_workspace_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/workspace-contracts").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["matches"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_workspace_contracts_matches_a_cross_repo_producer_and_consumer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let server_repo = dir.path().join("server");
+        std::fs::create_dir_all(&server_repo).unwrap();
+        index_repo_with_producer_route(&server_repo);
+
+        let client_repo = dir.path().join("client");
+        std::fs::create_dir_all(&client_repo).unwrap();
+        index_repo_with_consumer_call(&client_repo, "/api/hotspots");
+
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "server"
+                    path = "{}"
+
+                    [[repo]]
+                    name = "client"
+                    path = "{}"
+                "#,
+                server_repo.display(),
+                client_repo.display(),
+            ),
+        )
+        .unwrap();
+
+        let router = app(root, None, Some(workspace_path));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/workspace-contracts")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["available"], true);
+        let matches = json["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["producer_repo"], "server");
+        assert_eq!(matches[0]["consumer_repo"], "client");
+        assert_eq!(matches[0]["path"], "/api/hotspots");
+        assert_eq!(json["unmatched_consumers"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_workspace_contracts_reports_an_unmatched_consumer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let client_repo = dir.path().join("client");
+        std::fs::create_dir_all(&client_repo).unwrap();
+        index_repo_with_consumer_call(&client_repo, "/api/unknown");
+
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "client"
+                    path = "{}"
+                "#,
+                client_repo.display(),
+            ),
+        )
+        .unwrap();
+
+        let router = app(root, None, Some(workspace_path));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/workspace-contracts")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["available"], true);
+        assert_eq!(json["matches"], serde_json::json!([]));
+        let unmatched = json["unmatched_consumers"].as_array().unwrap();
+        assert_eq!(unmatched.len(), 1);
+        assert_eq!(unmatched[0]["path"], "/api/unknown");
     }
 
     #[tokio::test]

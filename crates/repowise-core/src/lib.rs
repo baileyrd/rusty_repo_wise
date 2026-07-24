@@ -253,6 +253,16 @@ pub struct Symbol {
     /// the other loop-body markers, doesn't include TypeScript/
     /// JavaScript).
     pub list_insert_zero_in_loop: Vec<ListInsertZeroInLoopRef>,
+    /// Calls recognized as parsing a JSON payload (`serde_json::from_str`/
+    /// `json.loads`/`JSON.parse` and language equivalents -- a small
+    /// fixed per-language name table, heuristic, not type-aware) found
+    /// inside a loop body within the symbol, where hoisting the parse
+    /// call above the loop is usually possible if the payload doesn't
+    /// change per iteration. Empty for symbols with no body, and for
+    /// languages this extraction isn't implemented for yet -- currently
+    /// Rust, Python, and TypeScript/JavaScript, matching `io_in_loop`'s
+    /// scope.
+    pub json_parse_in_loop: Vec<JsonParseInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -311,6 +321,16 @@ pub struct LockInLoopRef {
 pub struct ListInsertZeroInLoopRef {
     pub line: usize,
     pub variable: String,
+}
+
+/// A single call recognized as parsing a JSON payload (by a small fixed
+/// per-language name table -- heuristic, not type-aware) found inside a
+/// loop body. `line` points at the call itself, not the enclosing loop
+/// or function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonParseInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
 }
 
 impl Symbol {

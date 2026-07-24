@@ -115,6 +115,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
+                        json_parse_in_loop: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

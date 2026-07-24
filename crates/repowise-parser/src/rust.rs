@@ -139,7 +139,7 @@ impl<'a> Walker<'a> {
                             metrics::resource_constructions_in_loops(
                                 b,
                                 is_loop,
-                                |n| qualified_constructor_name(n, self.source),
+                                |n| qualified_call_name(n, self.source),
                                 is_expensive_constructor,
                                 |n| n.kind() == "function_item",
                             )
@@ -162,6 +162,17 @@ impl<'a> Walker<'a> {
                                 b,
                                 is_loop,
                                 |n| is_list_insert_zero(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
+                    let json_parse_in_loop = body
+                        .map(|b| {
+                            metrics::json_parses_in_loops(
+                                b,
+                                is_loop,
+                                |n| qualified_call_name(n, self.source),
+                                is_json_parse_call,
                                 |n| n.kind() == "function_item",
                             )
                         })
@@ -193,6 +204,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop,
                         lock_in_loop,
                         list_insert_zero_in_loop,
+                        json_parse_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -230,6 +242,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
+                        json_parse_in_loop: Vec::new(),
                     });
                 }
             }
@@ -257,6 +270,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
+                        json_parse_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -520,7 +534,7 @@ fn is_string_concat(node: Node, source: &str) -> Option<String> {
 /// receiver *value* (`field_expression`, e.g. `pool.get_connection()`)
 /// returns `None`: this port has no type information to know what type
 /// owns the receiver, so those are left unrecognized rather than guessed.
-fn qualified_constructor_name(node: Node, source: &str) -> Option<String> {
+fn qualified_call_name(node: Node, source: &str) -> Option<String> {
     if node.kind() != "call_expression" {
         return None;
     }
@@ -560,6 +574,14 @@ fn is_expensive_constructor(name: &str) -> bool {
 /// know a given receiver is actually an `RwLock`.
 fn is_lock_call(name: &str) -> bool {
     matches!(name, "lock" | "try_lock")
+}
+
+/// A small fixed table of `module::function` paths recognized as parsing
+/// a JSON payload for `json_parse_in_loop` (issue #193) -- heuristic and
+/// coarse, like `is_io_call`: it can't recognize a JSON-parsing call
+/// hidden behind a wrapper function or an alias this table doesn't name.
+fn is_json_parse_call(name: &str) -> bool {
+    matches!(name, "serde_json::from_str" | "serde_json::from_slice")
 }
 
 /// A `.insert(0, ...)` call on a bare identifier for
@@ -1230,5 +1252,38 @@ mod tests {
         assert_eq!(reversed.list_insert_zero_in_loop[0].variable, "out");
         // Insertion at a non-zero index must not match.
         assert!(appended.list_insert_zero_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_json_parse_calls_in_a_loop_but_not_hoisted_out() {
+        let rec = extract_str(
+            r#"
+            fn parses_each_line(lines: &[&str]) {
+                for line in lines {
+                    let _v: Value = serde_json::from_str(line).unwrap();
+                }
+            }
+
+            fn hoisted(lines: &[&str]) {
+                let _v: Value = serde_json::from_str(lines[0]).unwrap();
+                for line in lines {
+                    let _ = line.len();
+                }
+            }
+            "#,
+        );
+        let parses_each_line = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "parses_each_line")
+            .unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(parses_each_line.json_parse_in_loop.len(), 1);
+        assert_eq!(
+            parses_each_line.json_parse_in_loop[0].callee_name,
+            "serde_json::from_str"
+        );
+        assert!(hoisted.json_parse_in_loop.is_empty());
     }
 }

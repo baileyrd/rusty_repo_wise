@@ -158,6 +158,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let json_parse_in_loop = body
+                        .map(|b| {
+                            metrics::json_parses_in_loops(
+                                b,
+                                is_loop,
+                                |n| qualified_call_name(n, self.source),
+                                is_json_parse_call,
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -180,6 +191,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop,
                         lock_in_loop,
                         list_insert_zero_in_loop,
+                        json_parse_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -212,6 +224,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
+                        json_parse_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -489,6 +502,36 @@ fn is_lock_call(name: &str) -> bool {
     matches!(name, "acquire")
 }
 
+/// For a call whose target is `object.attribute(...)`, return the
+/// qualified `object.attribute` name (e.g. `json.loads`) rather than just
+/// the bare attribute `call_expression_callee` extracts -- needed for
+/// `json_parse_in_loop` (issue #193) since a bare `loads`/`load` would be
+/// dangerously generic (`pickle.load`, `yaml.load`, any other `.load()`
+/// method).
+fn qualified_call_name(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let func = node.child_by_field_name("function")?;
+    if func.kind() != "attribute" {
+        return None;
+    }
+    let object = func.child_by_field_name("object")?;
+    let attribute = func.child_by_field_name("attribute")?;
+    Some(format!(
+        "{}.{}",
+        text(object, source),
+        text(attribute, source)
+    ))
+}
+
+/// A small fixed table of `module.function` paths recognized as parsing
+/// a JSON payload for `json_parse_in_loop` (issue #193) -- heuristic and
+/// coarse, like `is_io_call`.
+fn is_json_parse_call(name: &str) -> bool {
+    matches!(name, "json.loads" | "json.load")
+}
+
 /// A `.insert(0, ...)` call on a bare identifier for
 /// `list_insert_zero_in_loop` (issue #191): a `call` whose callee is an
 /// `insert` method on an identifier receiver, whose first argument is
@@ -746,5 +789,25 @@ mod tests {
         assert_eq!(reversed_build.list_insert_zero_in_loop.len(), 1);
         assert_eq!(reversed_build.list_insert_zero_in_loop[0].variable, "out");
         assert!(appended.list_insert_zero_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_json_parse_calls_in_a_loop_but_not_hoisted_out() {
+        let rec = extract_str(
+            "import json\n\ndef parses_each_line(lines):\n    for line in lines:\n        json.loads(line)\n\ndef hoisted(lines):\n    json.loads(lines[0])\n    for line in lines:\n        pass\n",
+        );
+        let parses_each_line = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "parses_each_line")
+            .unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(parses_each_line.json_parse_in_loop.len(), 1);
+        assert_eq!(
+            parses_each_line.json_parse_in_loop[0].callee_name,
+            "json.loads"
+        );
+        assert!(hoisted.json_parse_in_loop.is_empty());
     }
 }

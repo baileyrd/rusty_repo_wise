@@ -1189,6 +1189,7 @@ dependencies = [
  "repowise-graph",
  "repowise-health",
  "repowise-llm",
+ "repowise-parser",
  "serde",
  "serde_json",
  "tempfile",

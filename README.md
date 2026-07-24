@@ -191,7 +191,7 @@ repowise decisions [PATH]          # mined ADRs + decision-like commits, with li
 repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code)
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
-repowise serve-dashboard [PATH]      # run a live dashboard server (Phase 0: JSON API + optional static frontend)
+repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
 ```
 
@@ -679,7 +679,7 @@ FastAPI-backend architecture, minus the Node.js dependency.
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
   `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`, plus
-  (new) `POST /api/chat` — the same data the static dashboard's sections
+  `POST /api/chat` — the same data the static dashboard's sections
   already compute (`repowise overview`/`health`/`hotspots`/`decisions`,
   plus the full symbol list), as JSON instead of baked into one static
   HTML page. File paths are always relative to `PATH`, never absolute
@@ -710,7 +710,14 @@ FastAPI-backend architecture, minus the Node.js dependency.
   latest user message is grounded with a lightweight keyword search
   over indexed file paths and symbol names (not real embeddings-based
   retrieval — that's issue #63's job) before being sent to
-  `repowise-llm`.
+  `repowise-llm`. `GET /api/reindex` / `POST /api/reindex` (issue #65's
+  live job banner) expose a background reindex job: `POST` starts one
+  (`repowise_parser::build_index`, the same implementation
+  `init`/`update` use, so there's exactly one indexing codepath) unless
+  one's already running, and both verbs return the job's current status
+  — `{"status": "idle" | "running"}` or `{"status": "completed",
+  "file_count", "other_file_count", "duration_ms"}` or `{"status":
+  "failed", "error"}`. A bad root surfaces as `failed`, never a 500.
 - **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
   renders every section the static dashboard has — overview, code
   health, hotspots, architectural decisions, and a symbols table with a
@@ -738,7 +745,12 @@ FastAPI-backend architecture, minus the Node.js dependency.
   page) steps full-screen through Overview/Health/Hotspots/Decisions/
   Graph with the arrow keys (`Esc` to exit) — the current slide is
   reflected in the URL as `#present/<n>`, so a link to a specific slide
-  is shareable/bookmarkable. Frontend-only, no new server endpoint.
+  is shareable/bookmarkable. Frontend-only, no new server endpoint. A
+  **live job banner** (button, top of the page, next to Present) posts
+  to `/api/reindex` and polls it (via `gloo-timers`, every 500ms) until
+  the background job finishes, showing "Reindexing...", a completion
+  summary, or the error message on failure; it also polls once on page
+  load so a job already running from a previous visit still shows up.
   It's deliberately **not** a member of the root Cargo workspace (its
   own `Cargo.toml` has an empty `[workspace]` table): it only ever
   targets `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev),
@@ -773,10 +785,10 @@ search, not real embeddings-based RAG (issue #63), and this still isn't
 a byte-for-byte reproduction of real repowise's dashboard (e.g. no
 D3-identical graph rendering) — it's parity in what the dashboard
 *does*, built a different way. Issue #65 (which also tracks Present
-Mode) stays open for its three other bundled, still-undone features:
-cost tracking, Settings, and a live job banner — each needs its own
+Mode and the live job banner) stays open for its two other bundled,
+still-undone features: cost tracking and Settings — each needs its own
 design pass (persistence for cost history, a write-capable settings
-API, a background-reindex-job concept the server doesn't have yet).
+API).
 
 ## Testing
 

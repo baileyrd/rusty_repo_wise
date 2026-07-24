@@ -1,5 +1,3 @@
-mod indexing;
-
 use clap::{Parser, Subcommand};
 use repowise_core::RepoIndex;
 use repowise_graph::RepoGraph;
@@ -167,7 +165,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_init(path: &Path) -> anyhow::Result<()> {
-    let index = indexing::build_index(path)?;
+    let index = repowise_parser::build_index(path)?;
     let saved_to = index.save(&index.root)?;
     println!(
         "Indexed {} file(s) ({} other file(s) skipped) under {}",
@@ -182,7 +180,7 @@ fn cmd_init(path: &Path) -> anyhow::Result<()> {
 fn cmd_update(path: &Path) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let previous = RepoIndex::load(&root).ok();
-    let index = indexing::build_index(&root)?;
+    let index = repowise_parser::build_index(&root)?;
     let saved_to = index.save(&index.root)?;
     match previous {
         Some(prev) => {

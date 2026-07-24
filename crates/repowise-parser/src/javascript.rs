@@ -131,6 +131,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
+                        json_parse_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -164,6 +165,7 @@ impl<'a> Walker<'a> {
                         resource_construction_in_loop: Vec::new(),
                         lock_in_loop: Vec::new(),
                         list_insert_zero_in_loop: Vec::new(),
+                        json_parse_in_loop: Vec::new(),
                     });
                 }
             }
@@ -348,6 +350,17 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let json_parse_in_loop = body
+            .map(|b| {
+                metrics::json_parses_in_loops(
+                    b,
+                    is_loop,
+                    |n| qualified_call_name(n, self.source),
+                    is_json_parse_call,
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -372,6 +385,7 @@ impl<'a> Walker<'a> {
             // acceptance criteria (issue #191) -- unlike the other three
             // loop-body markers, it doesn't extend to TypeScript/JavaScript.
             list_insert_zero_in_loop: Vec::new(),
+            json_parse_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -592,6 +606,36 @@ fn is_expensive_constructor(name: &str) -> bool {
 /// method, mirroring the Python shape.
 fn is_lock_call(name: &str) -> bool {
     matches!(name, "acquire")
+}
+
+/// If `node` is a `call_expression` whose target is `object.property(...)`,
+/// return the qualified `object.property` name (e.g. `JSON.parse`) rather
+/// than just the bare property `call_expression_callee` extracts -- needed
+/// for `json_parse_in_loop` (issue #193) since a bare `parse` would be
+/// dangerously generic (`Date.parse`, `parseInt`-style helpers, any other
+/// `.parse()` method).
+fn qualified_call_name(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let func = node.child_by_field_name("function")?;
+    if func.kind() != "member_expression" {
+        return None;
+    }
+    let object = func.child_by_field_name("object")?;
+    let property = func.child_by_field_name("property")?;
+    Some(format!(
+        "{}.{}",
+        text(object, source),
+        text(property, source)
+    ))
+}
+
+/// A small fixed table of `Object.method` paths recognized as parsing a
+/// JSON payload for `json_parse_in_loop` (issue #193) -- heuristic and
+/// coarse, like `is_io_call`.
+fn is_json_parse_call(name: &str) -> bool {
+    matches!(name, "JSON.parse")
 }
 
 /// A parameter's declared type annotation as source text. TypeScript-only:
@@ -898,5 +942,25 @@ mod tests {
         assert_eq!(per_iteration.lock_in_loop.len(), 1);
         assert_eq!(per_iteration.lock_in_loop[0].callee_name, "acquire");
         assert!(hoisted.lock_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_json_parse_calls_in_a_loop_but_not_hoisted_out() {
+        let rec = extract_js(
+            "function parsesEachLine(lines) {\n  for (const line of lines) {\n    JSON.parse(line);\n  }\n}\n\nfunction hoisted(lines) {\n  JSON.parse(lines[0]);\n  for (const line of lines) {\n    doWork(line);\n  }\n}\n",
+        );
+        let parses_each_line = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "parsesEachLine")
+            .unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(parses_each_line.json_parse_in_loop.len(), 1);
+        assert_eq!(
+            parses_each_line.json_parse_in_loop[0].callee_name,
+            "JSON.parse"
+        );
+        assert!(hoisted.json_parse_in_loop.is_empty());
     }
 }

@@ -89,6 +89,7 @@ fn mines_and_links_adrs_and_decision_commits() {
         resource_construction_in_loop: Vec::new(),
         lock_in_loop: Vec::new(),
         list_insert_zero_in_loop: Vec::new(),
+        json_parse_in_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,

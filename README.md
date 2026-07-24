@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  seventeen rule-based markers: long functions, high cyclomatic complexity,
+  eighteen rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and five of repowise's Performance-signal
+  declared parameter types), and six of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -96,8 +96,12 @@ specifics per layer), not full feature parity:
   in a loop (`list_insert_zero_in_loop` — `.insert(0, ...)` inside a loop
   body, O(n) per call and O(n²) across the loop since it shifts every
   element, versus appending and reversing once or using a deque; Rust and
-  Python only, unlike the other four Performance-signal markers) — except
-  for shell scripts, which are deliberately exempt from the dead-code
+  Python only, unlike the other four Performance-signal markers), and
+  JSON parsing in a loop (`json_parse_in_loop` — a known JSON-deserializing
+  call (`serde_json::from_str`/`json.loads`/`JSON.parse`) found inside a
+  loop body where parsing once outside the loop, or restructuring to parse
+  a single batched payload, is usually possible, Rust/Python/TS+JS only)
+  — except for shell scripts, which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
   graph can see, making the signal too unreliable to report for that
@@ -133,7 +137,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 17 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 18 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -163,9 +167,10 @@ dashboard is one static page with no per-file drill-down or live search
   I/O-callee-name table (`io_in_loop`), a per-language string-append-
   expression classifier (`string_concat_in_loop`), a per-language
   expensive-resource-constructor-name table (`resource_construction_in_loop`),
-  a per-language lock-acquisition-callee-name table (`lock_in_loop`), and
+  a per-language lock-acquisition-callee-name table (`lock_in_loop`),
   (Rust/Python only) an index-0-list-insert-call classifier
-  (`list_insert_zero_in_loop`).
+  (`list_insert_zero_in_loop`), and a per-language JSON-parse-callee-name
+  table (`json_parse_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -265,6 +270,7 @@ to `[0, 10]`:
 | Resource construction in loop (`resource_construction_in_loop`) | a known expensive-to-construct resource built inside a loop body | −0.3 |
 | Lock in loop (`lock_in_loop`) | a mutex/lock acquisition happening inside a loop body | −0.3 |
 | List insert-zero in loop (`list_insert_zero_in_loop`) | `.insert(0, ...)` on a list/vector found inside a loop body | −0.3 |
+| JSON parse in loop (`json_parse_in_loop`) | a known JSON-deserializing call found inside a loop body | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -280,7 +286,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the seventeen; everything else keeps its default
+# only overriding two of the eighteen; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -508,6 +514,32 @@ port has no type information to distinguish the two), and Python's
 entry carrying the call's own `line` and the receiver's `variable`
 name). The other 14 languages have no per-language classifier yet and so
 never produce any entries for this marker.
+
+**JSON parse in loop (`json_parse_in_loop`)** flags a known
+JSON-deserializing call found anywhere inside a loop body — the sixth
+slice of the Performance-signal cluster, reusing `io_in_loop`'s `is_loop`
+classifier and, like it, implemented for **Rust, Python, and
+TypeScript/JavaScript only**. Parsing the same (or a similarly-shaped)
+JSON payload once per loop iteration is usually avoidable by parsing
+once outside the loop, or by restructuring the call producing the loop's
+input to hand back a single already-parsed/batched payload instead. A
+small fixed table of JSON-parsing call paths per language is matched
+against each call node's callee name: Rust's `serde_json::from_str`/
+`from_slice`, Python's `json.loads`/`json.load`, and TypeScript/
+JavaScript's `JSON.parse`. All three tables match on a *qualified*
+two-segment path (`module::function`/`object.method`/`Object.method`)
+rather than the bare last-segment name `call_target_name` uses for the
+general call graph, since a bare name alone is far too generic here —
+`from_str`/`loads`/`load`/`parse` collide with unrelated methods on
+other types (`FromStr` impls, `pickle.load`/`yaml.load`, `Date.parse`,
+etc.) that have nothing to do with JSON. `repowise-parser::metrics::json_parses_in_loops`
+reuses the same "currently inside a loop" tracking shape as the other
+loop-body markers (`Symbol::json_parse_in_loop: Vec<JsonParseInLoopRef>`,
+each entry carrying the call's own `line` and `callee_name`). Like the
+others, this is deliberately coarse and heuristic: it can't recognize
+JSON parsing hidden behind a wrapper function or a type alias the table
+doesn't name. The other 13 languages have no per-language table yet and
+so never produce any entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

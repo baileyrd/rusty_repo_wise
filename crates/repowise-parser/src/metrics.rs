@@ -5,7 +5,7 @@
 //! deterministic scoring.
 
 use repowise_core::{
-    ComplexConditionalRef, IoInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
+    ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
     ResourceConstructionInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
@@ -386,6 +386,28 @@ pub fn list_inserts_zero_in_loops(
         .into_iter()
         .map(|(line, variable)| ListInsertZeroInLoopRef { line, variable })
         .collect()
+}
+
+/// Every call within `body` recognized as parsing a JSON payload
+/// (`is_json_parse_call`, applied to the name `call_callee` extracts --
+/// `None` for non-matching nodes) that occurs anywhere inside a loop
+/// (`is_loop`). See `matches_in_loops`.
+pub fn json_parses_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    call_callee: impl Fn(Node) -> Option<String>,
+    is_json_parse_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<JsonParseInLoopRef> {
+    matches_in_loops(
+        body,
+        is_loop,
+        |n| call_callee(n).filter(|name| is_json_parse_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| JsonParseInLoopRef { line, callee_name })
+    .collect()
 }
 
 /// Best-effort parameter count: the number of named children of a

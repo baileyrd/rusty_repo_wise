@@ -200,6 +200,8 @@ repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + o
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
                                      #   --workspace <FILE> to opt into the Workspace section
 repowise workspace-repos --workspace <FILE>  # list every repo in a workspace TOML file + indexed status
+repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own most-coupled file pairs
+                                     #   --top <N> (default 10) how many pairs to list per repo
 ```
 
 ## Health scoring
@@ -877,17 +879,32 @@ status, via a `--workspace <path>` flag.
   degrade-gracefully shape as `/api/hotspots`/`/api/chat`) and the
   dashboard gets a **Workspace section** (repo cards: name, path,
   indexed status, file counts).
-- **Deliberately not included in this slice**, because they all need
-  real cross-repo dependency resolution (a symbol in one repo resolving
-  as an import/call target in another) that doesn't exist anywhere in
-  this port yet: the `get_architecture`/`get_blast_radius` MCP tools,
-  and the dashboard's `/workspace/system-map` (cross-repo dependency
-  picture + design-structure matrix), `/workspace/conformance` (pattern
-  divergence), `/workspace/contracts` (producer/consumer API contract
-  matching), and `/workspace/co-changes` (cross-repo file co-change)
-  views. There's also no way to switch which repo the rest of the
-  dashboard/MCP server operates on — `root` stays fixed for the life of
-  the process, same as before this slice existed.
+
+The next slice adds workspace co-change reporting: each configured
+repo's own most-coupled file pairs (via `repowise-git`'s existing
+`GitAnalytics`), shown side by side. This is deliberately **not**
+cross-repo co-change — separate repos have separate git histories, so
+files in different repos can never literally co-change in the same
+commit — just each repo's own coupling rendered together in one place,
+no new dependency resolution required.
+
+- `repowise workspace-co-changes --workspace <path>` (`--top <N>`,
+  default 10) prints each repo's most-coupled file pairs, or a note when
+  a repo has no readable git history.
+- `repowise serve-dashboard --workspace <path>` gains `GET
+  /api/workspace-co-changes` (same `{"available", "repos": [{"name",
+  "path", "available", "pairs": [{"file_a", "file_b", "count"}]}]}`
+  shape) and the dashboard gets a **Workspace Co-Changes section**.
+- **Still deliberately not included**, because they all need real
+  cross-repo dependency resolution (a symbol in one repo resolving as an
+  import/call target in another) that doesn't exist anywhere in this
+  port yet: the `get_architecture`/`get_blast_radius` MCP tools, and the
+  dashboard's `/workspace/system-map` (cross-repo dependency picture +
+  design-structure matrix), `/workspace/conformance` (pattern
+  divergence), and `/workspace/contracts` (producer/consumer API
+  contract matching) views. There's also still no way to switch which
+  repo the rest of the dashboard/MCP server operates on — `root` stays
+  fixed for the life of the process, same as before this slice existed.
 
 ## Testing
 

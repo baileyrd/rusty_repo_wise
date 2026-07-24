@@ -1089,6 +1089,72 @@ async fn get_workspace_repos(State(state): State<AppState>) -> Json<WorkspaceRep
     Json(dto)
 }
 
+const WORKSPACE_CO_CHANGE_PAIRS_LIMIT: usize = 10;
+
+#[derive(Serialize)]
+struct CoChangePairDto {
+    file_a: String,
+    file_b: String,
+    count: usize,
+}
+
+impl From<repowise_workspace::CoChangePair> for CoChangePairDto {
+    fn from(p: repowise_workspace::CoChangePair) -> Self {
+        CoChangePairDto {
+            file_a: p.file_a.display().to_string(),
+            file_b: p.file_b.display().to_string(),
+            count: p.count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RepoCoChangesDto {
+    name: String,
+    path: String,
+    available: bool,
+    pairs: Vec<CoChangePairDto>,
+}
+
+impl From<repowise_workspace::RepoCoChanges> for RepoCoChangesDto {
+    fn from(r: repowise_workspace::RepoCoChanges) -> Self {
+        RepoCoChangesDto {
+            name: r.name,
+            path: r.path.display().to_string(),
+            available: r.available,
+            pairs: r.pairs.into_iter().map(CoChangePairDto::from).collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WorkspaceCoChangesDto {
+    available: bool,
+    repos: Vec<RepoCoChangesDto>,
+}
+
+/// Each workspace repo's own most-coupled file pairs, side by side --
+/// see `repowise_workspace::workspace_co_changes`'s doc comment for why
+/// this isn't literally cross-repo co-change. `available: false` (empty
+/// `repos`) when no workspace was configured, same shape as
+/// `/api/workspace-repos`.
+async fn get_workspace_co_changes(State(state): State<AppState>) -> Json<WorkspaceCoChangesDto> {
+    let dto = match state.workspace_repos.as_ref() {
+        Some(repos) => WorkspaceCoChangesDto {
+            available: true,
+            repos: repowise_workspace::workspace_co_changes(repos, WORKSPACE_CO_CHANGE_PAIRS_LIMIT)
+                .into_iter()
+                .map(RepoCoChangesDto::from)
+                .collect(),
+        },
+        None => WorkspaceCoChangesDto {
+            available: false,
+            repos: Vec::new(),
+        },
+    };
+    Json(dto)
+}
+
 async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
@@ -1178,6 +1244,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/settings", get(get_settings))
         .route("/api/usage", get(get_usage))
         .route("/api/workspace-repos", get(get_workspace_repos))
+        .route("/api/workspace-co-changes", get(get_workspace_co_changes))
         .with_state(state);
     match static_dir {
         Some(dir) => router.fallback_service(ServeDir::new(dir)),
@@ -2183,6 +2250,78 @@ mod tests {
         assert_eq!(repos[1]["name"], "unindexed");
         assert_eq!(repos[1]["indexed"], false);
         assert_eq!(repos[1]["file_count"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn get_workspace_co_changes_is_unavailable_without_a_workspace_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/workspace-co-changes").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["repos"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_workspace_co_changes_reports_coupled_files_per_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let member_repo = dir.path().join("member");
+        std::fs::create_dir_all(&member_repo).unwrap();
+        std::fs::write(member_repo.join("a.txt"), "a\n").unwrap();
+        std::fs::write(member_repo.join("b.txt"), "b\n").unwrap();
+        git_commit_all(&member_repo, "add a and b together");
+
+        let no_git_repo = dir.path().join("no-git");
+        std::fs::create_dir_all(&no_git_repo).unwrap();
+
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "member"
+                    path = "{}"
+
+                    [[repo]]
+                    name = "no-git"
+                    path = "{}"
+                "#,
+                member_repo.display(),
+                no_git_repo.display(),
+            ),
+        )
+        .unwrap();
+
+        let router = app(root, None, Some(workspace_path));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/workspace-co-changes")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["available"], true);
+        let repos = json["repos"].as_array().unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0]["name"], "member");
+        assert_eq!(repos[0]["available"], true);
+        assert_eq!(repos[0]["pairs"][0]["count"], 1);
+        assert_eq!(repos[1]["name"], "no-git");
+        assert_eq!(repos[1]["available"], false);
+        assert_eq!(repos[1]["pairs"], serde_json::json!([]));
     }
 
     #[tokio::test]

@@ -6,6 +6,95 @@ repo routing work through PRs).
 
 ---
 
+## PR #229 — Fix defer_in_loop flagging defers inside func literals
+**2026-07-25** · [#229](https://github.com/baileyrd/rusty_repo_wise/pull/229)
+
+- **Fixed:** `defer_in_loop` (#189, shipped in #226) flagged a `defer`
+  inside a `func() {...}` literal whose loop sat outside it. A Go
+  `defer` runs when the innermost enclosing *function* returns, and a
+  literal is such a function even though it gets no `Symbol` of its own
+  in this port — so those defers already run at the end of their own
+  iteration and were never a leak.
+- **Why it mattered more than an ordinary false positive:** wrapping a
+  loop body in a function literal is precisely the fix the finding
+  recommends, so the marker penalized its own remedy. It also fired on
+  `defer wg.Done()` inside a goroutine's literal, which appears in
+  essentially every concurrent Go codebase. Caught while verifying
+  #228's end-to-end fixture, where the `WaitGroup` fan-out was reported
+  as a defer leak.
+- **The fix:** `defers_in_loops` takes an `is_defer_scope` classifier
+  (Go: `func_literal`) and resets the "inside a loop" state on entering
+  one. Deliberately a *different* predicate from `is_nested_function`,
+  which decides what gets its own `Symbol` — a literal is not a symbol
+  boundary but it is a defer-scope boundary, and conflating the two is
+  what produced the bug.
+- **Recursion is preserved:** the walk still descends into literals, so
+  a loop nested inside one keeps its defers flagged, attributed to the
+  enclosing named function. Both halves are pinned by tests, replacing
+  the earlier test that had encoded the wrong behavior as correct.
+- No `Symbol` field changes, so no index re-`init` is needed for this
+  one.
+
+---
+
+## PR #228 — Add goroutine_in_unbounded_loop health marker (Go)
+**2026-07-25** · [#228](https://github.com/baileyrd/rusty_repo_wise/pull/228) · closes [#190](https://github.com/baileyrd/rusty_repo_wise/issues/190)
+
+- **Added:** `goroutine_in_unbounded_loop`, the seventeenth slice of
+  issue #72's Performance-signal cluster. Flags a Go `go` statement
+  inside a loop body whose only limit on concurrency would be the
+  iteration count. One goroutine per input item works fine in testing
+  with a handful of items and fails only in production at scale.
+- **`Symbol` gains
+  `goroutine_in_unbounded_loop: Vec<GoroutineInUnboundedLoopRef>`** (each
+  entry: `line`, `callee_name`).
+- **The "unbounded" qualifier is the whole design.** A loop counts as
+  bounded when its body contains a channel send (`sem <- struct{}{}`) or
+  receive (`<-tokens`) — the acquire half of Go's standard semaphore and
+  worker-pool idioms, and the only mechanism recognized here.
+  `sync.WaitGroup` deliberately does *not* suppress, per the issue's own
+  requirement: `wg.Add`/`wg.Wait` bound how *completion* is tracked, not
+  how many goroutines run at once.
+- **The bound scan skips the launched goroutine's own subtree.** In
+  `go func() { results <- work(v) }()` the channel send is the goroutine
+  reporting its own result, not the loop throttling how many exist;
+  counting it would suppress precisely the case worth flagging. This is
+  the difference between a useful marker and one that silently never
+  fires, and a test pins it.
+- **Suppression is scoped per loop and inherited inward** — an inner
+  loop can't un-bound the semaphore an enclosing loop already acquired.
+  That per-loop scoping is why this needs its own walk
+  (`metrics::unbounded_goroutines_in_loops`) rather than reusing the
+  `matches_in_loops` single "am I inside a loop" boolean the rest of the
+  cluster shares.
+- **Naming the launch:** the inline `go func() {...}()` form has no
+  callee name, so it surfaces as `func literal` rather than being
+  dropped — it's by far the most common shape.
+- **New `FindingKind::GoroutineInUnboundedLoop`** (penalty −0.6), the
+  heavier tier for the same reason as `defer_in_loop`: one statement
+  fires the marker once but spawns a goroutine per iteration.
+- **Testing:** unbounded (`WaitGroup`) flagged vs. semaphore-channel
+  bounded suppressed; a channel send inside the goroutine doesn't count
+  as a bound; a `go` outside any loop is never flagged; a `<-tokens`
+  receive at loop-body level does bound the loop; a named launch reports
+  its own name. Plus a health-side per-occurrence test and a
+  `HealthWeights::default()` assertion.
+- **Verified end to end** on a real Go file with both fan-out shapes:
+  one hit, on the `WaitGroup` loop.
+- **CI note:** the workspace's CI runs clippy with `--all-features`,
+  which caught a `too_many_arguments` (8/7) on the new walk's inner
+  helper that a plain `--all-targets` run locally did not. Fixed by
+  bundling the four classifiers into a small `Scan` struct rather than
+  an `#[allow]` — they travel together through both recursions anyway.
+- **Scope:** Go only.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR.
+- 2 of #72's 19 sub-issues remain open (#182 and #186, both flagged in
+  their own issues as needing a design pass this port hasn't taken) —
+  this closes only #190, not #72 itself.
+
+---
+
 ## PR #226 — Add defer_in_loop health marker (Go)
 **2026-07-25** · [#226](https://github.com/baileyrd/rusty_repo_wise/pull/226) · closes [#189](https://github.com/baileyrd/rusty_repo_wise/issues/189)
 

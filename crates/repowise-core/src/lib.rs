@@ -326,6 +326,14 @@ pub struct Symbol {
     /// implemented for yet -- currently Rust and Python, the two the
     /// issue scoped it to.
     pub blocking_sync_in_async: Vec<BlockingSyncInAsyncRef>,
+    /// I/O-shaped calls (the same table as `io_in_loop`) made while a
+    /// mutex/lock is held. I/O under a lock serializes every other
+    /// thread waiting on it behind however long the I/O takes, turning
+    /// an in-memory critical section into a throughput bottleneck.
+    /// Empty for symbols with no body, and for languages this extraction
+    /// isn't implemented for yet -- currently Rust and Python, the two
+    /// the issue scoped it to.
+    pub blocking_io_under_lock: Vec<BlockingIoUnderLockRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -448,6 +456,14 @@ pub struct PdConcatInLoopRef {
 /// body. `line` points at the call itself, not the enclosing function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockingSyncInAsyncRef {
+    pub line: usize,
+    pub callee_name: String,
+}
+
+/// A single I/O-shaped call found while a lock is held. `line` points at
+/// the call itself, not the lock acquisition or the enclosing function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockingIoUnderLockRef {
     pub line: usize,
     pub callee_name: String,
 }

@@ -5,10 +5,10 @@
 //! deterministic scoring.
 
 use repowise_core::{
-    BlockingSyncInAsyncRef, ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef,
-    ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
-    PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef, SerialAwaitInLoopRef,
-    StringConcatInLoopRef,
+    BlockingIoUnderLockRef, BlockingSyncInAsyncRef, ComplexConditionalRef, IoInLoopRef,
+    JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef,
+    NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef,
+    SerialAwaitInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -540,6 +540,106 @@ fn matches_in_body<T>(
     let mut out = Vec::new();
     walk(body, &classify, &is_nested_function, &mut out);
     out
+}
+
+/// Matches found *after* a scope-opening marker within the same block,
+/// staying in effect for the rest of that block and everything nested
+/// inside it. Models a lexically-scoped binding that lives to the end
+/// of its block -- Rust's `let guard = m.lock()..;`, where every
+/// statement after the binding runs inside the critical section.
+///
+/// The flag propagates down into children but only turns on for
+/// *subsequent* siblings, so each node is visited exactly once and a
+/// nested block with its own marker can't double-report calls the outer
+/// scope already covered.
+fn matches_after_scope_marker<T>(
+    body: Node,
+    is_scope_marker: impl Fn(Node) -> bool,
+    classify: impl Fn(Node) -> Option<T>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<(usize, T)> {
+    fn walk<T>(
+        node: Node,
+        in_scope: bool,
+        is_scope_marker: &dyn Fn(Node) -> bool,
+        classify: &dyn Fn(Node) -> Option<T>,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<(usize, T)>,
+    ) {
+        if in_scope {
+            if let Some(value) = classify(node) {
+                out.push((node.start_position().row + 1, value));
+            }
+        }
+        let mut in_scope = in_scope;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            walk(
+                child,
+                in_scope,
+                is_scope_marker,
+                classify,
+                is_nested_function,
+                out,
+            );
+            if is_scope_marker(child) {
+                in_scope = true;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        body,
+        false,
+        &is_scope_marker,
+        &classify,
+        &is_nested_function,
+        &mut out,
+    );
+    out
+}
+
+/// I/O calls made after a lexically-scoped lock binding, for
+/// `blocking_io_under_lock` (issue #185) -- Rust's guard shape, where a
+/// `let g = m.lock()..;` holds the lock to the end of its block.
+pub fn ios_under_lock_binding(
+    body: Node,
+    is_lock_binding: impl Fn(Node) -> bool,
+    io_callee: impl Fn(Node) -> Option<String>,
+    is_io_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<BlockingIoUnderLockRef> {
+    matches_after_scope_marker(
+        body,
+        is_lock_binding,
+        |n| io_callee(n).filter(|name| is_io_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| BlockingIoUnderLockRef { line, callee_name })
+    .collect()
+}
+
+/// I/O calls inside an explicitly-delimited lock block, for
+/// `blocking_io_under_lock` (issue #185) -- Python's `with lock:` shape.
+/// Called once per lock block; the caller identifies the blocks.
+pub fn ios_inside_lock_block(
+    lock_block: Node,
+    io_callee: impl Fn(Node) -> Option<String>,
+    is_io_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<BlockingIoUnderLockRef> {
+    matches_in_body(
+        lock_block,
+        |n| io_callee(n).filter(|name| is_io_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| BlockingIoUnderLockRef { line, callee_name })
+    .collect()
 }
 
 /// Blocking synchronous calls found anywhere in an async function's

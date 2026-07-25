@@ -230,6 +230,17 @@ impl<'a> Walker<'a> {
                     } else {
                         Vec::new()
                     };
+                    let blocking_io_under_lock = body
+                        .map(|b| {
+                            metrics::ios_under_lock_binding(
+                                b,
+                                |n| is_lock_binding(n, self.source),
+                                |n| call_expression_callee(n, self.source),
+                                is_io_call,
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -267,6 +278,7 @@ impl<'a> Walker<'a> {
                         // this port's other supported languages.
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async,
+                        blocking_io_under_lock,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -311,6 +323,7 @@ impl<'a> Walker<'a> {
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
+                        blocking_io_under_lock: Vec::new(),
                     });
                 }
             }
@@ -345,6 +358,7 @@ impl<'a> Walker<'a> {
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
+                        blocking_io_under_lock: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -504,6 +518,40 @@ fn is_loop(n: Node) -> bool {
         n.kind(),
         "while_expression" | "while_let_expression" | "loop_expression" | "for_expression"
     )
+}
+
+/// True when `node` is a `let` binding whose initializer acquires a
+/// lock, for `blocking_io_under_lock` (issue #185). Such a binding holds
+/// the guard until the end of its enclosing block, so everything after
+/// it in that block runs inside the critical section.
+///
+/// Reuses `is_lock_call`'s table, so it inherits that table's
+/// deliberate exclusion of `RwLock::read`/`write` -- those bare method
+/// names are too generic to match safely without type information.
+/// Coarse in the other direction too: `let _ = m.lock();` actually drops
+/// the guard immediately, but is treated as a binding here.
+fn is_lock_binding(node: Node, source: &str) -> bool {
+    if node.kind() != "let_declaration" {
+        return false;
+    }
+    let Some(value) = node.child_by_field_name("value") else {
+        return false;
+    };
+    contains_lock_call(value, source)
+}
+
+/// Whether any call in this subtree acquires a lock -- covers the
+/// `m.lock().unwrap()` shape where the acquisition is nested under the
+/// `unwrap`.
+fn contains_lock_call(node: Node, source: &str) -> bool {
+    if call_expression_callee(node, source).is_some_and(|n| is_lock_call(&n)) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .children(&mut cursor)
+        .any(|c| contains_lock_call(c, source));
+    found
 }
 
 /// True when this `function_item` is declared `async fn`, for
@@ -1741,5 +1789,50 @@ mod tests {
         // path as the blocking `std::fs` one -- being awaited is what
         // tells them apart.
         assert!(uses_async_fs.blocking_sync_in_async.is_empty());
+    }
+
+    #[test]
+    fn flags_io_while_a_lock_guard_is_held_but_not_before_it() {
+        let rec = extract_str(
+            r#"
+            fn under_lock(m: &Mutex<u32>, p: &str) {
+                let guard = m.lock().unwrap();
+                let s = std::fs::read_to_string(p).unwrap();
+                drop((guard, s));
+            }
+
+            fn io_before_lock(m: &Mutex<u32>, p: &str) {
+                let s = std::fs::read_to_string(p).unwrap();
+                let guard = m.lock().unwrap();
+                drop((guard, s));
+            }
+
+            fn no_lock_at_all(p: &str) {
+                let s = std::fs::read_to_string(p).unwrap();
+                drop(s);
+            }
+            "#,
+        );
+        let under_lock = rec.symbols.iter().find(|s| s.name == "under_lock").unwrap();
+        let io_before_lock = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "io_before_lock")
+            .unwrap();
+        let no_lock_at_all = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "no_lock_at_all")
+            .unwrap();
+
+        assert_eq!(under_lock.blocking_io_under_lock.len(), 1);
+        assert_eq!(
+            under_lock.blocking_io_under_lock[0].callee_name,
+            "read_to_string"
+        );
+
+        // Same call, but it completes before the guard is acquired.
+        assert!(io_before_lock.blocking_io_under_lock.is_empty());
+        assert!(no_lock_at_all.blocking_io_under_lock.is_empty());
     }
 }

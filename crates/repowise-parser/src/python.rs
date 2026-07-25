@@ -210,6 +210,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let pd_concat_in_loop = body
+                        .map(|b| {
+                            metrics::pd_concats_in_loops(
+                                b,
+                                is_loop,
+                                |n| qualified_call_name(n, self.source),
+                                is_pd_concat_call,
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -237,6 +248,7 @@ impl<'a> Walker<'a> {
                         nested_loop_with_io,
                         nested_loop_quadratic,
                         serial_await_in_loop,
+                        pd_concat_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -274,6 +286,7 @@ impl<'a> Walker<'a> {
                         nested_loop_with_io: Vec::new(),
                         nested_loop_quadratic: Vec::new(),
                         serial_await_in_loop: Vec::new(),
+                        pd_concat_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -444,6 +457,23 @@ fn condition_of(n: Node) -> Option<Node> {
 /// ones (`if`/`elif`/`except`/ternary/`match` case).
 fn is_loop(n: Node) -> bool {
     matches!(n.kind(), "for_statement" | "while_statement")
+}
+
+/// A small fixed table of `module.function` paths recognized as a
+/// pandas concatenation for `pd_concat_in_loop` (issue #192), matched on
+/// the qualified `object.attribute` form.
+///
+/// Deliberately covers only `pd.concat`/`pandas.concat` and **not** a
+/// bare `.append(..)`, even though the issue's own wording names
+/// `DataFrame.append` too. Without type information this port cannot
+/// tell `DataFrame.append` from `list.append` -- and appending to a
+/// *list* inside a loop is precisely the fix this marker recommends, so
+/// flagging bare `.append` would penalize the correct pattern far more
+/// often than the wrong one. (`DataFrame.append` was also deprecated in
+/// pandas 1.4 and removed in 2.0, so its real-world incidence is
+/// shrinking regardless.)
+fn is_pd_concat_call(name: &str) -> bool {
+    matches!(name, "pd.concat" | "pandas.concat")
 }
 
 /// The callee of an awaited async call, for `serial_await_in_loop`
@@ -1036,5 +1066,31 @@ mod tests {
         // `asyncio.gather` is a concurrency combinator -- not flagged.
         assert!(batched.serial_await_in_loop.is_empty());
         assert!(hoisted.serial_await_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_pd_concat_in_a_loop_but_not_after_it_or_a_bare_list_append() {
+        let rec = extract_str(
+            "import pandas as pd\n\ndef grows_in_loop(rows):\n    df = pd.DataFrame()\n    for r in rows:\n        df = pd.concat([df, r])\n    return df\n\ndef concat_once(rows):\n    parts = []\n    for r in rows:\n        parts.append(r)\n    return pd.concat(parts)\n",
+        );
+        let grows_in_loop = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "grows_in_loop")
+            .unwrap();
+        let concat_once = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "concat_once")
+            .unwrap();
+
+        assert_eq!(grows_in_loop.pd_concat_in_loop.len(), 1);
+        assert_eq!(grows_in_loop.pd_concat_in_loop[0].callee_name, "pd.concat");
+
+        // The recommended fix: collect into a list in the loop, concat
+        // once after it. The `parts.append(r)` inside the loop must NOT
+        // be flagged -- that's the fix, not the problem -- and the
+        // `pd.concat` is outside the loop entirely.
+        assert!(concat_once.pd_concat_in_loop.is_empty());
     }
 }

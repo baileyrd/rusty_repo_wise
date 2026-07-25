@@ -6,6 +6,56 @@ repo routing work through PRs).
 
 ---
 
+## PR #224 — Add sql_cartesian_join health marker
+**2026-07-25** · [#224](https://github.com/baileyrd/rusty_repo_wise/pull/224) · closes [#195](https://github.com/baileyrd/rusty_repo_wise/issues/195)
+
+- **Added:** `sql_cartesian_join`, the fifteenth slice of issue #72's
+  Performance-signal cluster. Flags a SQL query string listing several
+  comma-joined tables with no predicate connecting them — an accidental
+  cartesian product returning `n × m` rows. A correctness bug as much as
+  a performance one.
+- **A text-level marker, not an AST one** — the first in this cluster.
+  That turns out to be an advantage: the SQL scan is language-agnostic,
+  and each language contributes only a small extractor for its own
+  string-literal node kinds. All three converge on a `string_content`/
+  `string_fragment` child, so one shared helper shape covers Rust
+  (`string_literal`/`raw_string_literal`), Python (`string`), and JS/TS
+  (`string`/`template_string`).
+- **`Symbol` gains `sql_cartesian_join: Vec<SqlCartesianJoinRef>`** (each
+  entry: `line`, `tables`).
+- **The heuristic**, deliberately coarse and *not* a SQL parse — the same
+  framing as `repowise_workspace::contracts`' route-pattern table: take
+  the `FROM` clause up to the next clause keyword, split on commas, and
+  require one qualified `a.b = c.d` equality predicate in the `WHERE`
+  clause per additional table (`n` tables need `n − 1`).
+- **Both sides of a predicate must be qualified.** That's what separates
+  a join condition from a plain column filter like `o.status = 1` —
+  counting a half-qualified filter would silently suppress a real
+  cartesian join. A unit test pins it.
+- **Three documented limits:** a `FROM` clause containing an explicit
+  `JOIN` is skipped entirely (its `ON` predicate is a different shape,
+  and the explicit form is rarely the accidental case); a query
+  assembled by string concatenation is invisible, since only one literal
+  is ever in hand; and aliases are read as the first whitespace token,
+  so unusual formatting can confuse the table list.
+- **Testing:** seven unit tests exercise the pure SQL function directly
+  — comma-join flagged, proper `WHERE` join accepted, explicit
+  `JOIN ... ON` ignored, three tables with one predicate flagged, plain
+  column filter not counted, single-table ignored, non-SQL text ignored
+  — plus a parser-level test and a health scoring test.
+- **New `FindingKind::SqlCartesianJoin`** (penalty −0.6). Arguably the
+  most severe marker in the cluster, but also the most heuristic, so it
+  shares the quadratic-*shape* tier rather than getting one above it.
+- **New dependency:** `regex` added to `repowise-parser`, already in
+  `Cargo.lock` via `repowise-workspace` — a zero-new-fetch addition.
+- **Scope:** Rust, Python, and TypeScript/JavaScript.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR.
+- 4 of #72's 19 sub-issues remain open — this closes only #195, not
+  #72 itself.
+
+---
+
 ## PR #222 — Add array_spread_in_reduce health marker
 **2026-07-25** · [#222](https://github.com/baileyrd/rusty_repo_wise/pull/222) · closes [#194](https://github.com/baileyrd/rusty_repo_wise/issues/194)
 

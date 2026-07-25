@@ -6,7 +6,7 @@
 
 use repowise_core::{
     ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, ComplexConditionalRef,
-    IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
+    DeferInLoopRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
     NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
     ResourceConstructionInLoopRef, SerialAwaitInLoopRef, SqlCartesianJoinRef,
     StringConcatInLoopRef,
@@ -750,6 +750,24 @@ pub fn array_spreads_in_reduce(
     matches_in_body(body, spread_reduce_accumulator, is_nested_function)
         .into_iter()
         .map(|(line, accumulator)| ArraySpreadInReduceRef { line, accumulator })
+        .collect()
+}
+
+/// Go `defer` statements found inside a loop body, for `defer_in_loop`
+/// (issue #189). `defer_callee` returns the deferred call's name for a
+/// defer-statement node and `None` for everything else, so the language
+/// arm owns both "is this a defer" and "what does it defer" -- there's
+/// no name table to filter against here, since the `defer` keyword is
+/// the entire signal. See `matches_in_loops`.
+pub fn defers_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    defer_callee: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<DeferInLoopRef> {
+    matches_in_loops(body, is_loop, defer_callee, is_nested_function)
+        .into_iter()
+        .map(|(line, callee_name)| DeferInLoopRef { line, callee_name })
         .collect()
 }
 

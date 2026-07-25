@@ -38,6 +38,7 @@ fn symbol(name: &str, complexity: usize) -> Symbol {
         blocking_io_under_lock: Vec::new(),
         array_spread_in_reduce: Vec::new(),
         sql_cartesian_join: Vec::new(),
+        defer_in_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,
@@ -90,6 +91,7 @@ fn default_weights_match_this_crates_original_hardcoded_penalties() {
     assert_eq!(defaults.blocking_io_under_lock, 0.6);
     assert_eq!(defaults.array_spread_in_reduce, 0.6);
     assert_eq!(defaults.sql_cartesian_join, 0.6);
+    assert_eq!(defaults.defer_in_loop, 0.6);
 }
 
 #[test]

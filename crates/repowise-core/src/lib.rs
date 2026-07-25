@@ -286,6 +286,17 @@ pub struct Symbol {
     /// this extraction isn't implemented for yet -- currently Rust,
     /// Python, and TypeScript/JavaScript, matching `io_in_loop`'s scope.
     pub nested_loop_with_io: Vec<NestedLoopWithIoRef>,
+    /// Inner loops whose iterated collection is the same as (or a
+    /// trivial derivation of) an enclosing loop's -- the classic
+    /// accidental all-pairs O(n^2) scan (`for x in items { for y in
+    /// items { .. } }`), usually replaceable with a set/map lookup.
+    /// Compares the two loops' *iterable expressions*, unlike
+    /// `nested_loop_with_io`, which only cares about nesting depth and
+    /// what's called inside. Empty for symbols with no body, and for
+    /// languages this extraction isn't implemented for yet -- currently
+    /// Rust, Python, and TypeScript/JavaScript, matching `io_in_loop`'s
+    /// scope.
+    pub nested_loop_quadratic: Vec<NestedLoopQuadraticRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -374,6 +385,17 @@ pub struct RegexCompileInLoopRef {
 pub struct NestedLoopWithIoRef {
     pub line: usize,
     pub callee_name: String,
+}
+
+/// A single inner loop iterating the same collection as an enclosing
+/// loop. `line` points at the inner loop itself, not the outer one or
+/// the function; `iterable` is the shared collection's name, normalized
+/// past trivial derivations (`&items`/`items.iter()` all report
+/// `items`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NestedLoopQuadraticRef {
+    pub line: usize,
+    pub iterable: String,
 }
 
 impl Symbol {

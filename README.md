@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty rule-based markers: long functions, high cyclomatic complexity,
+  twenty-one rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and eight of repowise's Performance-signal
+  declared parameter types), and nine of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -108,8 +108,11 @@ specifics per layer), not full feature parity:
   (`nested_loop_with_io` — an `io_in_loop` call found at loop-nesting
   depth 2 or deeper, potentially O(n²) or worse rather than O(n), so it's
   a depth-2+ subset of `io_in_loop` reported under both markers rather
-  than a separate detection pass, Rust/Python/TS+JS only) — except for
-  shell scripts,
+  than a separate detection pass, Rust/Python/TS+JS only), and a
+  quadratic nested loop (`nested_loop_quadratic` — an inner loop
+  iterating the same collection as an enclosing loop, the accidental
+  all-pairs O(n²) scan that's usually replaceable with a set/map lookup,
+  Rust/Python/TS+JS only) — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -146,7 +149,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 20 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 21 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -180,9 +183,11 @@ dashboard is one static page with no per-file drill-down or live search
   (Rust/Python only) an index-0-list-insert-call classifier
   (`list_insert_zero_in_loop`), a per-language JSON-parse-callee-name
   table (`json_parse_in_loop`), a per-language regex-compile-callee-name
-  table (`regex_compile_in_loop`), and a shared loop-nesting-*depth*
+  table (`regex_compile_in_loop`), a shared loop-nesting-*depth*
   classifier reusing the I/O-callee-name table above
-  (`nested_loop_with_io`).
+  (`nested_loop_with_io`), and a per-language loop-iterable normalizer
+  feeding a shared same-collection comparison
+  (`nested_loop_quadratic`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -285,6 +290,7 @@ to `[0, 10]`:
 | JSON parse in loop (`json_parse_in_loop`) | a known JSON-deserializing call found inside a loop body | −0.3 |
 | Regex compile in loop (`regex_compile_in_loop`) | a known regex-compilation call found inside a loop body | −0.3 |
 | Nested loop with I/O (`nested_loop_with_io`) | an `io_in_loop` call found at loop-nesting depth 2+ | −0.6 |
+| Nested loop quadratic (`nested_loop_quadratic`) | an inner loop iterating the same collection as an enclosing loop | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -300,7 +306,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty; everything else keeps its default
+# only overriding two of the twenty-one; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -617,6 +623,45 @@ nested case, and its default penalty (−0.6) is double the flat −0.3
 every other loop-body marker uses to reflect that added severity. The
 other 13 languages have no per-language table yet and so never produce
 any entries for this marker.
+
+**Nested loop quadratic (`nested_loop_quadratic`)** flags an inner loop
+iterating the *same collection* as an enclosing loop — the classic
+accidental all-pairs O(n²) scan (`for x in items { for y in items { .. } }`),
+usually replaceable with a set/map lookup. Implemented for **Rust,
+Python, and TypeScript/JavaScript only**. Where `nested_loop_with_io`
+above cares only how deep a call sits and what it calls, this one
+compares the two loops' *iterable expressions* and ignores the body
+entirely, so the two are complementary rather than overlapping: a
+cross-product over two genuinely different collections is not flagged
+here, and an all-pairs scan doing no I/O is not flagged there.
+
+Each language contributes a `loop_iterable` normalizer that reduces a
+loop's iterable expression to a base collection name, and
+`repowise-parser::metrics::quadratic_loop_nestings` walks carrying a
+stack of the enclosing loops' normalized names, reporting any loop whose
+own name is already on that stack
+(`Symbol::nested_loop_quadratic: Vec<NestedLoopQuadraticRef>`, each entry
+carrying the inner loop's own `line` and the shared collection's name).
+Normalization peels only wrappers that yield the *same* underlying
+collection — `items`, `&items`, and `items.iter()` (Rust);
+`enumerate(items)`/`sorted(items)` and `d.values()` (Python);
+`items.values()` and `Object.keys(items)` (TS/JS) — so a genuinely
+narrower sequence (`items.filter(..)`, a comprehension) doesn't
+normalize at all and never compares equal to anything. JS's
+`Object.keys(x)` deliberately resolves to `x` rather than the `Object`
+global, without which every such loop would collapse to the name
+`Object` and two unrelated collections would falsely match.
+
+Ranges (`for i in 0..n`, `range(n)`, and C-style `for (let i = 0; ...)`)
+are deliberately excluded even though a doubly-nested one is also
+quadratic: that shape is usually a deliberate, irreducible grid/matrix
+traversal, whereas iterating one *collection* twice is the accidental
+scan this marker is after. Its default penalty (−0.6) matches
+`nested_loop_with_io`'s — both flag a quadratic-complexity *shape*
+rather than a single expensive call, a tier above the flat −0.3
+per-occurrence loop-body markers. The other 13 languages have no
+per-language normalizer yet and so never produce any entries for this
+marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

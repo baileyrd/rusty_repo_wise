@@ -134,6 +134,7 @@ impl<'a> Walker<'a> {
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
+                        nested_loop_quadratic: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -170,6 +171,7 @@ impl<'a> Walker<'a> {
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
+                        nested_loop_quadratic: Vec::new(),
                     });
                 }
             }
@@ -387,6 +389,15 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let nested_loop_quadratic = body
+            .map(|b| {
+                metrics::quadratic_loop_nestings(
+                    b,
+                    |n| loop_iterable(n, self.source),
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -414,6 +425,7 @@ impl<'a> Walker<'a> {
             json_parse_in_loop,
             regex_compile_in_loop,
             nested_loop_with_io,
+            nested_loop_quadratic,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -529,6 +541,54 @@ fn is_loop(n: Node) -> bool {
         n.kind(),
         "for_statement" | "for_in_statement" | "while_statement" | "do_statement"
     )
+}
+
+/// The base collection a `for...of`/`for...in` loop iterates over, for
+/// `nested_loop_quadratic` (issue #187): `items` for all of
+/// `for (const x of items)`, `for (const x of items.values())`, and
+/// `for (const k of Object.keys(items))`. `None` for `while`/`do` and
+/// for a C-style `for (let i = 0; ...)` (both a different grammar node
+/// with no single iterable to compare, and the deliberate index-walk
+/// shape this marker isn't after), and for any iterable that doesn't
+/// normalize down to a plain identifier.
+fn loop_iterable(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "for_in_statement" {
+        return None;
+    }
+    base_collection_name(node.child_by_field_name("right")?, source)
+}
+
+/// Peel a same-collection view method (`.values()`/`.keys()`/
+/// `.entries()`/`.slice()`) off an iterable expression, returning the
+/// underlying identifier if one is left.
+fn base_collection_name(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(text(node, source).to_string()),
+        "call_expression" => {
+            let func = node.child_by_field_name("function")?;
+            if func.kind() != "member_expression" {
+                return None;
+            }
+            let object = func.child_by_field_name("object")?;
+            let property = func.child_by_field_name("property")?;
+            let property_name = text(property, source);
+            // `Object.keys(x)`/`.values(x)`/`.entries(x)` describe *x*,
+            // not the `Object` global -- peeling to the receiver here
+            // would collapse every such loop to the name `Object` and
+            // make two unrelated collections compare equal.
+            if text(object, source) == "Object"
+                && matches!(property_name, "keys" | "values" | "entries")
+            {
+                let arguments = node.child_by_field_name("arguments")?;
+                return base_collection_name(arguments.named_child(0)?, source);
+            }
+            if !matches!(property_name, "values" | "keys" | "entries" | "slice") {
+                return None;
+            }
+            base_collection_name(object, source)
+        }
+        _ => None,
+    }
 }
 
 /// If `node` is a `call_expression`, the callee name to match against
@@ -1039,5 +1099,29 @@ mod tests {
 
         assert_eq!(single_loop.io_in_loop.len(), 1);
         assert!(single_loop.nested_loop_with_io.is_empty());
+    }
+
+    #[test]
+    fn flags_nested_loops_over_the_same_collection_but_not_unrelated_ones() {
+        let rec = extract_js(
+            "function allPairs(items) {\n  let n = 0;\n  for (const x of items) {\n    for (const y of items.values()) {\n      n++;\n    }\n  }\n  return n;\n}\n\nfunction crossProduct(rows, cols) {\n  let n = 0;\n  for (const r of rows) {\n    for (const c of cols) {\n      n++;\n    }\n  }\n  return n;\n}\n\nfunction objectKeys(a, b) {\n  let n = 0;\n  for (const x of Object.keys(a)) {\n    for (const y of Object.keys(b)) {\n      n++;\n    }\n  }\n  return n;\n}\n",
+        );
+        let all_pairs = rec.symbols.iter().find(|s| s.name == "allPairs").unwrap();
+        let cross_product = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "crossProduct")
+            .unwrap();
+        let object_keys = rec.symbols.iter().find(|s| s.name == "objectKeys").unwrap();
+
+        // `items` and `items.values()` normalize to the same collection.
+        assert_eq!(all_pairs.nested_loop_quadratic.len(), 1);
+        assert_eq!(all_pairs.nested_loop_quadratic[0].iterable, "items");
+
+        assert!(cross_product.nested_loop_quadratic.is_empty());
+        // `Object.keys(a)`/`Object.keys(b)` must normalize to `a`/`b`,
+        // not both to the `Object` global -- otherwise two unrelated
+        // collections would falsely compare equal.
+        assert!(object_keys.nested_loop_quadratic.is_empty());
     }
 }

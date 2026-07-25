@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and eight of
+//! `repowise_core::Symbol::primitive_param_count`), and nine of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -35,7 +35,10 @@
 //! and I/O calls found at loop-nesting depth 2+ (`nested_loop_with_io`,
 //! same scope as `io_in_loop` -- a depth-2+ subset of it, not a separate
 //! detection pass, so a flagged call is reported under both markers --
-//! see `repowise_core::Symbol::nested_loop_with_io`).
+//! see `repowise_core::Symbol::nested_loop_with_io`), and inner loops
+//! iterating the same collection as an enclosing loop
+//! (`nested_loop_quadratic`, same scope as `io_in_loop` -- see
+//! `repowise_core::Symbol::nested_loop_quadratic`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -177,6 +180,15 @@ fn default_regex_compile_in_loop() -> f64 {
 fn default_nested_loop_with_io() -> f64 {
     0.6
 }
+// Same weight as `NestedLoopWithIo` (issue #187): both flag a
+// quadratic-complexity *shape* rather than a single expensive call, so
+// both sit a tier above the flat 0.3 per-occurrence loop-body markers.
+// Unlike that one, this marker double-counts nothing -- an inner loop
+// iterating its outer loop's collection isn't reported by any other
+// marker.
+fn default_nested_loop_quadratic() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -235,6 +247,8 @@ pub struct HealthWeights {
     pub regex_compile_in_loop: f64,
     #[serde(default = "default_nested_loop_with_io")]
     pub nested_loop_with_io: f64,
+    #[serde(default = "default_nested_loop_quadratic")]
+    pub nested_loop_quadratic: f64,
 }
 
 impl Default for HealthWeights {
@@ -260,6 +274,7 @@ impl Default for HealthWeights {
             json_parse_in_loop: default_json_parse_in_loop(),
             regex_compile_in_loop: default_regex_compile_in_loop(),
             nested_loop_with_io: default_nested_loop_with_io(),
+            nested_loop_quadratic: default_nested_loop_quadratic(),
         }
     }
 }
@@ -295,6 +310,7 @@ impl HealthWeights {
             FindingKind::JsonParseInLoop => self.json_parse_in_loop,
             FindingKind::RegexCompileInLoop => self.regex_compile_in_loop,
             FindingKind::NestedLoopWithIo => self.nested_loop_with_io,
+            FindingKind::NestedLoopQuadratic => self.nested_loop_quadratic,
         }
     }
 }
@@ -321,6 +337,7 @@ pub enum FindingKind {
     JsonParseInLoop,
     RegexCompileInLoop,
     NestedLoopWithIo,
+    NestedLoopQuadratic,
 }
 
 impl FindingKind {
@@ -346,6 +363,7 @@ impl FindingKind {
             FindingKind::JsonParseInLoop => "json-parse-in-loop",
             FindingKind::RegexCompileInLoop => "regex-compile-in-loop",
             FindingKind::NestedLoopWithIo => "nested-loop-with-io",
+            FindingKind::NestedLoopQuadratic => "nested-loop-quadratic",
         }
     }
 }
@@ -660,6 +678,23 @@ fn check_function_markers(
                 "`{}` (I/O-shaped call) found inside a loop nested inside another loop -- \
                  potentially O(n^2) or worse; consider hoisting it out or restructuring",
                 nested_io.callee_name
+            ),
+        });
+    }
+    // Already filtered to inner loops iterating an enclosing loop's own
+    // collection at extraction time (see
+    // `repowise_parser::metrics::quadratic_loop_nestings`); every entry
+    // here is already flagged, same as the other loop markers above.
+    for quadratic in &sym.nested_loop_quadratic {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(quadratic.line),
+            kind: FindingKind::NestedLoopQuadratic,
+            detail: format!(
+                "loop iterates `{}` inside an enclosing loop over the same collection -- \
+                 an O(n^2) all-pairs scan; consider a set/map lookup instead",
+                quadratic.iterable
             ),
         });
     }

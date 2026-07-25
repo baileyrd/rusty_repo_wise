@@ -6,8 +6,8 @@
 
 use repowise_core::{
     ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
-    NestedLoopWithIoRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef,
-    StringConcatInLoopRef,
+    NestedLoopQuadraticRef, NestedLoopWithIoRef, RegexCompileInLoopRef,
+    ResourceConstructionInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -508,6 +508,63 @@ pub fn ios_in_nested_loops(
     .into_iter()
     .map(|(line, callee_name)| NestedLoopWithIoRef { line, callee_name })
     .collect()
+}
+
+/// Inner loops iterating the same collection as an enclosing loop, for
+/// `nested_loop_quadratic` (issue #187) -- the accidental all-pairs
+/// O(n^2) scan. Walks carrying a stack of enclosing loops' normalized
+/// iterable names and reports a loop whose own iterable is already on
+/// that stack.
+///
+/// Unlike its sibling walks above this takes no separate `is_loop`
+/// predicate: `loop_iterable` already node-kind-checks for its
+/// language's `for`-loop form, and only a `for` loop has an iterable
+/// expression to compare at all (a `while`/`loop` yields `None` and is
+/// simply transparent here). A second classifier would be redundant and
+/// could silently disagree with the first.
+pub fn quadratic_loop_nestings(
+    body: Node,
+    loop_iterable: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<NestedLoopQuadraticRef> {
+    fn walk(
+        node: Node,
+        enclosing: &mut Vec<String>,
+        loop_iterable: &dyn Fn(Node) -> Option<String>,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<NestedLoopQuadraticRef>,
+    ) {
+        let mut pushed = false;
+        if let Some(iterable) = loop_iterable(node) {
+            if enclosing.contains(&iterable) {
+                out.push(NestedLoopQuadraticRef {
+                    line: node.start_position().row + 1,
+                    iterable: iterable.clone(),
+                });
+            }
+            enclosing.push(iterable);
+            pushed = true;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            walk(child, enclosing, loop_iterable, is_nested_function, out);
+        }
+        if pushed {
+            enclosing.pop();
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        body,
+        &mut Vec::new(),
+        &loop_iterable,
+        &is_nested_function,
+        &mut out,
+    );
+    out
 }
 
 /// Best-effort parameter count: the number of named children of a

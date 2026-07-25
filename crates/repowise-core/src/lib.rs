@@ -315,6 +315,17 @@ pub struct Symbol {
     /// port's other supported languages), and empty for symbols with no
     /// body.
     pub pd_concat_in_loop: Vec<PdConcatInLoopRef>,
+    /// Blocking, synchronous calls (`std::thread::sleep`, `time.sleep`,
+    /// `requests.get`, blocking `std::fs`/`open`) found inside an
+    /// `async fn`/`async def` body. A blocking call on an async
+    /// executor's worker thread stalls the whole reactor, degrading
+    /// every other task sharing that thread. Unlike the loop-body
+    /// markers, the context here is the enclosing *function* being
+    /// async, not an enclosing loop. Empty for non-async functions, for
+    /// symbols with no body, and for languages this extraction isn't
+    /// implemented for yet -- currently Rust and Python, the two the
+    /// issue scoped it to.
+    pub blocking_sync_in_async: Vec<BlockingSyncInAsyncRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -429,6 +440,14 @@ pub struct SerialAwaitInLoopRef {
 /// at the call itself, not the enclosing loop or function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PdConcatInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
+}
+
+/// A single blocking synchronous call found inside an async function
+/// body. `line` points at the call itself, not the enclosing function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockingSyncInAsyncRef {
     pub line: usize,
     pub callee_name: String,
 }

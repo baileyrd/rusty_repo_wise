@@ -137,6 +137,7 @@ impl<'a> Walker<'a> {
                         nested_loop_quadratic: Vec::new(),
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
+                        blocking_sync_in_async: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -176,6 +177,7 @@ impl<'a> Walker<'a> {
                         nested_loop_quadratic: Vec::new(),
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
+                        blocking_sync_in_async: Vec::new(),
                     });
                 }
             }
@@ -445,6 +447,7 @@ impl<'a> Walker<'a> {
             // is a Python library with no equivalent in this port's
             // other supported languages.
             pd_concat_in_loop: Vec::new(),
+            blocking_sync_in_async: Vec::new(),
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);

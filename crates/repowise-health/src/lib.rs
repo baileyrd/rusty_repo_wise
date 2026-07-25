@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and eleven of
+//! `repowise_core::Symbol::primitive_param_count`), and twelve of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -43,7 +43,11 @@
 //! (`serial_await_in_loop`, same scope as `io_in_loop` -- see
 //! `repowise_core::Symbol::serial_await_in_loop`), and `pandas.concat`
 //! calls inside a loop body (`pd_concat_in_loop`, Python-only -- see
-//! `repowise_core::Symbol::pd_concat_in_loop`).
+//! `repowise_core::Symbol::pd_concat_in_loop`), and blocking synchronous
+//! calls inside an async function body (`blocking_sync_in_async`,
+//! Rust/Python-only, and the one marker in this cluster whose context is
+//! the enclosing *function* rather than an enclosing loop -- see
+//! `repowise_core::Symbol::blocking_sync_in_async`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -209,6 +213,14 @@ fn default_serial_await_in_loop() -> f64 {
 fn default_pd_concat_in_loop() -> f64 {
     0.6
 }
+// Elevated above the flat 0.3 per-occurrence tier (issue #184) for a
+// different reason than the quadratic-shape markers: a blocking call on
+// an async executor's worker thread stalls the whole reactor, so the
+// cost lands on every *other* task sharing that thread rather than only
+// on the function containing it.
+fn default_blocking_sync_in_async() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -273,6 +285,8 @@ pub struct HealthWeights {
     pub serial_await_in_loop: f64,
     #[serde(default = "default_pd_concat_in_loop")]
     pub pd_concat_in_loop: f64,
+    #[serde(default = "default_blocking_sync_in_async")]
+    pub blocking_sync_in_async: f64,
 }
 
 impl Default for HealthWeights {
@@ -301,6 +315,7 @@ impl Default for HealthWeights {
             nested_loop_quadratic: default_nested_loop_quadratic(),
             serial_await_in_loop: default_serial_await_in_loop(),
             pd_concat_in_loop: default_pd_concat_in_loop(),
+            blocking_sync_in_async: default_blocking_sync_in_async(),
         }
     }
 }
@@ -339,6 +354,7 @@ impl HealthWeights {
             FindingKind::NestedLoopQuadratic => self.nested_loop_quadratic,
             FindingKind::SerialAwaitInLoop => self.serial_await_in_loop,
             FindingKind::PdConcatInLoop => self.pd_concat_in_loop,
+            FindingKind::BlockingSyncInAsync => self.blocking_sync_in_async,
         }
     }
 }
@@ -368,6 +384,7 @@ pub enum FindingKind {
     NestedLoopQuadratic,
     SerialAwaitInLoop,
     PdConcatInLoop,
+    BlockingSyncInAsync,
 }
 
 impl FindingKind {
@@ -396,6 +413,7 @@ impl FindingKind {
             FindingKind::NestedLoopQuadratic => "nested-loop-quadratic",
             FindingKind::SerialAwaitInLoop => "serial-await-in-loop",
             FindingKind::PdConcatInLoop => "pd-concat-in-loop",
+            FindingKind::BlockingSyncInAsync => "blocking-sync-in-async",
         }
     }
 }
@@ -764,6 +782,25 @@ fn check_function_markers(
                  DataFrame, making the loop quadratic; collect the rows in a list and \
                  concatenate once after the loop",
                 concat.callee_name
+            ),
+        });
+    }
+    // Already filtered to blocking calls found inside an *async*
+    // function body at extraction time (see
+    // `repowise_parser::metrics::blocking_calls_in_async`) -- the
+    // extractor only populates this for async functions, so no
+    // async-ness check is needed here.
+    for blocking in &sym.blocking_sync_in_async {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(blocking.line),
+            kind: FindingKind::BlockingSyncInAsync,
+            detail: format!(
+                "`{}` (blocking call) inside an async function -- this stalls the executor \
+                 thread and every other task sharing it; use the async equivalent or move \
+                 it to a blocking-friendly pool",
+                blocking.callee_name
             ),
         });
     }

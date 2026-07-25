@@ -218,6 +218,18 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let blocking_sync_in_async = if is_async_fn(node, self.source) {
+                        body.map(|b| {
+                            metrics::blocking_calls_in_async(
+                                b,
+                                |n| blocking_callee(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -254,6 +266,7 @@ impl<'a> Walker<'a> {
                         // pandas is a Python library with no equivalent in
                         // this port's other supported languages.
                         pd_concat_in_loop: Vec::new(),
+                        blocking_sync_in_async,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -297,6 +310,7 @@ impl<'a> Walker<'a> {
                         nested_loop_quadratic: Vec::new(),
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
+                        blocking_sync_in_async: Vec::new(),
                     });
                 }
             }
@@ -330,6 +344,7 @@ impl<'a> Walker<'a> {
                         nested_loop_quadratic: Vec::new(),
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
+                        blocking_sync_in_async: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -488,6 +503,62 @@ fn is_loop(n: Node) -> bool {
     matches!(
         n.kind(),
         "while_expression" | "while_let_expression" | "loop_expression" | "for_expression"
+    )
+}
+
+/// True when this `function_item` is declared `async fn`, for
+/// `blocking_sync_in_async` (issue #184). Unlike every loop-body marker,
+/// this marker's context is the enclosing *function*, so the check
+/// happens on the function node itself rather than during a body walk.
+fn is_async_fn(node: Node, source: &str) -> bool {
+    if node.kind() != "function_item" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|c| c.kind() == "function_modifiers" && text(c, source).contains("async"));
+    found
+}
+
+/// The callee of a blocking synchronous call, for
+/// `blocking_sync_in_async` (issue #184): `thread::sleep` for
+/// `std::thread::sleep(d)`. Matched on the qualified two-segment path,
+/// since a bare `sleep`/`read`/`write` would be far too generic.
+///
+/// A call that is itself being `.await`ed is never reported, which is
+/// what keeps `tokio::fs::read_to_string(p).await` from being mistaken
+/// for `std::fs::read_to_string(p)`: both reduce to the same
+/// `fs::read_to_string` two-segment path, and being awaited is the only
+/// local evidence distinguishing the async variant from the blocking
+/// one.
+fn blocking_callee(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    if node
+        .parent()
+        .is_some_and(|p| p.kind() == "await_expression")
+    {
+        return None;
+    }
+    let name = qualified_call_name(node, source)?;
+    is_blocking_call(&name).then_some(name)
+}
+
+/// A small fixed table of blocking `std` paths -- heuristic and coarse,
+/// like `is_io_call`. Deliberately limited to calls with a clear async
+/// replacement, so every hit has an actionable fix.
+fn is_blocking_call(name: &str) -> bool {
+    matches!(
+        name,
+        "thread::sleep"
+            | "fs::read_to_string"
+            | "fs::read"
+            | "fs::write"
+            | "fs::copy"
+            | "fs::remove_file"
+            | "fs::create_dir_all"
     )
 }
 
@@ -1618,5 +1689,57 @@ mod tests {
         assert!(batched.serial_await_in_loop.is_empty());
         // The await is outside the loop entirely.
         assert!(hoisted.serial_await_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_blocking_calls_in_an_async_fn_but_not_a_sync_one_or_an_awaited_call() {
+        let rec = extract_str(
+            r#"
+            async fn blocks(path: &str) {
+                std::thread::sleep(delay);
+                let s = std::fs::read_to_string(path).unwrap();
+                drop(s);
+            }
+
+            fn sync_is_fine(path: &str) {
+                std::thread::sleep(delay);
+                let s = std::fs::read_to_string(path).unwrap();
+                drop(s);
+            }
+
+            async fn uses_async_fs(path: &str) {
+                let s = tokio::fs::read_to_string(path).await.unwrap();
+                drop(s);
+            }
+            "#,
+        );
+        let blocks = rec.symbols.iter().find(|s| s.name == "blocks").unwrap();
+        let sync_is_fine = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "sync_is_fine")
+            .unwrap();
+        let uses_async_fs = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "uses_async_fs")
+            .unwrap();
+
+        assert_eq!(blocks.blocking_sync_in_async.len(), 2);
+        let names: Vec<&str> = blocks
+            .blocking_sync_in_async
+            .iter()
+            .map(|b| b.callee_name.as_str())
+            .collect();
+        assert!(names.contains(&"thread::sleep"));
+        assert!(names.contains(&"fs::read_to_string"));
+
+        // The same calls in a plain `fn` are not this marker's concern.
+        assert!(sync_is_fine.blocking_sync_in_async.is_empty());
+
+        // `tokio::fs::read_to_string` reduces to the same two-segment
+        // path as the blocking `std::fs` one -- being awaited is what
+        // tells them apart.
+        assert!(uses_async_fs.blocking_sync_in_async.is_empty());
     }
 }

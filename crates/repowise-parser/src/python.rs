@@ -200,6 +200,16 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let serial_await_in_loop = body
+                        .map(|b| {
+                            metrics::serial_awaits_in_loops(
+                                b,
+                                is_loop,
+                                |n| awaited_callee(n, self.source),
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -226,6 +236,7 @@ impl<'a> Walker<'a> {
                         regex_compile_in_loop,
                         nested_loop_with_io,
                         nested_loop_quadratic,
+                        serial_await_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -262,6 +273,7 @@ impl<'a> Walker<'a> {
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
                         nested_loop_quadratic: Vec::new(),
+                        serial_await_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -432,6 +444,37 @@ fn condition_of(n: Node) -> Option<Node> {
 /// ones (`if`/`elif`/`except`/ternary/`match` case).
 fn is_loop(n: Node) -> bool {
     matches!(n.kind(), "for_statement" | "while_statement")
+}
+
+/// The callee of an awaited async call, for `serial_await_in_loop`
+/// (issue #181): `fetch` for `await fetch(u)`. `None` for a non-await
+/// node, for an await whose operand isn't a call, and for awaits of the
+/// concurrency combinators that *are* the fix.
+fn awaited_callee(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "await" {
+        return None;
+    }
+    let awaited = node.named_child(0)?;
+    if awaited.kind() != "call" {
+        return None;
+    }
+    let name = call_target_name(awaited.child_by_field_name("function")?, source);
+    if is_concurrency_combinator(&name) {
+        return None;
+    }
+    Some(name)
+}
+
+/// `asyncio` combinators that batch a whole set of awaits into one
+/// concurrent wait -- the fix `serial_await_in_loop` points at, so
+/// awaiting one is never itself the problem. Matched on the bare last
+/// attribute (`gather` for both `asyncio.gather(..)` and a
+/// `from asyncio import gather` call). `asyncio.wait` is deliberately
+/// left out: `wait` is far too generic a bare method name to exclude
+/// safely, and missing it only costs a false positive, not a false
+/// negative.
+fn is_concurrency_combinator(name: &str) -> bool {
+    matches!(name, "gather" | "as_completed")
 }
 
 /// The base collection a `for` loop iterates over, for
@@ -976,5 +1019,22 @@ mod tests {
         assert!(cross_product.nested_loop_quadratic.is_empty());
         // `range(..)` is deliberately excluded, same as Rust's ranges.
         assert!(index_walk.nested_loop_quadratic.is_empty());
+    }
+
+    #[test]
+    fn flags_serial_awaits_in_a_loop_but_not_batched_or_hoisted_ones() {
+        let rec = extract_str(
+            "import asyncio\n\nasync def serial(urls):\n    for u in urls:\n        r = await fetch(u)\n\nasync def batched(chunks):\n    for chunk in chunks:\n        rs = await asyncio.gather(*[fetch(u) for u in chunk])\n\nasync def hoisted(urls):\n    all_rs = await asyncio.gather(*[fetch(u) for u in urls])\n    for r in all_rs:\n        pass\n",
+        );
+        let serial = rec.symbols.iter().find(|s| s.name == "serial").unwrap();
+        let batched = rec.symbols.iter().find(|s| s.name == "batched").unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(serial.serial_await_in_loop.len(), 1);
+        assert_eq!(serial.serial_await_in_loop[0].callee_name, "fetch");
+
+        // `asyncio.gather` is a concurrency combinator -- not flagged.
+        assert!(batched.serial_await_in_loop.is_empty());
+        assert!(hoisted.serial_await_in_loop.is_empty());
     }
 }

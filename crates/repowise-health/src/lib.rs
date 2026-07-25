@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and nine of
+//! `repowise_core::Symbol::primitive_param_count`), and ten of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -38,7 +38,10 @@
 //! see `repowise_core::Symbol::nested_loop_with_io`), and inner loops
 //! iterating the same collection as an enclosing loop
 //! (`nested_loop_quadratic`, same scope as `io_in_loop` -- see
-//! `repowise_core::Symbol::nested_loop_quadratic`).
+//! `repowise_core::Symbol::nested_loop_quadratic`), and awaited async
+//! calls inside a loop body running serially instead of concurrently
+//! (`serial_await_in_loop`, same scope as `io_in_loop` -- see
+//! `repowise_core::Symbol::serial_await_in_loop`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -189,6 +192,13 @@ fn default_nested_loop_with_io() -> f64 {
 fn default_nested_loop_quadratic() -> f64 {
     0.6
 }
+// Same per-occurrence weight as the other loop-body markers (issue
+// #181): a single serialized await is a real cost but, unlike the
+// quadratic-*shape* markers above, one occurrence is one extra
+// round-trip rather than an order-of-magnitude blowup.
+fn default_serial_await_in_loop() -> f64 {
+    0.3
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -249,6 +259,8 @@ pub struct HealthWeights {
     pub nested_loop_with_io: f64,
     #[serde(default = "default_nested_loop_quadratic")]
     pub nested_loop_quadratic: f64,
+    #[serde(default = "default_serial_await_in_loop")]
+    pub serial_await_in_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -275,6 +287,7 @@ impl Default for HealthWeights {
             regex_compile_in_loop: default_regex_compile_in_loop(),
             nested_loop_with_io: default_nested_loop_with_io(),
             nested_loop_quadratic: default_nested_loop_quadratic(),
+            serial_await_in_loop: default_serial_await_in_loop(),
         }
     }
 }
@@ -311,6 +324,7 @@ impl HealthWeights {
             FindingKind::RegexCompileInLoop => self.regex_compile_in_loop,
             FindingKind::NestedLoopWithIo => self.nested_loop_with_io,
             FindingKind::NestedLoopQuadratic => self.nested_loop_quadratic,
+            FindingKind::SerialAwaitInLoop => self.serial_await_in_loop,
         }
     }
 }
@@ -338,6 +352,7 @@ pub enum FindingKind {
     RegexCompileInLoop,
     NestedLoopWithIo,
     NestedLoopQuadratic,
+    SerialAwaitInLoop,
 }
 
 impl FindingKind {
@@ -364,6 +379,7 @@ impl FindingKind {
             FindingKind::RegexCompileInLoop => "regex-compile-in-loop",
             FindingKind::NestedLoopWithIo => "nested-loop-with-io",
             FindingKind::NestedLoopQuadratic => "nested-loop-quadratic",
+            FindingKind::SerialAwaitInLoop => "serial-await-in-loop",
         }
     }
 }
@@ -695,6 +711,25 @@ fn check_function_markers(
                 "loop iterates `{}` inside an enclosing loop over the same collection -- \
                  an O(n^2) all-pairs scan; consider a set/map lookup instead",
                 quadratic.iterable
+            ),
+        });
+    }
+    // Already filtered to awaited async calls found inside a loop body
+    // at extraction time (see
+    // `repowise_parser::metrics::serial_awaits_in_loops`), with awaits
+    // of the concurrency combinators that are the fix already excluded;
+    // every entry here is already flagged, same as the other loop-body
+    // markers above.
+    for await_call in &sym.serial_await_in_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(await_call.line),
+            kind: FindingKind::SerialAwaitInLoop,
+            detail: format!(
+                "`{}` awaited inside a loop body -- each iteration blocks on the previous one; \
+                 consider batching the whole set into one concurrent await",
+                await_call.callee_name
             ),
         });
     }

@@ -297,6 +297,16 @@ pub struct Symbol {
     /// Rust, Python, and TypeScript/JavaScript, matching `io_in_loop`'s
     /// scope.
     pub nested_loop_quadratic: Vec<NestedLoopQuadraticRef>,
+    /// Awaited async calls found inside a loop body within the symbol,
+    /// where each iteration blocks on the previous one instead of the
+    /// whole batch running concurrently (`Promise.all`/`join_all`/
+    /// `asyncio.gather`). Awaits *of* those concurrency combinators are
+    /// themselves excluded: awaiting one inside a loop is the chunked-
+    /// concurrency shape, not the serial one this marker is after. Empty
+    /// for symbols with no body, and for languages this extraction isn't
+    /// implemented for yet -- currently Rust, Python, and TypeScript/
+    /// JavaScript, matching `io_in_loop`'s scope.
+    pub serial_await_in_loop: Vec<SerialAwaitInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -396,6 +406,15 @@ pub struct NestedLoopWithIoRef {
 pub struct NestedLoopQuadraticRef {
     pub line: usize,
     pub iterable: String,
+}
+
+/// A single awaited async call found inside a loop body. `line` points
+/// at the await itself, not the enclosing loop or function;
+/// `callee_name` is the awaited call's callee.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialAwaitInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
 }
 
 impl Symbol {

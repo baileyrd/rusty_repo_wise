@@ -208,6 +208,16 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let serial_await_in_loop = body
+                        .map(|b| {
+                            metrics::serial_awaits_in_loops(
+                                b,
+                                is_loop,
+                                |n| awaited_callee(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -239,6 +249,7 @@ impl<'a> Walker<'a> {
                         regex_compile_in_loop,
                         nested_loop_with_io,
                         nested_loop_quadratic,
+                        serial_await_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -280,6 +291,7 @@ impl<'a> Walker<'a> {
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
                         nested_loop_quadratic: Vec::new(),
+                        serial_await_in_loop: Vec::new(),
                     });
                 }
             }
@@ -311,6 +323,7 @@ impl<'a> Walker<'a> {
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
                         nested_loop_quadratic: Vec::new(),
+                        serial_await_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -469,6 +482,38 @@ fn is_loop(n: Node) -> bool {
     matches!(
         n.kind(),
         "while_expression" | "while_let_expression" | "loop_expression" | "for_expression"
+    )
+}
+
+/// The callee of an awaited async call, for `serial_await_in_loop`
+/// (issue #181): `fetch` for `fetch(u).await`. `None` for a non-await
+/// node, for an await whose operand isn't a call at all (`x.await` on an
+/// already-created future -- rarer, and not the "each iteration's async
+/// call" shape the issue describes), and for awaits of the concurrency
+/// combinators that *are* the fix -- awaiting a `join_all` inside a loop
+/// is chunked concurrency, not the serial pattern this flags.
+fn awaited_callee(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "await_expression" {
+        return None;
+    }
+    let awaited = node.named_child(0)?;
+    if awaited.kind() != "call_expression" {
+        return None;
+    }
+    let name = call_target_name(awaited.child_by_field_name("function")?, source);
+    if is_concurrency_combinator(&name) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Futures-combinator names that batch a whole set of awaits into one
+/// concurrent wait -- i.e. the fix `serial_await_in_loop` points at, so
+/// awaiting one is never itself the problem.
+fn is_concurrency_combinator(name: &str) -> bool {
+    matches!(
+        name,
+        "join_all" | "try_join_all" | "join" | "try_join" | "select_all"
     )
 }
 
@@ -1527,5 +1572,45 @@ mod tests {
         // is usually a deliberate grid traversal, not an accidental
         // all-pairs scan over one collection.
         assert!(index_walk.nested_loop_quadratic.is_empty());
+    }
+
+    #[test]
+    fn flags_serial_awaits_in_a_loop_but_not_batched_or_hoisted_ones() {
+        let rec = extract_str(
+            r#"
+            async fn serial(urls: &[&str]) {
+                for u in urls {
+                    let r = fetch(u).await;
+                    drop(r);
+                }
+            }
+
+            async fn batched(urls: &[&str]) {
+                for chunk in urls.chunks(10) {
+                    let rs = join_all(chunk.iter().map(|u| fetch(u))).await;
+                    drop(rs);
+                }
+            }
+
+            async fn hoisted(urls: &[&str]) {
+                let all = join_all(urls.iter().map(|u| fetch(u))).await;
+                for r in &all {
+                    drop(r);
+                }
+            }
+            "#,
+        );
+        let serial = rec.symbols.iter().find(|s| s.name == "serial").unwrap();
+        let batched = rec.symbols.iter().find(|s| s.name == "batched").unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(serial.serial_await_in_loop.len(), 1);
+        assert_eq!(serial.serial_await_in_loop[0].callee_name, "fetch");
+
+        // Awaiting a concurrency combinator inside a loop is chunked
+        // concurrency, not the serial pattern -- deliberately not flagged.
+        assert!(batched.serial_await_in_loop.is_empty());
+        // The await is outside the loop entirely.
+        assert!(hoisted.serial_await_in_loop.is_empty());
     }
 }

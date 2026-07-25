@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-one rule-based markers: long functions, high cyclomatic complexity,
+  twenty-two rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and nine of repowise's Performance-signal
+  declared parameter types), and ten of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -112,7 +112,12 @@ specifics per layer), not full feature parity:
   quadratic nested loop (`nested_loop_quadratic` — an inner loop
   iterating the same collection as an enclosing loop, the accidental
   all-pairs O(n²) scan that's usually replaceable with a set/map lookup,
-  Rust/Python/TS+JS only) — except for shell scripts,
+  Rust/Python/TS+JS only), and a serial await in a loop
+  (`serial_await_in_loop` — an awaited async call inside a loop body, so
+  each iteration blocks on the previous one instead of the whole batch
+  running concurrently via `Promise.all`/`join_all`/`asyncio.gather`;
+  awaits *of* those combinators are themselves excluded, Rust/Python/TS+JS
+  only) — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -149,7 +154,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 21 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 22 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -185,9 +190,11 @@ dashboard is one static page with no per-file drill-down or live search
   table (`json_parse_in_loop`), a per-language regex-compile-callee-name
   table (`regex_compile_in_loop`), a shared loop-nesting-*depth*
   classifier reusing the I/O-callee-name table above
-  (`nested_loop_with_io`), and a per-language loop-iterable normalizer
+  (`nested_loop_with_io`), a per-language loop-iterable normalizer
   feeding a shared same-collection comparison
-  (`nested_loop_quadratic`).
+  (`nested_loop_quadratic`), and a per-language awaited-call extractor
+  with a concurrency-combinator exclusion table
+  (`serial_await_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -291,6 +298,7 @@ to `[0, 10]`:
 | Regex compile in loop (`regex_compile_in_loop`) | a known regex-compilation call found inside a loop body | −0.3 |
 | Nested loop with I/O (`nested_loop_with_io`) | an `io_in_loop` call found at loop-nesting depth 2+ | −0.6 |
 | Nested loop quadratic (`nested_loop_quadratic`) | an inner loop iterating the same collection as an enclosing loop | −0.6 |
+| Serial await in loop (`serial_await_in_loop`) | an awaited async call inside a loop body (excluding awaits of concurrency combinators) | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -306,7 +314,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-one; everything else keeps its default
+# only overriding two of the twenty-two; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -662,6 +670,41 @@ rather than a single expensive call, a tier above the flat −0.3
 per-occurrence loop-body markers. The other 13 languages have no
 per-language normalizer yet and so never produce any entries for this
 marker.
+
+**Serial await in loop (`serial_await_in_loop`)** flags an awaited
+async call inside a loop body — each iteration blocks on the previous
+one, turning what could be one concurrent batch into N sequential
+round-trips. Implemented for **Rust, Python, and TypeScript/JavaScript
+only** (the three parsed languages whose grammars carry async syntax),
+reusing `io_in_loop`'s `is_loop` classifier and the shared
+`matches_in_loops` walk unchanged — only the classifier is new.
+
+Each language contributes an `awaited_callee` extractor that recognizes
+its await node (`await_expression` in Rust and TS/JS, `await` in Python)
+and returns the awaited call's callee name. Two deliberate narrowings:
+
+- **Only calls are flagged.** An await whose operand isn't a call
+  (`await somePromise` on an already-created future) isn't reported —
+  the issue describes "each iteration's async call", and requiring a
+  call is what lets every finding name the thing being awaited.
+- **Awaits of concurrency combinators are excluded** — `Promise.all`/
+  `allSettled`/`race`/`any` (TS/JS), `join_all`/`try_join_all`/`join`/
+  `try_join`/`select_all` (Rust), `gather`/`as_completed` (Python).
+  Those are precisely the *fix* this marker points at, so awaiting one
+  inside a loop is the deliberate chunked-concurrency shape
+  (`for chunk in chunks { await Promise.all(chunk.map(..)) }`), not the
+  serial one. Flagging it would punish the correct pattern. TS/JS
+  matches the combinator on its qualified `Promise.all` form rather than
+  a bare `all`/`race`, which would be far too generic; Python matches
+  the bare `gather`/`as_completed` (distinctive enough on their own) but
+  deliberately leaves out `asyncio.wait`, since a bare `wait` is not —
+  missing it costs at most a false positive, never a false negative.
+
+Its default penalty (−0.3) matches the other per-occurrence loop-body
+markers rather than the −0.6 quadratic-*shape* tier: one serialized
+await is one extra round-trip, not an order-of-magnitude blowup. The
+other 13 languages have no per-language extractor yet and so never
+produce any entries for this marker.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

@@ -6,6 +6,51 @@ repo routing work through PRs).
 
 ---
 
+## PR #210 — Add nested_loop_with_io health marker
+**2026-07-24** · [#210](https://github.com/baileyrd/rusty_repo_wise/pull/210) · closes [#183](https://github.com/baileyrd/rusty_repo_wise/issues/183)
+
+- **Added:** `nested_loop_with_io`, the eighth slice of issue #72's
+  Performance-signal cluster. Flags a known I/O-shaped call found at
+  loop-nesting depth 2 or deeper — potentially O(n²) or worse I/O calls,
+  rather than the O(n) a single-loop `io_in_loop` hit represents.
+- **`Symbol` gains `nested_loop_with_io: Vec<NestedLoopWithIoRef>`** (each
+  entry: `line`, `callee_name`), populated at parse time.
+- **New `repowise-parser::metrics::matches_in_nested_loops`** — the first
+  structural addition to this cluster's shared machinery since
+  `matches_in_loops` itself. Structurally parallel to it, but tracks a
+  running loop-nesting *depth* instead of a single in-loop boolean, and
+  only reports a match once depth reaches a caller-supplied minimum.
+  Needed because this is the first marker that distinguishes "inside one
+  loop" from "inside a loop nested inside another loop"; the other seven
+  loop-body markers only care whether a loop encloses the call at all.
+- **New `repowise-parser::metrics::ios_in_nested_loops`** wraps that walk
+  with `min_depth = 2`, the same way `calls_in_loops` wraps the plain
+  version.
+- **Scope:** implemented for **Rust, Python, and TypeScript/JavaScript**,
+  matching `io_in_loop`'s scope. No new per-language pattern tables were
+  needed — each language's existing `is_loop`/`call_expression_callee`/
+  `is_io_call` are reused unchanged, only plumbed through the new walk.
+  The other 13 parsed languages get an empty `nested_loop_with_io` list.
+- **New `FindingKind::NestedLoopWithIo`** (penalty **−0.6**, double every
+  other loop-body marker's flat −0.3), one `Finding` per flagged call,
+  pointing at the call's own line.
+- **Deliberate double-counting:** a call flagged here is *also* flagged
+  under `io_in_loop` — this is a depth-2+ subset of that marker, not a
+  separate detection pass. The outer marker measures "any loop-body
+  I/O"; this one measures the specifically worse nested case, and the
+  heavier penalty reflects that.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206/#208).
+- 11 of #72's 19 sub-issues remain open — this closes only #183, not
+  #72 itself.
+
+---
+
 ## PR #208 — Add regex_compile_in_loop health marker
 **2026-07-24** · [#208](https://github.com/baileyrd/rusty_repo_wise/pull/208) · closes [#188](https://github.com/baileyrd/rusty_repo_wise/issues/188)
 

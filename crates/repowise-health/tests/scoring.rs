@@ -5,10 +5,11 @@
 
 use repowise_core::{
     ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, CallRef,
-    ComplexConditionalRef, DeferInLoopRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
-    ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
-    PdConcatInLoopRef, RegexCompileInLoopRef, RepoIndex, ResourceConstructionInLoopRef,
-    SerialAwaitInLoopRef, SqlCartesianJoinRef, StringConcatInLoopRef, Symbol, SymbolKind,
+    ComplexConditionalRef, DeferInLoopRef, FileRecord, GoroutineInUnboundedLoopRef, IoInLoopRef,
+    JsonParseInLoopRef, Language, ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef,
+    NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef, RepoIndex,
+    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, SqlCartesianJoinRef,
+    StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -58,6 +59,7 @@ fn symbol(
         array_spread_in_reduce: Vec::new(),
         sql_cartesian_join: Vec::new(),
         defer_in_loop: Vec::new(),
+        goroutine_in_unbounded_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -1132,6 +1134,59 @@ fn flags_one_finding_per_defer_in_loop_naming_the_deferred_call() {
     assert!(findings.iter().any(|f| f.detail.contains("Close")));
     assert!(findings.iter().any(|f| f.detail.contains("Unlock")));
     assert!(findings_for(&report, "clean", FindingKind::DeferInLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_unbounded_goroutine_naming_the_launched_call() {
+    let mut fan_out = symbol(
+        "worker.go",
+        "fanOut",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    fan_out.goroutine_in_unbounded_loop = vec![
+        GoroutineInUnboundedLoopRef {
+            line: 3,
+            callee_name: "func literal".to_string(),
+        },
+        GoroutineInUnboundedLoopRef {
+            line: 6,
+            callee_name: "handle".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "worker.go",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "worker.go",
+        vec![fan_out, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "fanOut", FindingKind::GoroutineInUnboundedLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(3)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings.iter().any(|f| f.detail.contains("func literal")));
+    assert!(findings.iter().any(|f| f.detail.contains("handle")));
+    assert!(findings_for(&report, "clean", FindingKind::GoroutineInUnboundedLoop).is_empty());
 }
 
 #[test]

@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and sixteen of
+//! `repowise_core::Symbol::primitive_param_count`), and seventeen of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -59,7 +59,10 @@
 //! `repowise_core::Symbol::sql_cartesian_join`), and `defer` statements
 //! inside a loop body (`defer_in_loop`, Go-only, since no other language
 //! here has a defer-to-function-exit construct -- see
-//! `repowise_core::Symbol::defer_in_loop`).
+//! `repowise_core::Symbol::defer_in_loop`), and `go` statements
+//! launched inside a loop body with no visible concurrency bound
+//! (`goroutine_in_unbounded_loop`, Go-only -- see
+//! `repowise_core::Symbol::goroutine_in_unbounded_loop`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -264,6 +267,15 @@ fn default_sql_cartesian_join() -> f64 {
 fn default_defer_in_loop() -> f64 {
     0.6
 }
+// The heavier tier again (issue #190), for the same reason as
+// `defer_in_loop`: one `go` statement in a loop fires the marker once
+// but spawns one goroutine per iteration, so the cost scales with the
+// loop's trip count. Unlike a leaked file handle, an unbounded goroutine
+// fan-out also lands on whatever the goroutines call -- exhausting
+// memory locally or overwhelming a downstream service.
+fn default_goroutine_in_unbounded_loop() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -338,6 +350,8 @@ pub struct HealthWeights {
     pub sql_cartesian_join: f64,
     #[serde(default = "default_defer_in_loop")]
     pub defer_in_loop: f64,
+    #[serde(default = "default_goroutine_in_unbounded_loop")]
+    pub goroutine_in_unbounded_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -371,6 +385,7 @@ impl Default for HealthWeights {
             array_spread_in_reduce: default_array_spread_in_reduce(),
             sql_cartesian_join: default_sql_cartesian_join(),
             defer_in_loop: default_defer_in_loop(),
+            goroutine_in_unbounded_loop: default_goroutine_in_unbounded_loop(),
         }
     }
 }
@@ -414,6 +429,7 @@ impl HealthWeights {
             FindingKind::ArraySpreadInReduce => self.array_spread_in_reduce,
             FindingKind::SqlCartesianJoin => self.sql_cartesian_join,
             FindingKind::DeferInLoop => self.defer_in_loop,
+            FindingKind::GoroutineInUnboundedLoop => self.goroutine_in_unbounded_loop,
         }
     }
 }
@@ -448,6 +464,7 @@ pub enum FindingKind {
     ArraySpreadInReduce,
     SqlCartesianJoin,
     DeferInLoop,
+    GoroutineInUnboundedLoop,
 }
 
 impl FindingKind {
@@ -481,6 +498,7 @@ impl FindingKind {
             FindingKind::ArraySpreadInReduce => "array-spread-in-reduce",
             FindingKind::SqlCartesianJoin => "sql-cartesian-join",
             FindingKind::DeferInLoop => "defer-in-loop",
+            FindingKind::GoroutineInUnboundedLoop => "goroutine-in-unbounded-loop",
         }
     }
 }
@@ -939,6 +957,25 @@ fn check_function_markers(
                  the resource stays held until the whole loop finishes; move the loop body into \
                  its own function, or call `{}` explicitly instead of deferring it",
                 deferred.callee_name, deferred.callee_name
+            ),
+        });
+    }
+    // Already filtered at extraction time to `go` statements in a loop
+    // whose body carries no recognized bounding channel operation (see
+    // `repowise_parser::metrics::unbounded_goroutines_in_loops`); every
+    // entry here is already flagged.
+    for launch in &sym.goroutine_in_unbounded_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(launch.line),
+            kind: FindingKind::GoroutineInUnboundedLoop,
+            detail: format!(
+                "`go {}(..)` inside a loop with no visible concurrency bound -- this spawns one \
+                 goroutine per iteration, so a large input can exhaust memory or overwhelm \
+                 whatever they call; gate the launch on a buffered semaphore channel or feed a \
+                 fixed-size worker pool instead",
+                launch.callee_name
             ),
         });
     }

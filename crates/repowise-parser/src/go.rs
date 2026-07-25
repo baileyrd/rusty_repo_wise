@@ -106,6 +106,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
+                        goroutine_in_unbounded_loop: Vec::new(),
                         param_count: 0,
                         primitive_param_count: 0,
                         body_hash: None,
@@ -161,6 +162,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let goroutine_in_unbounded_loop = body
+                        .map(|b| {
+                            metrics::unbounded_goroutines_in_loops(
+                                b,
+                                is_loop,
+                                |n| is_concurrency_bound(n, self.source),
+                                |n| goroutine_callee(n, self.source),
+                                is_nested_function,
+                            )
+                        })
+                        .unwrap_or_default();
                     let kind = if parent.is_some() {
                         SymbolKind::Method
                     } else {
@@ -194,6 +206,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop,
+                        goroutine_in_unbounded_loop,
                         param_count,
                         primitive_param_count: 0,
                         body_hash,
@@ -241,6 +254,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
+                        goroutine_in_unbounded_loop: Vec::new(),
                         param_count,
                         primitive_param_count: 0,
                         body_hash: None,
@@ -358,6 +372,45 @@ fn defer_callee(n: Node, source: &str) -> Option<String> {
         .find(|c| c.kind() == "call_expression")?;
     let name = call_target_name(call.child_by_field_name("function")?, source);
     Some(name).filter(|s| !s.is_empty())
+}
+
+/// For a `go_statement`, the name of the call it launches (`work` for
+/// `go work(v)`, `Handle` for `go srv.Handle(c)`); `None` for every
+/// other node. The inline `go func() {...}()` form launches a
+/// `func_literal`, which has no name -- it reports as `func literal`
+/// rather than being dropped, since it's by far the most common shape
+/// and dropping it would silently blind the marker to it.
+fn goroutine_callee(n: Node, source: &str) -> Option<String> {
+    if n.kind() != "go_statement" {
+        return None;
+    }
+    let mut cursor = n.walk();
+    let call = n
+        .children(&mut cursor)
+        .find(|c| c.kind() == "call_expression")?;
+    let function = call.child_by_field_name("function")?;
+    let name = call_target_name(function, source);
+    Some(if name.is_empty() {
+        "func literal".to_string()
+    } else {
+        name
+    })
+}
+
+/// A channel send (`sem <- struct{}{}`) or receive (`<-tokens`) -- the
+/// acquire half of Go's standard semaphore/worker-pool idiom, and the
+/// only bounding mechanism this marker recognizes. Deliberately narrow:
+/// `sync.WaitGroup` is *not* here, because `wg.Add`/`wg.Wait` bound how
+/// completion is tracked, not how many goroutines run at once.
+fn is_concurrency_bound(n: Node, source: &str) -> bool {
+    match n.kind() {
+        "send_statement" => true,
+        "unary_expression" => n
+            .child_by_field_name("operator")
+            .map(|op| text(op, source) == "<-")
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Only nested named function declarations get their own symbol; a
@@ -546,5 +599,104 @@ mod tests {
         let outer = rec.symbols.iter().find(|s| s.name == "outer").unwrap();
         assert_eq!(outer.defer_in_loop.len(), 1);
         assert_eq!(outer.defer_in_loop[0].callee_name, "close");
+    }
+
+    #[test]
+    fn flags_an_unbounded_goroutine_in_a_loop_but_not_a_semaphore_bounded_one() {
+        let rec = extract_str(
+            "package app\n\
+             \n\
+             func unbounded(items []int) {\n\
+             \tvar wg sync.WaitGroup\n\
+             \tfor _, it := range items {\n\
+             \t\twg.Add(1)\n\
+             \t\tgo func(v int) {\n\
+             \t\t\tdefer wg.Done()\n\
+             \t\t\twork(v)\n\
+             \t\t}(it)\n\
+             \t}\n\
+             \twg.Wait()\n\
+             }\n\
+             \n\
+             func bounded(items []int) {\n\
+             \tsem := make(chan struct{}, 8)\n\
+             \tfor _, it := range items {\n\
+             \t\tsem <- struct{}{}\n\
+             \t\tgo func(v int) {\n\
+             \t\t\tdefer func() { <-sem }()\n\
+             \t\t\twork(v)\n\
+             \t\t}(it)\n\
+             \t}\n\
+             }\n",
+        );
+
+        // `sync.WaitGroup` bounds *completion* tracking, not concurrency
+        // -- `wg.Add`/`wg.Wait` never suppress the finding.
+        let unbounded = rec.symbols.iter().find(|s| s.name == "unbounded").unwrap();
+        assert_eq!(unbounded.goroutine_in_unbounded_loop.len(), 1);
+        assert_eq!(
+            unbounded.goroutine_in_unbounded_loop[0].callee_name,
+            "func literal"
+        );
+
+        // The `sem <- struct{}{}` acquire sits in the loop body outside
+        // the launch, so the loop is bounded and nothing is flagged.
+        let bounded = rec.symbols.iter().find(|s| s.name == "bounded").unwrap();
+        assert!(bounded.goroutine_in_unbounded_loop.is_empty());
+    }
+
+    #[test]
+    fn a_channel_send_inside_the_goroutine_does_not_count_as_a_bound() {
+        // The regression this marker turns on: `results <- work(v)` is
+        // the goroutine reporting its own result, not the loop throttling
+        // how many goroutines exist. Scanning into launch subtrees would
+        // suppress exactly the case worth flagging.
+        let rec = extract_str(
+            "package app\n\
+             \n\
+             func fanOut(items []int) {\n\
+             \tfor _, it := range items {\n\
+             \t\tgo func(v int) {\n\
+             \t\t\tresults <- work(v)\n\
+             \t\t}(it)\n\
+             \t}\n\
+             }\n",
+        );
+
+        let sym = rec.symbols.iter().find(|s| s.name == "fanOut").unwrap();
+        assert_eq!(sym.goroutine_in_unbounded_loop.len(), 1);
+        assert_eq!(sym.goroutine_in_unbounded_loop[0].line, 5);
+    }
+
+    #[test]
+    fn a_named_goroutine_outside_any_loop_is_never_flagged() {
+        let rec = extract_str(
+            "package app\n\
+             \n\
+             func once(items []int) {\n\
+             \tgo drain(items)\n\
+             \tfor _, it := range items {\n\
+             \t\t<-tokens\n\
+             \t\tgo handle(it)\n\
+             \t}\n\
+             }\n\
+             \n\
+             func named(items []int) {\n\
+             \tfor _, it := range items {\n\
+             \t\tgo handle(it)\n\
+             \t}\n\
+             }\n",
+        );
+
+        // `go drain(..)` runs once, not per iteration; and the `<-tokens`
+        // receive bounds the loop, so neither launch is flagged.
+        let once = rec.symbols.iter().find(|s| s.name == "once").unwrap();
+        assert!(once.goroutine_in_unbounded_loop.is_empty());
+
+        // A plain named call is reported under its own name, not the
+        // `func literal` placeholder.
+        let named = rec.symbols.iter().find(|s| s.name == "named").unwrap();
+        assert_eq!(named.goroutine_in_unbounded_loop.len(), 1);
+        assert_eq!(named.goroutine_in_unbounded_loop[0].callee_name, "handle");
     }
 }

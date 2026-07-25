@@ -38,6 +38,7 @@ fn build_index(root: &std::path::Path) -> RepoIndex {
         array_spread_in_reduce: Vec::new(),
         sql_cartesian_join: Vec::new(),
         defer_in_loop: Vec::new(),
+        goroutine_in_unbounded_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,

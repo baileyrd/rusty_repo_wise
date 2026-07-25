@@ -143,6 +143,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -188,6 +189,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop: Vec::new(),
                     });
                 }
             }
@@ -442,6 +444,17 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let membership_test_in_loop = body
+            .map(|b| {
+                metrics::list_membership_tests_in_loops(
+                    b,
+                    is_loop,
+                    |n| collection_binding(n, self.source),
+                    |n| membership_target(n, self.source),
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -481,6 +494,7 @@ impl<'a> Walker<'a> {
             sql_cartesian_join,
             defer_in_loop: Vec::new(),
             goroutine_in_unbounded_loop: Vec::new(),
+            membership_test_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -596,6 +610,85 @@ fn is_loop(n: Node) -> bool {
         n.kind(),
         "for_statement" | "for_in_statement" | "while_statement" | "do_statement"
     )
+}
+
+/// Array-returning methods recognized as producing a list, for
+/// `membership_test_in_loop` (issue #182). Deliberately short: every
+/// entry here returns a new array in every standard JS implementation,
+/// so none of them can silently mislabel a `Set` as a list.
+const ARRAY_PRODUCING_METHODS: &[&str] = &["map", "filter", "split", "concat", "slice", "flat"];
+
+/// A `const name = <collection>` declarator whose initializer shape
+/// settles the collection's kind, for `membership_test_in_loop`
+/// (issue #182). `None` when the shape doesn't answer the question --
+/// see `metrics::list_membership_tests_in_loops` for why unknown
+/// bindings are dropped rather than guessed.
+fn collection_binding(n: Node, source: &str) -> Option<(String, metrics::CollectionKind)> {
+    if n.kind() != "variable_declarator" {
+        return None;
+    }
+    let name_node = n.child_by_field_name("name")?;
+    if name_node.kind() != "identifier" {
+        return None;
+    }
+    let value = n.child_by_field_name("value")?;
+    let kind = match value.kind() {
+        "array" => metrics::CollectionKind::List,
+        "new_expression" => {
+            let ctor = value.child_by_field_name("constructor")?;
+            match text(ctor, source) {
+                "Set" | "Map" | "WeakSet" | "WeakMap" => metrics::CollectionKind::NotList,
+                "Array" => metrics::CollectionKind::List,
+                _ => return None,
+            }
+        }
+        "call_expression" => {
+            let func = value.child_by_field_name("function")?;
+            if func.kind() != "member_expression" {
+                return None;
+            }
+            let property = func.child_by_field_name("property")?;
+            let name = text(property, source);
+            // `Object.keys(..)`/`Object.values(..)` and `Array.from(..)`
+            // all return arrays, as does every method in the table.
+            if ARRAY_PRODUCING_METHODS.contains(&name) || matches!(name, "keys" | "values" | "from")
+            {
+                metrics::CollectionKind::List
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some((text(name_node, source).to_string(), kind))
+}
+
+/// An `xs.includes(x)` / `xs.indexOf(x)` call, for
+/// `membership_test_in_loop` (issue #182). `Set.has(..)` is deliberately
+/// absent -- it's already the O(1) form this marker recommends. Strings
+/// share both method names, but a string binding never resolves to
+/// `CollectionKind::List`, so substring checks are filtered out by the
+/// binding map rather than needing their own exclusion here.
+fn membership_target(n: Node, source: &str) -> Option<metrics::MembershipTarget> {
+    if n.kind() != "call_expression" {
+        return None;
+    }
+    let func = n.child_by_field_name("function")?;
+    if func.kind() != "member_expression" {
+        return None;
+    }
+    let property = func.child_by_field_name("property")?;
+    if !matches!(text(property, source), "includes" | "indexOf") {
+        return None;
+    }
+    let receiver = func.child_by_field_name("object")?;
+    match receiver.kind() {
+        "array" => Some(metrics::MembershipTarget::InlineList),
+        "identifier" => Some(metrics::MembershipTarget::Named(
+            text(receiver, source).to_string(),
+        )),
+        _ => None,
+    }
 }
 
 /// The callee of an awaited async call, for `serial_await_in_loop`
@@ -1347,5 +1440,49 @@ mod tests {
         // deliberately not flagged as a serial await.
         assert!(batched.serial_await_in_loop.is_empty());
         assert!(hoisted.serial_await_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_array_includes_in_a_loop_but_not_set_has() {
+        let rec = extract_js(
+            "function check(needles) {\n\
+             \x20 const allowed = [\"a\", \"b\"];\n\
+             \x20 const blocked = new Set([\"x\"]);\n\
+             \x20 const parts = raw.split(\",\");\n\
+             \x20 for (const n of needles) {\n\
+             \x20   if (allowed.includes(n)) {}\n\
+             \x20   if (blocked.has(n)) {}\n\
+             \x20   if (parts.indexOf(n) !== -1) {}\n\
+             \x20 }\n\
+             }\n",
+        );
+
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        let names: Vec<_> = check
+            .membership_test_in_loop
+            .iter()
+            .map(|m| m.collection.as_str())
+            .collect();
+        // `Set.has` is already the O(1) form this marker recommends, so
+        // it is never a membership target at all.
+        assert_eq!(names, vec!["allowed", "parts"]);
+    }
+
+    #[test]
+    fn a_string_receiver_is_not_a_list_membership_test() {
+        let rec = extract_js(
+            "function check(needles) {\n\
+             \x20 const banner = \"hello world\";\n\
+             \x20 for (const n of needles) {\n\
+             \x20   if (banner.includes(n)) {}\n\
+             \x20 }\n\
+             }\n",
+        );
+
+        // Strings share `includes`/`indexOf` with arrays, but a string
+        // binding never resolves to a list, so substring checks are
+        // filtered out by the binding map rather than a special case.
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        assert!(check.membership_test_in_loop.is_empty());
     }
 }

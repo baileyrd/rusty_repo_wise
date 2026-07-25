@@ -127,6 +127,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

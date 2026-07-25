@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-nine rule-based markers: long functions, high cyclomatic complexity,
+  thirty rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and seventeen of repowise's Performance-signal
+  declared parameter types), and eighteen of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -147,7 +147,12 @@ specifics per layer), not full feature parity:
   inside a loop body whose only bound would be the iteration count, so a
   large input spawns an unbounded goroutine fan-out; suppressed when the
   loop body carries a channel send/receive outside the launch, the
-  acquire half of the standard semaphore/worker-pool idiom; Go only)
+  acquire half of the standard semaphore/worker-pool idiom; Go only),
+  and a membership test against a list in a loop
+  (`membership_test_in_loop` — `x in xs`/`xs.contains(&x)`/
+  `xs.includes(x)` inside a loop body where a local binding shows `xs`
+  is a list rather than a set/map, so each check is an O(n) scan and the
+  loop is O(n × m) where it reads as linear; Rust/Python/TS+JS only)
   — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
@@ -186,7 +191,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
 Every other repowise language is unimplemented. The health scorer now
-implements 29 distinct markers. That exceeds repowise's headline "~25
+implements 30 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
 (issue #72 alone enumerates 19). The remaining gap is not a count but a
@@ -241,7 +246,9 @@ dashboard is one static page with no per-file drill-down or live search
   (`sql_cartesian_join`), and (Go) the first Go loop classifier plus a
   `defer`-statement callee extractor (`defer_in_loop`), and (Go) a
   channel-operation bound classifier scoped per enclosing loop
-  (`goroutine_in_unbounded_loop`).
+  (`goroutine_in_unbounded_loop`), and (Rust/Python/TS+JS) a
+  binding-shape collection-kind classifier paired with a membership-test
+  extractor (`membership_test_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -353,6 +360,7 @@ to `[0, 10]`:
 | SQL cartesian join (`sql_cartesian_join`) | a SQL string with comma-joined tables and too few connecting predicates | −0.6 |
 | Defer in loop (`defer_in_loop`) | a Go `defer` statement inside a loop body | −0.6 |
 | Goroutine in unbounded loop (`goroutine_in_unbounded_loop`) | a Go `go` statement inside a loop body with no channel-based concurrency bound | −0.6 |
+| Membership test in loop (`membership_test_in_loop`) | an `x in xs`-shaped test inside a loop where a local binding shows `xs` is a list, not a set | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -368,7 +376,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-nine; everything else keeps its default
+# only overriding two of the thirty; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -991,6 +999,46 @@ common shape, and dropping it would blind the marker to it. Its default
 penalty (−0.6) sits in the heavier tier for the same reason
 `defer_in_loop` does: one statement fires the marker once but spawns a
 goroutine per iteration.
+
+**Membership test in loop (`membership_test_in_loop`)** flags an
+`x in xs` / `xs.contains(&x)` / `xs.includes(x)` test inside a loop body
+where `xs` is a list. Each test scans the whole list, so running one per
+iteration makes the loop O(n × m) while it reads as linear; building a
+set once outside the loop makes each test O(1).
+
+**Telling a list from a set is the entire difficulty**, and issue #182
+flagged it as needing a design pass because this port tracks no type
+information. Rather than build type inference, this takes the narrow
+slice that's reliably visible in one function's own text: a **local
+binding whose initializer shape names the collection kind outright**. A
+first pass over the function body collects those into a name → kind map
+(`xs = [..]`/`sorted(..)` and `let xs = vec![..]` and `const xs = [..]`
+are lists; `{..}`/`set(..)`/`HashSet::new()`/`new Set(..)` are not), and
+the loop walk then only flags a test whose target resolves to a list.
+
+**Everything else is deliberately left unflagged.** A parameter, a
+struct field, an imported constant, or any initializer whose shape
+doesn't settle the question never enters the map and is silently
+skipped. That makes this a low-recall, high-precision marker on
+purpose — a false positive here tells someone to "fix" a lookup that was
+already O(1), which is worse than staying quiet. A name rebound to a
+different kind (`xs = [..]` then `xs = set(xs)`) is demoted for the same
+reason: one pass can't know which binding is live at the test site.
+
+Rust is where the binding map earns its keep: `Vec::contains` and
+`HashSet::contains` are spelled identically at the call site, so nothing
+local distinguishes the O(n) scan from the O(1) lookup. There the
+*declared type* wins over the initializer when both are present, which
+is what makes `let seen: HashSet<_> = xs.into_iter().collect();`
+resolvable when `.collect()` alone says nothing. In JS/TS, `Set.has` is
+simply never a membership target — it's already the form this marker
+recommends — and strings, which share `includes`/`indexOf` with arrays,
+fall out naturally because a string binding never resolves to a list.
+
+Its default penalty (−0.6) sits in the quadratic-*shape* tier alongside
+`nested_loop_quadratic`. Tests pin the list-vs-set split in all three
+languages, plus `not in`, inline list literals, unknown bindings, and
+rebinding.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

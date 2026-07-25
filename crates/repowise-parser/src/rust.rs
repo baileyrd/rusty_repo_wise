@@ -250,6 +250,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let membership_test_in_loop = body
+                        .map(|b| {
+                            metrics::list_membership_tests_in_loops(
+                                b,
+                                is_loop,
+                                |n| collection_binding(n, self.source),
+                                |n| membership_target(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -295,6 +306,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join,
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -344,6 +356,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop: Vec::new(),
                     });
                 }
             }
@@ -383,6 +396,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -542,6 +556,99 @@ fn is_loop(n: Node) -> bool {
         n.kind(),
         "while_expression" | "while_let_expression" | "loop_expression" | "for_expression"
     )
+}
+
+/// Collection kind for a Rust type/constructor base name, for
+/// `membership_test_in_loop` (issue #182). This distinction matters more
+/// in Rust than anywhere else in the marker: `Vec::contains` and
+/// `HashSet::contains` are spelled identically at the call site, so the
+/// binding is the *only* thing that separates an O(n) scan from an O(1)
+/// lookup.
+fn collection_kind_for_type(name: &str) -> Option<metrics::CollectionKind> {
+    match name {
+        "Vec" | "VecDeque" => Some(metrics::CollectionKind::List),
+        "HashSet" | "BTreeSet" | "HashMap" | "BTreeMap" => Some(metrics::CollectionKind::NotList),
+        _ => None,
+    }
+}
+
+/// A `let name: Ty = init;` binding whose declared type or initializer
+/// shape settles the collection's kind, for `membership_test_in_loop`
+/// (issue #182). The declared type wins when present -- it's the more
+/// direct statement of intent, and it's what makes
+/// `let seen: HashSet<_> = xs.into_iter().collect();` resolvable when
+/// the initializer alone (`.collect()`) says nothing.
+fn collection_binding(n: Node, source: &str) -> Option<(String, metrics::CollectionKind)> {
+    if n.kind() != "let_declaration" {
+        return None;
+    }
+    let pattern = n.child_by_field_name("pattern")?;
+    if pattern.kind() != "identifier" {
+        return None;
+    }
+    let name = text(pattern, source).to_string();
+
+    if let Some(ty) = n.child_by_field_name("type") {
+        let base = match ty.kind() {
+            "generic_type" => ty.child_by_field_name("type")?,
+            "type_identifier" => ty,
+            _ => return None,
+        };
+        return collection_kind_for_type(text(base, source)).map(|kind| (name, kind));
+    }
+
+    let value = n.child_by_field_name("value")?;
+    let kind = match value.kind() {
+        "array_expression" => metrics::CollectionKind::List,
+        // `vec![..]`
+        "macro_invocation" => {
+            let macro_name = value.child_by_field_name("macro")?;
+            if text(macro_name, source) == "vec" {
+                metrics::CollectionKind::List
+            } else {
+                return None;
+            }
+        }
+        // `Vec::new()` / `HashSet::from(..)`: the path's first segment
+        // is the type.
+        "call_expression" => {
+            let func = value.child_by_field_name("function")?;
+            if func.kind() != "scoped_identifier" {
+                return None;
+            }
+            let base = func.child_by_field_name("path")?;
+            collection_kind_for_type(text(base, source))?
+        }
+        _ => return None,
+    };
+    Some((name, kind))
+}
+
+/// An `xs.contains(&x)` call, for `membership_test_in_loop` (issue
+/// #182). Returns what's being tested against; the caller decides
+/// whether that's a list. `slice::contains`/`Vec::contains` are O(n)
+/// while `HashSet::contains` is O(1), and nothing at this call site
+/// tells them apart -- that's what the binding map is for.
+fn membership_target(n: Node, source: &str) -> Option<metrics::MembershipTarget> {
+    if n.kind() != "call_expression" {
+        return None;
+    }
+    let func = n.child_by_field_name("function")?;
+    if func.kind() != "field_expression" {
+        return None;
+    }
+    let field = func.child_by_field_name("field")?;
+    if text(field, source) != "contains" {
+        return None;
+    }
+    let receiver = func.child_by_field_name("value")?;
+    match receiver.kind() {
+        "array_expression" => Some(metrics::MembershipTarget::InlineList),
+        "identifier" => Some(metrics::MembershipTarget::Named(
+            text(receiver, source).to_string(),
+        )),
+        _ => None,
+    }
 }
 
 /// True when `node` is a `let` binding whose initializer acquires a
@@ -1893,5 +2000,60 @@ mod tests {
         assert_eq!(cartesian.sql_cartesian_join.len(), 1);
         assert_eq!(cartesian.sql_cartesian_join[0].tables, "orders, customers");
         assert!(joined.sql_cartesian_join.is_empty());
+    }
+
+    #[test]
+    fn flags_vec_contains_in_a_loop_but_not_hashset_contains() {
+        let rec = extract_str(
+            "use std::collections::HashSet;\n\
+             fn check(needles: Vec<String>) {\n\
+             \x20   let allowed = vec![\"a\", \"b\"];\n\
+             \x20   let blocked: HashSet<&str> = HashSet::new();\n\
+             \x20   let arr = [1, 2, 3];\n\
+             \x20   for n in needles {\n\
+             \x20       if allowed.contains(&n) {}\n\
+             \x20       if blocked.contains(&n) {}\n\
+             \x20       if arr.contains(&1) {}\n\
+             \x20   }\n\
+             }\n",
+        );
+
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        let names: Vec<_> = check
+            .membership_test_in_loop
+            .iter()
+            .map(|m| m.collection.as_str())
+            .collect();
+        // `Vec::contains` and `HashSet::contains` are spelled
+        // identically -- only the binding separates the O(n) scan from
+        // the O(1) lookup, which is the whole point of the binding map.
+        assert_eq!(names, vec!["allowed", "arr"]);
+    }
+
+    #[test]
+    fn a_declared_type_settles_the_kind_when_the_initializer_does_not() {
+        let rec = extract_str(
+            "fn check(needles: Vec<String>, xs: Vec<String>) {\n\
+             \x20   let seen: HashSet<String> = xs.iter().cloned().collect();\n\
+             \x20   let listed: Vec<String> = xs.iter().cloned().collect();\n\
+             \x20   let opaque = build();\n\
+             \x20   for n in needles {\n\
+             \x20       if seen.contains(&n) {}\n\
+             \x20       if listed.contains(&n) {}\n\
+             \x20       if opaque.contains(&n) {}\n\
+             \x20   }\n\
+             }\n",
+        );
+
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        let names: Vec<_> = check
+            .membership_test_in_loop
+            .iter()
+            .map(|m| m.collection.as_str())
+            .collect();
+        // Both initializers are a bare `.collect()`, which says nothing;
+        // the declared type is what tells them apart. `opaque` has
+        // neither, so it stays unflagged.
+        assert_eq!(names, vec!["listed"]);
     }
 }

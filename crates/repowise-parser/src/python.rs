@@ -245,6 +245,17 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let membership_test_in_loop = body
+                        .map(|b| {
+                            metrics::list_membership_tests_in_loops(
+                                b,
+                                is_loop,
+                                |n| collection_binding(n, self.source),
+                                |n| membership_target(n, self.source),
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -282,6 +293,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join,
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -326,6 +338,7 @@ impl<'a> Walker<'a> {
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
+                        membership_test_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -496,6 +509,69 @@ fn condition_of(n: Node) -> Option<Node> {
 /// ones (`if`/`elif`/`except`/ternary/`match` case).
 fn is_loop(n: Node) -> bool {
     matches!(n.kind(), "for_statement" | "while_statement")
+}
+
+/// A local `name = <collection>` binding whose right-hand side settles
+/// the collection's kind, for `membership_test_in_loop` (issue #182).
+/// `None` when the target isn't a plain name or the initializer's shape
+/// doesn't answer the question -- see
+/// `metrics::list_membership_tests_in_loops` for why the unknown case is
+/// dropped rather than guessed.
+fn collection_binding(n: Node, source: &str) -> Option<(String, metrics::CollectionKind)> {
+    if n.kind() != "assignment" {
+        return None;
+    }
+    let left = n.child_by_field_name("left")?;
+    if left.kind() != "identifier" {
+        return None;
+    }
+    let right = n.child_by_field_name("right")?;
+    let kind = match right.kind() {
+        "list" | "list_comprehension" => metrics::CollectionKind::List,
+        "set" | "dictionary" | "set_comprehension" | "dictionary_comprehension" => {
+            metrics::CollectionKind::NotList
+        }
+        // `xs = list(..)` / `xs = set(..)`: the builtin's own name is
+        // the type. `sorted(..)` always returns a list.
+        "call" => {
+            let callee = right.child_by_field_name("function")?;
+            match text(callee, source) {
+                "list" | "sorted" => metrics::CollectionKind::List,
+                "set" | "frozenset" | "dict" => metrics::CollectionKind::NotList,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some((text(left, source).to_string(), kind))
+}
+
+/// An `x in xs` / `x not in xs` test, for `membership_test_in_loop`
+/// (issue #182). Returns what's being tested *against*; the caller
+/// decides whether that's a list. `not in` counts too -- it's the same
+/// O(n) scan, just negated.
+fn membership_target(n: Node, source: &str) -> Option<metrics::MembershipTarget> {
+    if n.kind() != "comparison_operator" {
+        return None;
+    }
+    let mut cursor = n.walk();
+    let is_membership = n
+        .children(&mut cursor)
+        .any(|c| matches!(c.kind(), "in" | "not in"));
+    if !is_membership {
+        return None;
+    }
+    // The tested collection is the right-hand operand; taking the last
+    // named child handles `not in`, whose operator node sits between
+    // the two operands.
+    let right = n.named_child(n.named_child_count().checked_sub(1)?)?;
+    match right.kind() {
+        "list" => Some(metrics::MembershipTarget::InlineList),
+        "identifier" => Some(metrics::MembershipTarget::Named(
+            text(right, source).to_string(),
+        )),
+        _ => None,
+    }
 }
 
 /// The body block of a `with <lock>:` statement, for
@@ -1332,5 +1408,76 @@ mod tests {
         // `with cm:` doesn't look like a lock -- the name-based
         // heuristic deliberately stays quiet rather than guess.
         assert!(other_with.blocking_io_under_lock.is_empty());
+    }
+
+    #[test]
+    fn flags_membership_against_a_list_but_not_a_set_or_dict() {
+        let rec = extract_str(
+            "def check(needles):\n\
+            \x20   allowed = [\"a\", \"b\"]\n\
+            \x20   blocked = {\"x\", \"y\"}\n\
+            \x20   lookup = {\"k\": 1}\n\
+            \x20   made = set(needles)\n\
+            \x20   for n in needles:\n\
+            \x20       if n in allowed:\n\
+            \x20           pass\n\
+            \x20       if n in blocked:\n\
+            \x20           pass\n\
+            \x20       if n in lookup:\n\
+            \x20           pass\n\
+            \x20       if n in made:\n\
+            \x20           pass\n",
+        );
+
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        let names: Vec<_> = check
+            .membership_test_in_loop
+            .iter()
+            .map(|m| m.collection.as_str())
+            .collect();
+        // Only the list binding is O(n); the set, the dict, and the
+        // `set(..)` call are all already O(1) and must stay quiet.
+        assert_eq!(names, vec!["allowed"]);
+    }
+
+    #[test]
+    fn flags_not_in_and_inline_list_literals_but_never_an_unknown_binding() {
+        let rec = extract_str(
+            "def check(needles, provided):\n\
+            \x20   for n in needles:\n\
+            \x20       if n not in [\"p\", \"q\"]:\n\
+            \x20           pass\n\
+            \x20       if n in provided:\n\
+            \x20           pass\n",
+        );
+
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        // `not in` is the same O(n) scan, just negated; the inline list
+        // is a list by construction, no binding lookup needed.
+        // `provided` is a parameter, so its kind is unknowable here and
+        // it is deliberately left unflagged.
+        let names: Vec<_> = check
+            .membership_test_in_loop
+            .iter()
+            .map(|m| m.collection.as_str())
+            .collect();
+        assert_eq!(names, vec!["<list literal>"]);
+    }
+
+    #[test]
+    fn a_name_rebound_to_a_different_collection_kind_is_not_flagged() {
+        let rec = extract_str(
+            "def check(needles):\n\
+            \x20   xs = [1, 2]\n\
+            \x20   xs = set(xs)\n\
+            \x20   for n in needles:\n\
+            \x20       if n in xs:\n\
+            \x20           pass\n",
+        );
+
+        // A single pass can't know which binding is live at the test
+        // site, so the conflict demotes `xs` and nothing is reported.
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        assert!(check.membership_test_in_loop.is_empty());
     }
 }

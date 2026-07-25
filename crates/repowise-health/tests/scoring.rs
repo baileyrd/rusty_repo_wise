@@ -6,8 +6,8 @@
 use repowise_core::{
     CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
     ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
-    RegexCompileInLoopRef, RepoIndex, ResourceConstructionInLoopRef, StringConcatInLoopRef, Symbol,
-    SymbolKind,
+    RegexCompileInLoopRef, RepoIndex, ResourceConstructionInLoopRef, SerialAwaitInLoopRef,
+    StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -50,6 +50,7 @@ fn symbol(
         regex_compile_in_loop: Vec::new(),
         nested_loop_with_io: Vec::new(),
         nested_loop_quadratic: Vec::new(),
+        serial_await_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -768,6 +769,57 @@ fn flags_one_finding_per_nested_loop_quadratic_pointing_at_the_inner_loop() {
     assert!(lines.contains(&Some(3)));
     assert!(lines.contains(&Some(7)));
     assert!(findings_for(&report, "clean", FindingKind::NestedLoopQuadratic).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_serial_await_in_loop_pointing_at_its_own_line() {
+    let mut looped = symbol(
+        "async.rs",
+        "looped",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    looped.serial_await_in_loop = vec![
+        SerialAwaitInLoopRef {
+            line: 4,
+            callee_name: "fetch".to_string(),
+        },
+        SerialAwaitInLoopRef {
+            line: 6,
+            callee_name: "save".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "async.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "async.rs",
+        vec![looped, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "looped", FindingKind::SerialAwaitInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::SerialAwaitInLoop).is_empty());
 }
 
 #[test]

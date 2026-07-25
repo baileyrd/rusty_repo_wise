@@ -7,7 +7,7 @@
 use repowise_core::{
     ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
     NestedLoopQuadraticRef, NestedLoopWithIoRef, RegexCompileInLoopRef,
-    ResourceConstructionInLoopRef, StringConcatInLoopRef,
+    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -508,6 +508,25 @@ pub fn ios_in_nested_loops(
     .into_iter()
     .map(|(line, callee_name)| NestedLoopWithIoRef { line, callee_name })
     .collect()
+}
+
+/// Awaited async calls found inside a loop body, for
+/// `serial_await_in_loop` (issue #181): each iteration blocks on the
+/// previous one instead of the whole batch running concurrently.
+/// `awaited_callee` is expected to already exclude awaits of the
+/// concurrency combinators that *are* the fix (`Promise.all`/
+/// `join_all`/`asyncio.gather`), since awaiting one inside a loop is
+/// the chunked-concurrency shape rather than the serial one.
+pub fn serial_awaits_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    awaited_callee: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<SerialAwaitInLoopRef> {
+    matches_in_loops(body, is_loop, awaited_callee, is_nested_function)
+        .into_iter()
+        .map(|(line, callee_name)| SerialAwaitInLoopRef { line, callee_name })
+        .collect()
 }
 
 /// Inner loops iterating the same collection as an enclosing loop, for

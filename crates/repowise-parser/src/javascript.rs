@@ -135,6 +135,7 @@ impl<'a> Walker<'a> {
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
                         nested_loop_quadratic: Vec::new(),
+                        serial_await_in_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -172,6 +173,7 @@ impl<'a> Walker<'a> {
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
                         nested_loop_quadratic: Vec::new(),
+                        serial_await_in_loop: Vec::new(),
                     });
                 }
             }
@@ -398,6 +400,16 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let serial_await_in_loop = body
+            .map(|b| {
+                metrics::serial_awaits_in_loops(
+                    b,
+                    is_loop,
+                    |n| awaited_callee(n, self.source),
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -426,6 +438,7 @@ impl<'a> Walker<'a> {
             regex_compile_in_loop,
             nested_loop_with_io,
             nested_loop_quadratic,
+            serial_await_in_loop,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -540,6 +553,44 @@ fn is_loop(n: Node) -> bool {
     matches!(
         n.kind(),
         "for_statement" | "for_in_statement" | "while_statement" | "do_statement"
+    )
+}
+
+/// The callee of an awaited async call, for `serial_await_in_loop`
+/// (issue #181): `fetch` for `await fetch(u)`. `None` for a non-await
+/// node, for an await whose operand isn't a call (`await somePromise`),
+/// and for awaits of the concurrency combinators that *are* the fix --
+/// `await Promise.all(..)` inside a loop is chunked concurrency, not
+/// the serial pattern this flags.
+fn awaited_callee(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "await_expression" {
+        return None;
+    }
+    let awaited = node.named_child(0)?;
+    if awaited.kind() != "call_expression" {
+        return None;
+    }
+    // Match the combinator on its *qualified* `Promise.all` form: a bare
+    // `all`/`race` would be far too generic, and `call_target_name`'s
+    // last-property extraction alone can't tell them apart.
+    if let Some(qualified) = qualified_call_name(awaited, source) {
+        if is_concurrency_combinator(&qualified) {
+            return None;
+        }
+    }
+    Some(call_target_name(
+        awaited.child_by_field_name("function")?,
+        source,
+    ))
+}
+
+/// `Promise` combinators that batch a whole set of awaits into one
+/// concurrent wait -- the fix `serial_await_in_loop` points at, so
+/// awaiting one is never itself the problem.
+fn is_concurrency_combinator(name: &str) -> bool {
+    matches!(
+        name,
+        "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any"
     )
 }
 
@@ -1123,5 +1174,23 @@ mod tests {
         // not both to the `Object` global -- otherwise two unrelated
         // collections would falsely compare equal.
         assert!(object_keys.nested_loop_quadratic.is_empty());
+    }
+
+    #[test]
+    fn flags_serial_awaits_in_a_loop_but_not_batched_or_hoisted_ones() {
+        let rec = extract_js(
+            "async function serial(urls) {\n  for (const u of urls) {\n    const r = await fetch(u);\n  }\n}\n\nasync function batched(chunks) {\n  for (const chunk of chunks) {\n    const rs = await Promise.all(chunk.map(fetch));\n  }\n}\n\nasync function hoisted(urls) {\n  const all = await Promise.all(urls.map(fetch));\n  for (const r of all) {\n    use(r);\n  }\n}\n",
+        );
+        let serial = rec.symbols.iter().find(|s| s.name == "serial").unwrap();
+        let batched = rec.symbols.iter().find(|s| s.name == "batched").unwrap();
+        let hoisted = rec.symbols.iter().find(|s| s.name == "hoisted").unwrap();
+
+        assert_eq!(serial.serial_await_in_loop.len(), 1);
+        assert_eq!(serial.serial_await_in_loop[0].callee_name, "fetch");
+
+        // `await Promise.all(..)` inside a loop is chunked concurrency,
+        // deliberately not flagged as a serial await.
+        assert!(batched.serial_await_in_loop.is_empty());
+        assert!(hoisted.serial_await_in_loop.is_empty());
     }
 }

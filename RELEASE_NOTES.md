@@ -6,6 +6,69 @@ repo routing work through PRs).
 
 ---
 
+## PR #212 — Add nested_loop_quadratic health marker
+**2026-07-25** · [#212](https://github.com/baileyrd/rusty_repo_wise/pull/212) · closes [#187](https://github.com/baileyrd/rusty_repo_wise/issues/187)
+
+- **Added:** `nested_loop_quadratic`, the ninth slice of issue #72's
+  Performance-signal cluster. Flags an inner loop iterating the *same
+  collection* as an enclosing loop — the classic accidental all-pairs
+  O(n²) scan (`for x in items { for y in items { .. } }`), usually
+  replaceable with a set/map lookup.
+- **`Symbol` gains `nested_loop_quadratic: Vec<NestedLoopQuadraticRef>`**
+  (each entry: `line` of the inner loop, `iterable` shared collection
+  name), populated at parse time.
+- **New `repowise-parser::metrics::quadratic_loop_nestings`** — walks
+  carrying a *stack* of the enclosing loops' normalized iterable names,
+  reporting any loop whose own name is already on that stack. Takes no
+  separate `is_loop` predicate (unlike its sibling walks): `loop_iterable`
+  already node-kind-checks for its language's `for`-loop form, and only a
+  `for` loop has an iterable to compare, so a second classifier would be
+  redundant and could silently disagree.
+- **Per-language `loop_iterable` normalizers** reduce an iterable
+  expression to a base collection name, peeling only wrappers yielding
+  the *same* underlying collection:
+  - Rust: `items`, `&items`, `items.iter()`/`.iter_mut()`/`.into_iter()`.
+  - Python: `items`, `enumerate(items)`/`sorted(items)`/`reversed(items)`,
+    `d.values()`/`.keys()`/`.items()`.
+  - TypeScript/JavaScript: `items`, `items.values()`/`.keys()`/
+    `.entries()`/`.slice()`, and `Object.keys(items)`.
+  A genuinely narrower sequence (`items.filter(..)`, a comprehension)
+  doesn't normalize and so never compares equal to anything.
+- **Correctness detail:** JS's `Object.keys(x)` resolves to `x`, not the
+  `Object` global. Peeling to the receiver like the other `.keys()` forms
+  would collapse every such loop to the name `Object`, making two
+  unrelated collections falsely match. Handled explicitly and covered by
+  a test.
+- **Relationship to `nested_loop_with_io` (#183):** complementary, not
+  overlapping. That marker compares nesting *depth* and inspects the
+  body; this one compares the loops' *iterable expressions* and ignores
+  the body. A cross-product over two different collections isn't flagged
+  here; an all-pairs scan doing no I/O isn't flagged there.
+- **Deliberate exclusion:** ranges (`for i in 0..n`, `range(n)`, C-style
+  `for (let i = 0; ...)`) don't normalize, so a doubly-nested index walk
+  isn't flagged — that shape is usually a deliberate, irreducible
+  grid/matrix traversal rather than the accidental one-collection scan
+  this marker targets, matching the issue's own "same collection
+  variable" wording.
+- **New `FindingKind::NestedLoopQuadratic`** (penalty −0.6, matching
+  `nested_loop_with_io` — both flag a quadratic-complexity *shape*
+  rather than a single expensive call, a tier above the flat −0.3
+  per-occurrence loop-body markers).
+- **Scope:** **Rust, Python, and TypeScript/JavaScript**, matching
+  `io_in_loop`'s scope. The other 13 parsed languages get an empty
+  `nested_loop_quadratic` list.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206/#208/#210).
+- 10 of #72's 19 sub-issues remain open — this closes only #187, not
+  #72 itself.
+
+---
+
 ## PR #210 — Add nested_loop_with_io health marker
 **2026-07-24** · [#210](https://github.com/baileyrd/rusty_repo_wise/pull/210) · closes [#183](https://github.com/baileyrd/rusty_repo_wise/issues/183)
 

@@ -6,6 +6,56 @@ repo routing work through PRs).
 
 ---
 
+## PR #216 — Add pd_concat_in_loop health marker
+**2026-07-25** · [#216](https://github.com/baileyrd/rusty_repo_wise/pull/216) · closes [#192](https://github.com/baileyrd/rusty_repo_wise/issues/192)
+
+- **Added:** `pd_concat_in_loop`, the eleventh slice of issue #72's
+  Performance-signal cluster. Flags `pd.concat(..)`/`pandas.concat(..)`
+  inside a loop body — the accumulate-one-row-at-a-time shape pandas'
+  own docs call out as an anti-pattern. Each call reallocates and copies
+  the whole growing DataFrame, making the loop quadratic in the number
+  of rows; the fix is to collect rows in a list and concatenate once
+  after the loop.
+- **`Symbol` gains `pd_concat_in_loop: Vec<PdConcatInLoopRef>`** (each
+  entry: `line`, `callee_name`), populated at parse time.
+- **New `repowise-parser::metrics::pd_concats_in_loops`**, a thin
+  wrapper over the existing `matches_in_loops` shared walk. Python's
+  `is_loop` classifier and `qualified_call_name` helper are both reused
+  unchanged — only the small name table is new.
+- **Scope:** **Python only**, per the issue's own scoping — pandas has
+  no equivalent in this port's other supported languages. The other 15
+  parsed languages always produce an empty list for this marker; the
+  real `Symbol` pushes in `rust.rs`/`javascript.rs` carry an explanatory
+  comment, matching the `list_insert_zero_in_loop` precedent.
+- **Deliberate deviation from the issue's wording:** the acceptance
+  criteria named a table of `pd.concat`/`pandas.concat`/DataFrame
+  `.append`. This ships the first two and **deliberately excludes bare
+  `.append`**. Without type information this port cannot distinguish
+  `DataFrame.append` from `list.append` — and appending to a *list*
+  inside a loop is precisely the fix this marker recommends, so flagging
+  bare `.append` would fire on the correct pattern far more often than
+  the wrong one, pushing users away from the fix. (`DataFrame.append`
+  was also deprecated in pandas 1.4 and removed in 2.0, so its
+  real-world incidence is shrinking regardless.) Documented in code and
+  README, and pinned by a test: the fixture's recommended-fix function
+  does `parts.append(r)` inside a loop and asserts it is *not* flagged.
+- **New `FindingKind::PdConcatInLoop`** (penalty −0.6 — the
+  quadratic-*shape* tier alongside `nested_loop_with_io`/
+  `nested_loop_quadratic`, deliberately not the flat −0.3
+  per-occurrence tier, since one such call is an order-of-magnitude
+  blowup rather than one extra unit of work).
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206/#208/#210/#212/#214).
+- 8 of #72's 19 sub-issues remain open — this closes only #192, not
+  #72 itself.
+
+---
+
 ## PR #214 — Add serial_await_in_loop health marker
 **2026-07-25** · [#214](https://github.com/baileyrd/rusty_repo_wise/pull/214) · closes [#181](https://github.com/baileyrd/rusty_repo_wise/issues/181)
 

@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-four rule-based markers: long functions, high cyclomatic complexity,
+  twenty-five rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and twelve of repowise's Performance-signal
+  declared parameter types), and thirteen of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -127,7 +127,11 @@ specifics per layer), not full feature parity:
   `async fn`/`async def`, which stalls the executor thread and every
   other task sharing it; Rust and Python only, and the one marker in
   this cluster keyed on the enclosing *function* being async rather than
-  on an enclosing loop) — except for shell scripts,
+  on an enclosing loop), and blocking I/O under a lock
+  (`blocking_io_under_lock` — an `io_in_loop`-table call made while a
+  mutex/lock is held, serializing every other thread waiting on that lock
+  behind however long the I/O takes; Rust and Python only) — except for
+  shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -164,7 +168,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 24 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 25 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -207,7 +211,9 @@ dashboard is one static page with no per-file drill-down or live search
   (`serial_await_in_loop`), and (Python only) a qualified
   pandas-concat-callee table (`pd_concat_in_loop`), plus (Rust/Python) an
   `is_async_fn` classifier feeding a whole-body blocking-call scan
-  (`blocking_sync_in_async`).
+  (`blocking_sync_in_async`), and (Rust/Python) two lock-scope
+  extractors reusing the I/O-callee-name table
+  (`blocking_io_under_lock`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -314,6 +320,7 @@ to `[0, 10]`:
 | Serial await in loop (`serial_await_in_loop`) | an awaited async call inside a loop body (excluding awaits of concurrency combinators) | −0.3 |
 | pandas concat in loop (`pd_concat_in_loop`) | a `pd.concat(..)` call inside a loop body | −0.6 |
 | Blocking sync in async (`blocking_sync_in_async`) | a known blocking call inside an `async fn`/`async def` body | −0.6 |
+| Blocking I/O under lock (`blocking_io_under_lock`) | a known I/O-shaped call made while a mutex/lock is held | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -329,7 +336,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-four; everything else keeps its default
+# only overriding two of the twenty-five; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -784,6 +791,46 @@ per-occurrence tier for a different reason than the quadratic-shape
 markers: the cost lands on every other task sharing the executor, not
 just on the function containing the call. The other 14 parsed languages
 have no `is_async_fn` classifier yet and so never produce entries here.
+
+**Blocking I/O under lock (`blocking_io_under_lock`)** flags an
+I/O-shaped call — the same table `io_in_loop` uses — made while a
+mutex/lock is held. I/O under a lock serializes every *other* thread
+waiting on that lock behind however long the I/O takes, turning an
+in-memory critical section into a hidden throughput bottleneck.
+**Rust and Python only**, the two languages the marker's issue scoped it
+to.
+
+The two languages need genuinely different lock-scope shapes, so this
+marker ships two extractors rather than one:
+
+- **Rust** is structural. A `let guard = m.lock().unwrap();` binding
+  holds the guard until the end of its enclosing block, so every
+  statement *after* that binding is inside the critical section. A new
+  `repowise-parser::metrics::matches_after_scope_marker` models exactly
+  that: the "in scope" flag propagates down into children but only turns
+  on for *subsequent* siblings, so each node is visited once and a
+  nested block with its own guard can't double-report calls the outer
+  scope already covered. It reuses `is_lock_call`'s table and so
+  inherits its deliberate exclusion of `RwLock::read`/`write`.
+- **Python** is delimited: `with lock:` gives an explicit block, scanned
+  via `matches_in_body`.
+
+**The Python side is a name-based heuristic, deliberately.** Python's
+`with` is generic, and `lock_in_loop` already documents the same
+limitation from the other direction: without type information there is
+no way to distinguish a lock context manager from a file handle or a
+database transaction. Rather than drop Python support entirely (the
+issue asks for it), this matches when the context expression's own name
+looks like a lock — `with lock:`, `with self._write_lock:`,
+`with mutex:`, `with threading.Lock():`. It will miss a lock bound to an
+unconventional name, and could in principle fire on a non-lock that
+happens to be named one; a test pins that a plain `with cm:` stays
+quiet. Rust's side needs no such guess.
+
+Its default penalty (−0.6) matches `blocking_sync_in_async`'s and for
+the same reason: the cost lands on threads *other* than the one running
+the call. The other 14 parsed languages have no lock-scope extractor yet
+and so never produce entries here.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

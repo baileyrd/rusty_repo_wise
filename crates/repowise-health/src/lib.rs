@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and twelve of
+//! `repowise_core::Symbol::primitive_param_count`), and thirteen of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -47,7 +47,10 @@
 //! calls inside an async function body (`blocking_sync_in_async`,
 //! Rust/Python-only, and the one marker in this cluster whose context is
 //! the enclosing *function* rather than an enclosing loop -- see
-//! `repowise_core::Symbol::blocking_sync_in_async`).
+//! `repowise_core::Symbol::blocking_sync_in_async`), and I/O-shaped
+//! calls made while a lock is held (`blocking_io_under_lock`,
+//! Rust/Python-only -- see
+//! `repowise_core::Symbol::blocking_io_under_lock`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -221,6 +224,13 @@ fn default_pd_concat_in_loop() -> f64 {
 fn default_blocking_sync_in_async() -> f64 {
     0.6
 }
+// Same elevated weight as `BlockingSyncInAsync` (issue #185), for the
+// same reason: I/O under a lock serializes every *other* thread waiting
+// on it behind however long the I/O takes, so the cost lands outside the
+// function containing the call.
+fn default_blocking_io_under_lock() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -287,6 +297,8 @@ pub struct HealthWeights {
     pub pd_concat_in_loop: f64,
     #[serde(default = "default_blocking_sync_in_async")]
     pub blocking_sync_in_async: f64,
+    #[serde(default = "default_blocking_io_under_lock")]
+    pub blocking_io_under_lock: f64,
 }
 
 impl Default for HealthWeights {
@@ -316,6 +328,7 @@ impl Default for HealthWeights {
             serial_await_in_loop: default_serial_await_in_loop(),
             pd_concat_in_loop: default_pd_concat_in_loop(),
             blocking_sync_in_async: default_blocking_sync_in_async(),
+            blocking_io_under_lock: default_blocking_io_under_lock(),
         }
     }
 }
@@ -355,6 +368,7 @@ impl HealthWeights {
             FindingKind::SerialAwaitInLoop => self.serial_await_in_loop,
             FindingKind::PdConcatInLoop => self.pd_concat_in_loop,
             FindingKind::BlockingSyncInAsync => self.blocking_sync_in_async,
+            FindingKind::BlockingIoUnderLock => self.blocking_io_under_lock,
         }
     }
 }
@@ -385,6 +399,7 @@ pub enum FindingKind {
     SerialAwaitInLoop,
     PdConcatInLoop,
     BlockingSyncInAsync,
+    BlockingIoUnderLock,
 }
 
 impl FindingKind {
@@ -414,6 +429,7 @@ impl FindingKind {
             FindingKind::SerialAwaitInLoop => "serial-await-in-loop",
             FindingKind::PdConcatInLoop => "pd-concat-in-loop",
             FindingKind::BlockingSyncInAsync => "blocking-sync-in-async",
+            FindingKind::BlockingIoUnderLock => "blocking-io-under-lock",
         }
     }
 }
@@ -801,6 +817,24 @@ fn check_function_markers(
                  thread and every other task sharing it; use the async equivalent or move \
                  it to a blocking-friendly pool",
                 blocking.callee_name
+            ),
+        });
+    }
+    // Already filtered to I/O calls made while a lock is held at
+    // extraction time (see `repowise_parser::metrics`'s
+    // `ios_under_lock_binding`/`ios_inside_lock_block`); every entry
+    // here is already flagged.
+    for io_call in &sym.blocking_io_under_lock {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(io_call.line),
+            kind: FindingKind::BlockingIoUnderLock,
+            detail: format!(
+                "`{}` (I/O-shaped call) runs while a lock is held -- every other thread \
+                 waiting on that lock blocks for the duration of the I/O; do the I/O \
+                 outside the critical section",
+                io_call.callee_name
             ),
         });
     }

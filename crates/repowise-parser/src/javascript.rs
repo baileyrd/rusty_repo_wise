@@ -138,6 +138,7 @@ impl<'a> Walker<'a> {
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
+                        blocking_io_under_lock: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -178,6 +179,7 @@ impl<'a> Walker<'a> {
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
+                        blocking_io_under_lock: Vec::new(),
                     });
                 }
             }
@@ -448,6 +450,7 @@ impl<'a> Walker<'a> {
             // other supported languages.
             pd_concat_in_loop: Vec::new(),
             blocking_sync_in_async: Vec::new(),
+            blocking_io_under_lock: Vec::new(),
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);

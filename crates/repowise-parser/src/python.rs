@@ -233,6 +233,9 @@ impl<'a> Walker<'a> {
                     } else {
                         Vec::new()
                     };
+                    let blocking_io_under_lock = body
+                        .map(|b| collect_io_under_lock(b, self.source))
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -262,6 +265,7 @@ impl<'a> Walker<'a> {
                         serial_await_in_loop,
                         pd_concat_in_loop,
                         blocking_sync_in_async,
+                        blocking_io_under_lock,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -301,6 +305,7 @@ impl<'a> Walker<'a> {
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
+                        blocking_io_under_lock: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -471,6 +476,84 @@ fn condition_of(n: Node) -> Option<Node> {
 /// ones (`if`/`elif`/`except`/ternary/`match` case).
 fn is_loop(n: Node) -> bool {
     matches!(n.kind(), "for_statement" | "while_statement")
+}
+
+/// The body block of a `with <lock>:` statement, for
+/// `blocking_io_under_lock` (issue #185), or `None` for any other
+/// `with`.
+///
+/// **This is a name-based heuristic and deliberately so.** Python's
+/// `with` is generic, and `lock_in_loop` documents the same limitation
+/// from the other side: without type information there is no way to
+/// tell a lock context manager from a file handle or a database
+/// transaction. Rather than skip Python entirely (the issue asks for
+/// it), this matches when the context expression's own name looks like a
+/// lock -- `with lock:`, `with self._write_lock:`, `with mutex:`,
+/// `with threading.Lock():`. It will miss a lock bound to an
+/// unconventional name, and could in principle fire on a non-lock that
+/// happens to be named one. Rust's side needs no such guess: a guard
+/// binding is structurally identifiable.
+fn lock_with_body<'a>(node: Node<'a>, source: &str) -> Option<Node<'a>> {
+    if node.kind() != "with_statement" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let clause = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "with_clause")?;
+    let mut clause_cursor = clause.walk();
+    let looks_like_lock = clause
+        .named_children(&mut clause_cursor)
+        .filter_map(|item| item.named_child(0))
+        .any(|value| context_name(value, source).is_some_and(|n| is_lock_name(&n)));
+    if !looks_like_lock {
+        return None;
+    }
+    node.child_by_field_name("body")
+}
+
+/// The trailing name of a `with` context expression: `lock` for `lock`,
+/// `_write_lock` for `self._write_lock`, `Lock` for `threading.Lock()`.
+fn context_name(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(text(node, source).to_string()),
+        "attribute" => Some(text(node.child_by_field_name("attribute")?, source).to_string()),
+        "call" => context_name(node.child_by_field_name("function")?, source),
+        _ => None,
+    }
+}
+
+/// Whether a `with` context's name looks like a lock. Coarse by design
+/// -- see `lock_with_body`.
+fn is_lock_name(name: &str) -> bool {
+    let lowered = name.to_lowercase();
+    lowered.contains("lock") || lowered.contains("mutex")
+}
+
+/// Walk a function body collecting I/O calls inside every `with <lock>:`
+/// block, for `blocking_io_under_lock` (issue #185). A nested lock block
+/// inside another is not descended into twice: the outer scan already
+/// covers its calls, so recursion stops at the first lock block found on
+/// a path.
+fn collect_io_under_lock(node: Node, source: &str) -> Vec<repowise_core::BlockingIoUnderLockRef> {
+    let mut out = Vec::new();
+    if let Some(lock_body) = lock_with_body(node, source) {
+        out.extend(metrics::ios_inside_lock_block(
+            lock_body,
+            |n| call_expression_callee(n, source),
+            is_io_call,
+            |n| n.kind() == "function_definition",
+        ));
+        return out;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "function_definition" {
+            continue;
+        }
+        out.extend(collect_io_under_lock(child, source));
+    }
+    out
 }
 
 /// True when this `function_definition` is declared `async def`, for
@@ -1198,5 +1281,23 @@ mod tests {
         // its own, unlike a bare `sleep`/`get`.
         assert_eq!(opens_a_file.blocking_sync_in_async.len(), 1);
         assert_eq!(opens_a_file.blocking_sync_in_async[0].callee_name, "open");
+    }
+
+    #[test]
+    fn flags_io_inside_a_with_lock_block_but_not_outside_one() {
+        let rec = extract_str(
+            "def under_lock(lock, fh):\n    with lock:\n        fh.write('x')\n\ndef io_outside(lock, fh):\n    fh.write('x')\n    with lock:\n        pass\n\ndef other_with(cm, fh):\n    with cm:\n        fh.write('x')\n",
+        );
+        let under_lock = rec.symbols.iter().find(|s| s.name == "under_lock").unwrap();
+        let io_outside = rec.symbols.iter().find(|s| s.name == "io_outside").unwrap();
+        let other_with = rec.symbols.iter().find(|s| s.name == "other_with").unwrap();
+
+        assert_eq!(under_lock.blocking_io_under_lock.len(), 1);
+        assert_eq!(under_lock.blocking_io_under_lock[0].callee_name, "write");
+
+        assert!(io_outside.blocking_io_under_lock.is_empty());
+        // `with cm:` doesn't look like a lock -- the name-based
+        // heuristic deliberately stays quiet rather than guess.
+        assert!(other_with.blocking_io_under_lock.is_empty());
     }
 }

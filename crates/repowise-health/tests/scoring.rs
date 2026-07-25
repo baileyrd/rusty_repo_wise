@@ -4,10 +4,11 @@
 //! resolution, which isn't relevant here and would otherwise touch disk.
 
 use repowise_core::{
-    BlockingSyncInAsyncRef, CallRef, ComplexConditionalRef, FileRecord, IoInLoopRef,
-    JsonParseInLoopRef, Language, ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef,
-    NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef, RepoIndex,
-    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
+    BlockingIoUnderLockRef, BlockingSyncInAsyncRef, CallRef, ComplexConditionalRef, FileRecord,
+    IoInLoopRef, JsonParseInLoopRef, Language, ListInsertZeroInLoopRef, LockInLoopRef,
+    NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
+    RepoIndex, ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef, Symbol,
+    SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -53,6 +54,7 @@ fn symbol(
         serial_await_in_loop: Vec::new(),
         pd_concat_in_loop: Vec::new(),
         blocking_sync_in_async: Vec::new(),
+        blocking_io_under_lock: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -920,6 +922,57 @@ fn flags_one_finding_per_blocking_sync_in_async_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(3)));
     assert!(lines.contains(&Some(5)));
     assert!(findings_for(&report, "clean", FindingKind::BlockingSyncInAsync).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_blocking_io_under_lock_pointing_at_its_own_line() {
+    let mut locked = symbol(
+        "cache.rs",
+        "locked",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    locked.blocking_io_under_lock = vec![
+        BlockingIoUnderLockRef {
+            line: 4,
+            callee_name: "read_to_string".to_string(),
+        },
+        BlockingIoUnderLockRef {
+            line: 6,
+            callee_name: "write_all".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "cache.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "cache.rs",
+        vec![locked, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "locked", FindingKind::BlockingIoUnderLock);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings_for(&report, "clean", FindingKind::BlockingIoUnderLock).is_empty());
 }
 
 #[test]

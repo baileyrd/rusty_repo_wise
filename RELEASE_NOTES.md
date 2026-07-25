@@ -6,6 +6,67 @@ repo routing work through PRs).
 
 ---
 
+## PR #222 — Add array_spread_in_reduce health marker
+**2026-07-25** · [#222](https://github.com/baileyrd/rusty_repo_wise/pull/222) · closes [#194](https://github.com/baileyrd/rusty_repo_wise/issues/194)
+
+- **Added:** `array_spread_in_reduce`, the fourteenth slice of issue
+  #72's Performance-signal cluster. Flags a `.reduce(..)`/
+  `.reduceRight(..)` callback that builds its result with array spread
+  (`(acc, x) => [...acc, x]`) instead of mutating and returning the
+  accumulator. The spread copies the *entire* accumulator on every step,
+  so a linear fold becomes quadratic — subtle precisely because the
+  spread reads as idiomatic immutable-style JS and gives no visual
+  signal of the copy.
+- **`Symbol` gains `array_spread_in_reduce: Vec<ArraySpreadInReduceRef>`**
+  (each entry: `line` of the `reduce` call, `accumulator` parameter
+  name).
+- **Detection is self-contained in the `reduce` call**, unlike most of
+  this cluster — no enclosing loop or function context involved: find a
+  `call_expression` whose callee property is `reduce`/`reduceRight`,
+  take its first argument as the callback, read that callback's first
+  parameter as the accumulator, then check the returned expression is an
+  array literal containing a `spread_element` of that same accumulator.
+  Both callback body forms are handled (expression-bodied arrow and
+  block body with a `return`), and both parameter forms (`(acc, x) =>`
+  and single-parameter `acc =>`).
+- **New `repowise-parser::metrics::array_spreads_in_reduce`**, built on
+  the `matches_in_body` helper added for #184 — no new walking
+  machinery.
+- **Scope:** **TypeScript/JavaScript only**, per the issue — this
+  targets the JS array method, which has no equivalent in this port's
+  other languages. The other 14 parsed languages always produce an empty
+  list.
+- **Two deliberate limits, both erring toward under-reporting:** only
+  *top-level* returns in a block body are considered (a `return` nested
+  inside an `if` isn't found), and the spread must name the callback's
+  own accumulator parameter (spreading an unrelated array isn't
+  flagged). Tests pin the non-matches too: the mutate-and-return fix
+  (`acc.push(x); return acc`) and a plain scalar fold
+  (`(acc, x) => acc + x`) are both left alone.
+- **New `FindingKind::ArraySpreadInReduce`** (penalty −0.6, the
+  quadratic-*shape* tier alongside `nested_loop_quadratic`/
+  `pd_concat_in_loop`).
+- **Docs correction:** the README claimed the scorer "covers N of
+  repowise's ~25 markers". This marker makes N = 26, which would have
+  read "26 of ~25". Reworded to state the real situation instead: this
+  port implements 26 distinct markers, exceeding repowise's headline
+  figure because that figure counts the Performance-signal work as a
+  *single* item while this port implements its pattern checks
+  individually (issue #72 alone enumerates 19). The remaining gap is a
+  *kind*, not a count — the ML-calibrated organizational-signal markers
+  are still deferred.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206/#208/#210/#212/#214/#216/#218/#220).
+- 5 of #72's 19 sub-issues remain open — this closes only #194, not
+  #72 itself.
+
+---
+
 ## PR #220 — Add blocking_io_under_lock health marker
 **2026-07-25** · [#220](https://github.com/baileyrd/rusty_repo_wise/pull/220) · closes [#185](https://github.com/baileyrd/rusty_repo_wise/issues/185)
 

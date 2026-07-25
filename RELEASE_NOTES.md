@@ -6,6 +6,60 @@ repo routing work through PRs).
 
 ---
 
+## PR #226 — Add defer_in_loop health marker (Go)
+**2026-07-25** · [#226](https://github.com/baileyrd/rusty_repo_wise/pull/226) · closes [#189](https://github.com/baileyrd/rusty_repo_wise/issues/189)
+
+- **Added:** `defer_in_loop`, the sixteenth slice of issue #72's
+  Performance-signal cluster. Flags a Go `defer` statement inside a loop
+  body. Go runs deferred calls when the enclosing *function* returns,
+  not at the end of the iteration that queued them, so `defer f.Close()`
+  in a loop over ten thousand paths holds ten thousand file handles open
+  until the whole function exits.
+- **Go's first per-language marker classifier.** Go had sat outside this
+  entire cluster — no `is_loop` arm, no marker classifiers at all. This
+  adds two small ones:
+  - `is_loop`: Go has exactly one loop keyword, so the C-style
+    three-clause form, the condition-only form, the bare infinite form,
+    and `for ... := range ...` are all a single `for_statement` node
+    kind. One arm covers all four.
+  - `defer_callee`: for a `defer_statement`, the name of the call it
+    defers.
+- **No callee-name table**, unlike most of this cluster. The `defer`
+  keyword *is* the entire signal; the callee name is carried only so the
+  finding can say which resource is being held (`Close`, `Unlock`).
+- **`Symbol` gains `defer_in_loop: Vec<DeferInLoopRef>`** (each entry:
+  `line`, `callee_name`).
+- **Shared walk reuse:** `metrics::defers_in_loops` is a thin wrapper
+  over the existing `matches_in_loops` family, so nesting depth,
+  nested-function skipping, and line attribution behave exactly as they
+  do for every other in-loop marker.
+- **New `FindingKind::DeferInLoop`** (penalty −0.6). The heavier tier,
+  for the same reason as `blocking_io_under_lock`: the cost doesn't land
+  on the flagged line. A single `defer` in a loop fires the marker once
+  but leaks a resource *per iteration*, so the damage scales with the
+  loop's trip count rather than with how often the marker matches —
+  counting it linearly like `lock_in_loop` (−0.3) would understate it
+  badly.
+- **Testing:** an in-loop `defer` is flagged and a function-body `defer`
+  is not (the latter is both the correct use and the recommended fix, so
+  never penalizing it is the point); all three Go loop forms match at any
+  nesting depth; a `defer` inside a `func(){}` literal's loop is
+  attributed to the enclosing named function, matching how Go complexity
+  already folds function literals in; plus a health-side test for
+  one-finding-per-occurrence and a `HealthWeights::default()` assertion.
+- **Verified end to end** on a real Go file with one in-loop
+  `defer f.Close()` and one correct function-body `defer f.Close()`:
+  `repowise health` reports `defer-in-loop 1`.
+- **Scope:** Go only, and unavoidably so — no other language in this port
+  has a defer-to-function-exit construct, so there is nothing to detect
+  elsewhere.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR.
+- 3 of #72's 19 sub-issues remain open — this closes only #189, not #72
+  itself.
+
+---
+
 ## PR #224 — Add sql_cartesian_join health marker
 **2026-07-25** · [#224](https://github.com/baileyrd/rusty_repo_wise/pull/224) · closes [#195](https://github.com/baileyrd/rusty_repo_wise/issues/195)
 

@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and seventeen of
+//! `repowise_core::Symbol::primitive_param_count`), and eighteen of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -62,7 +62,11 @@
 //! `repowise_core::Symbol::defer_in_loop`), and `go` statements
 //! launched inside a loop body with no visible concurrency bound
 //! (`goroutine_in_unbounded_loop`, Go-only -- see
-//! `repowise_core::Symbol::goroutine_in_unbounded_loop`).
+//! `repowise_core::Symbol::goroutine_in_unbounded_loop`), and
+//! membership tests against a list inside a loop body
+//! (`membership_test_in_loop`, Rust/Python/TS+JS-only, and only where a
+//! local binding makes the collection's kind evident -- see
+//! `repowise_core::Symbol::membership_test_in_loop`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -276,6 +280,15 @@ fn default_defer_in_loop() -> f64 {
 fn default_goroutine_in_unbounded_loop() -> f64 {
     0.6
 }
+// The quadratic-*shape* tier (issue #182), same as
+// `nested_loop_quadratic`: an O(n) membership test run once per
+// iteration of an m-element loop is an O(n * m) shape written as if it
+// were linear. The marker is already low-recall by construction (it only
+// fires when a local binding proves the collection is a list), so the
+// occurrences it does report are worth the heavier weight.
+fn default_membership_test_in_loop() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -352,6 +365,8 @@ pub struct HealthWeights {
     pub defer_in_loop: f64,
     #[serde(default = "default_goroutine_in_unbounded_loop")]
     pub goroutine_in_unbounded_loop: f64,
+    #[serde(default = "default_membership_test_in_loop")]
+    pub membership_test_in_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -386,6 +401,7 @@ impl Default for HealthWeights {
             sql_cartesian_join: default_sql_cartesian_join(),
             defer_in_loop: default_defer_in_loop(),
             goroutine_in_unbounded_loop: default_goroutine_in_unbounded_loop(),
+            membership_test_in_loop: default_membership_test_in_loop(),
         }
     }
 }
@@ -430,6 +446,7 @@ impl HealthWeights {
             FindingKind::SqlCartesianJoin => self.sql_cartesian_join,
             FindingKind::DeferInLoop => self.defer_in_loop,
             FindingKind::GoroutineInUnboundedLoop => self.goroutine_in_unbounded_loop,
+            FindingKind::MembershipTestInLoop => self.membership_test_in_loop,
         }
     }
 }
@@ -465,6 +482,7 @@ pub enum FindingKind {
     SqlCartesianJoin,
     DeferInLoop,
     GoroutineInUnboundedLoop,
+    MembershipTestInLoop,
 }
 
 impl FindingKind {
@@ -499,6 +517,7 @@ impl FindingKind {
             FindingKind::SqlCartesianJoin => "sql-cartesian-join",
             FindingKind::DeferInLoop => "defer-in-loop",
             FindingKind::GoroutineInUnboundedLoop => "goroutine-in-unbounded-loop",
+            FindingKind::MembershipTestInLoop => "membership-test-in-loop",
         }
     }
 }
@@ -976,6 +995,24 @@ fn check_function_markers(
                  whatever they call; gate the launch on a buffered semaphore channel or feed a \
                  fixed-size worker pool instead",
                 launch.callee_name
+            ),
+        });
+    }
+    // Already filtered at extraction time to tests whose target a local
+    // binding proves is a list (see
+    // `repowise_parser::metrics::list_membership_tests_in_loops`); every
+    // entry here is already flagged.
+    for test in &sym.membership_test_in_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(test.line),
+            kind: FindingKind::MembershipTestInLoop,
+            detail: format!(
+                "membership test against the list `{}` inside a loop -- each check scans the \
+                 whole list, so the loop is O(n * m) where it looks linear; build a set/hash \
+                 map once outside the loop and test against that instead",
+                test.collection
             ),
         });
     }

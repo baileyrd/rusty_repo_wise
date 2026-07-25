@@ -6,9 +6,9 @@
 use repowise_core::{
     ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, CallRef,
     ComplexConditionalRef, DeferInLoopRef, FileRecord, GoroutineInUnboundedLoopRef, IoInLoopRef,
-    JsonParseInLoopRef, Language, ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef,
-    NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef, RepoIndex,
-    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, SqlCartesianJoinRef,
+    JsonParseInLoopRef, Language, ListInsertZeroInLoopRef, LockInLoopRef, MembershipTestInLoopRef,
+    NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
+    RepoIndex, ResourceConstructionInLoopRef, SerialAwaitInLoopRef, SqlCartesianJoinRef,
     StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
@@ -60,6 +60,7 @@ fn symbol(
         sql_cartesian_join: Vec::new(),
         defer_in_loop: Vec::new(),
         goroutine_in_unbounded_loop: Vec::new(),
+        membership_test_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -1187,6 +1188,58 @@ fn flags_one_finding_per_unbounded_goroutine_naming_the_launched_call() {
     assert!(findings.iter().any(|f| f.detail.contains("func literal")));
     assert!(findings.iter().any(|f| f.detail.contains("handle")));
     assert!(findings_for(&report, "clean", FindingKind::GoroutineInUnboundedLoop).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_membership_test_naming_the_scanned_list() {
+    let mut scan = symbol(
+        "filter.py",
+        "scan",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    scan.membership_test_in_loop = vec![
+        MembershipTestInLoopRef {
+            line: 4,
+            collection: "allowed".to_string(),
+        },
+        MembershipTestInLoopRef {
+            line: 7,
+            collection: "<list literal>".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "filter.py",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "filter.py",
+        vec![scan, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "scan", FindingKind::MembershipTestInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(7)));
+    assert!(findings.iter().any(|f| f.detail.contains("allowed")));
+    assert!(findings_for(&report, "clean", FindingKind::MembershipTestInLoop).is_empty());
 }
 
 #[test]

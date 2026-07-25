@@ -7,10 +7,11 @@
 use repowise_core::{
     ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, ComplexConditionalRef,
     DeferInLoopRef, GoroutineInUnboundedLoopRef, IoInLoopRef, JsonParseInLoopRef,
-    ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
-    PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef, SerialAwaitInLoopRef,
-    SqlCartesianJoinRef, StringConcatInLoopRef,
+    ListInsertZeroInLoopRef, LockInLoopRef, MembershipTestInLoopRef, NestedLoopQuadraticRef,
+    NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef,
+    SerialAwaitInLoopRef, SqlCartesianJoinRef, StringConcatInLoopRef,
 };
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
 
@@ -751,6 +752,115 @@ pub fn array_spreads_in_reduce(
         .into_iter()
         .map(|(line, accumulator)| ArraySpreadInReduceRef { line, accumulator })
         .collect()
+}
+
+/// What a local binding's *shape* says about the collection it holds,
+/// for `list_membership_tests_in_loops`. Only two states are useful:
+/// either the initializer is unambiguously a list/array (so an `in`
+/// test against it is O(n)), or it's unambiguously something else
+/// (a set/map, where the same test is O(1)). A binding whose shape
+/// says neither never enters the map at all, and a test against it is
+/// left unflagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionKind {
+    List,
+    NotList,
+}
+
+/// What a membership test is testing against, for
+/// `list_membership_tests_in_loops`.
+#[derive(Debug, Clone)]
+pub enum MembershipTarget {
+    /// The list is written inline at the test site (`x in [1, 2]`),
+    /// so no binding lookup is needed -- it's a list by construction.
+    InlineList,
+    /// A named variable, to be resolved against the binding map.
+    Named(String),
+}
+
+/// Placeholder collection name reported for `MembershipTarget::InlineList`.
+const INLINE_LIST_NAME: &str = "<list literal>";
+
+/// Membership tests (`x in xs`, `xs.contains(&x)`, `xs.includes(x)`)
+/// against a *list* found inside a loop body, for
+/// `membership_test_in_loop` (issue #182). Each test is O(n), so one
+/// per iteration turns a linear loop quadratic; converting the
+/// collection to a set/hash map makes each test O(1).
+///
+/// The hard part is the one the issue calls out: telling a list from a
+/// set needs type information this port doesn't track. Rather than
+/// build real type inference, this takes the narrow slice that's
+/// reliably visible in one function's own text -- a **local binding
+/// whose initializer shape names the collection kind outright**
+/// (`xs = [..]`, `let xs = vec![..]`, `const xs = new Set(..)`). A
+/// first pass over the body collects those into a name -> kind map;
+/// the loop walk then only flags a test whose target resolves to
+/// `CollectionKind::List`.
+///
+/// Everything else is deliberately left unflagged: a parameter, a field,
+/// an imported constant, or any initializer whose shape doesn't settle
+/// the question never enters the map, so it's silently skipped. That
+/// makes this a low-recall, high-precision marker on purpose -- a
+/// false positive here tells someone to "fix" a set lookup that was
+/// already O(1).
+///
+/// A name bound more than once with *different* kinds is demoted to
+/// `NotList`: reassignment means the shape at the test site isn't
+/// knowable from a single pass, and not flagging is the safe answer.
+pub fn list_membership_tests_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    collection_binding: impl Fn(Node) -> Option<(String, CollectionKind)>,
+    membership_target: impl Fn(Node) -> Option<MembershipTarget>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<MembershipTestInLoopRef> {
+    fn collect_bindings(
+        node: Node,
+        collection_binding: &dyn Fn(Node) -> Option<(String, CollectionKind)>,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut HashMap<String, CollectionKind>,
+    ) {
+        if let Some((name, kind)) = collection_binding(node) {
+            out.entry(name)
+                .and_modify(|existing| {
+                    if *existing != kind {
+                        *existing = CollectionKind::NotList;
+                    }
+                })
+                .or_insert(kind);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            collect_bindings(child, collection_binding, is_nested_function, out);
+        }
+    }
+
+    let mut bindings = HashMap::new();
+    collect_bindings(
+        body,
+        &collection_binding,
+        &is_nested_function,
+        &mut bindings,
+    );
+
+    matches_in_loops(
+        body,
+        is_loop,
+        |n| match membership_target(n)? {
+            MembershipTarget::InlineList => Some(INLINE_LIST_NAME.to_string()),
+            MembershipTarget::Named(name) => match bindings.get(&name) {
+                Some(CollectionKind::List) => Some(name),
+                _ => None,
+            },
+        },
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, collection)| MembershipTestInLoopRef { line, collection })
+    .collect()
 }
 
 /// Go `defer` statements found inside a loop body, for `defer_in_loop`

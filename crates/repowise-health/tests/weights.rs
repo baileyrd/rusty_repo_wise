@@ -40,6 +40,7 @@ fn symbol(name: &str, complexity: usize) -> Symbol {
         sql_cartesian_join: Vec::new(),
         defer_in_loop: Vec::new(),
         goroutine_in_unbounded_loop: Vec::new(),
+        membership_test_in_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,
@@ -94,6 +95,7 @@ fn default_weights_match_this_crates_original_hardcoded_penalties() {
     assert_eq!(defaults.sql_cartesian_join, 0.6);
     assert_eq!(defaults.defer_in_loop, 0.6);
     assert_eq!(defaults.goroutine_in_unbounded_loop, 0.6);
+    assert_eq!(defaults.membership_test_in_loop, 0.6);
 }
 
 #[test]

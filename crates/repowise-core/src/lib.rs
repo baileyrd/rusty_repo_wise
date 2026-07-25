@@ -358,6 +358,14 @@ pub struct Symbol {
     /// bound, spawning one goroutine per iteration. Go only -- no other
     /// language in this port launches concurrency with a bare keyword.
     pub goroutine_in_unbounded_loop: Vec<GoroutineInUnboundedLoopRef>,
+    /// `x in list`-shaped membership tests inside a loop body, where the
+    /// tested collection is known to be a list/array rather than a
+    /// set/map. Each check is O(n), so running one per iteration makes
+    /// the loop quadratic where a set lookup would keep it linear.
+    /// Rust/Python/TypeScript+JavaScript only, and only where the
+    /// collection's kind is locally evident -- see
+    /// `repowise_parser::metrics::list_membership_tests_in_loops`.
+    pub membership_test_in_loop: Vec<MembershipTestInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -528,6 +536,15 @@ pub struct DeferInLoopRef {
 pub struct GoroutineInUnboundedLoopRef {
     pub line: usize,
     pub callee_name: String,
+}
+
+/// A single membership test against a list inside a loop body. `line`
+/// points at the test; `collection` is the tested variable's name, or
+/// `<list literal>` when the list is written inline at the test site.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MembershipTestInLoopRef {
+    pub line: usize,
+    pub collection: String,
 }
 
 impl Symbol {

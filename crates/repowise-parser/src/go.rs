@@ -157,6 +157,7 @@ impl<'a> Walker<'a> {
                             metrics::defers_in_loops(
                                 b,
                                 is_loop,
+                                is_func_literal,
                                 |n| defer_callee(n, self.source),
                                 is_nested_function,
                             )
@@ -354,6 +355,14 @@ fn is_decision(n: Node, source: &str) -> bool {
 /// and `for ... := range ...`, all under a single `for_statement` node.
 fn is_loop(n: Node) -> bool {
     n.kind() == "for_statement"
+}
+
+/// A `func() {...}` literal. Unlike `is_nested_function` (which decides
+/// what gets its own `Symbol`), this marks a *`defer` scope* boundary: a
+/// deferred call runs when the innermost enclosing function returns, and
+/// a literal is such a function even though it has no symbol of its own.
+fn is_func_literal(n: Node) -> bool {
+    n.kind() == "func_literal"
 }
 
 /// For a `defer_statement`, the name of the call it defers (`Close` for
@@ -580,10 +589,50 @@ mod tests {
     }
 
     #[test]
-    fn a_defer_in_a_nested_function_literals_loop_belongs_to_the_outer_symbol() {
-        // Go's `is_nested_function` only skips nested *declarations*; a
-        // `func() {...}` literal has no symbol of its own, so its loops
-        // fold into the enclosing function, same as its complexity does.
+    fn a_func_literal_ends_the_defer_scope_so_the_recommended_fix_is_not_flagged() {
+        // Wrapping a loop body in a `func() {...}` literal is exactly
+        // the fix this marker recommends: the `defer` then runs when the
+        // *literal* returns, i.e. at the end of that iteration. Flagging
+        // it would penalize the remedy.
+        let rec = extract_str(
+            "package app\n\
+             \n\
+             func fixed(paths []string) {\n\
+             \tfor _, p := range paths {\n\
+             \t\tfunc() {\n\
+             \t\t\tf := open(p)\n\
+             \t\t\tdefer f.Close()\n\
+             \t\t\thandle(f)\n\
+             \t\t}()\n\
+             \t}\n\
+             }\n\
+             \n\
+             func spawner(paths []string) {\n\
+             \tfor _, p := range paths {\n\
+             \t\tgo func(q string) {\n\
+             \t\t\tdefer wg.Done()\n\
+             \t\t\thandle(q)\n\
+             \t\t}(p)\n\
+             \t}\n\
+             }\n",
+        );
+
+        let fixed = rec.symbols.iter().find(|s| s.name == "fixed").unwrap();
+        assert!(fixed.defer_in_loop.is_empty());
+
+        // Same rule covers the extremely common `defer wg.Done()` inside
+        // a goroutine's literal -- correct code that the loop outside it
+        // has no bearing on.
+        let spawner = rec.symbols.iter().find(|s| s.name == "spawner").unwrap();
+        assert!(spawner.defer_in_loop.is_empty());
+    }
+
+    #[test]
+    fn a_loop_inside_a_func_literal_still_has_its_defers_flagged() {
+        // The scope reset only drops the *enclosing* loop state; the
+        // walk still recurses into the literal, so a loop nested inside
+        // one keeps reporting. The literal has no symbol of its own, so
+        // the finding lands on the enclosing named function.
         let rec = extract_str(
             "package app\n\
              \n\

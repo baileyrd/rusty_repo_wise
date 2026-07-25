@@ -758,15 +758,74 @@ pub fn array_spreads_in_reduce(
 /// defer-statement node and `None` for everything else, so the language
 /// arm owns both "is this a defer" and "what does it defer" -- there's
 /// no name table to filter against here, since the `defer` keyword is
-/// the entire signal. See `matches_in_loops`.
+/// the entire signal.
+///
+/// This can't quite reuse `matches_in_loops`, because a `defer` is
+/// scoped to the innermost enclosing *function*, not to the innermost
+/// enclosing loop. `is_defer_scope` marks the nodes that open a new one
+/// -- for Go, a `func` literal -- and entering one resets the
+/// "inside a loop" state to false. That matters because wrapping a loop
+/// body in a function literal is precisely the fix this marker
+/// recommends:
+///
+/// ```go
+/// for _, p := range paths {
+///     func() {
+///         f, _ := os.Open(p)
+///         defer f.Close()   // runs at the end of THIS iteration
+///     }()
+/// }
+/// ```
+///
+/// Without the reset, that correct code would be flagged and the marker
+/// would penalize its own remedy. The walk still recurses *into* the
+/// literal, so a loop nested inside one keeps its defers flagged; only
+/// the enclosing-loop state is dropped at the boundary.
 pub fn defers_in_loops(
     body: Node,
     is_loop: impl Fn(Node) -> bool,
+    is_defer_scope: impl Fn(Node) -> bool,
     defer_callee: impl Fn(Node) -> Option<String>,
     is_nested_function: impl Fn(Node) -> bool,
 ) -> Vec<DeferInLoopRef> {
-    matches_in_loops(body, is_loop, defer_callee, is_nested_function)
-        .into_iter()
+    // Bundled rather than threaded as four separate parameters, same as
+    // `unbounded_goroutines_in_loops`'s scan.
+    struct Scan<'f> {
+        is_loop: &'f dyn Fn(Node) -> bool,
+        is_defer_scope: &'f dyn Fn(Node) -> bool,
+        defer_callee: &'f dyn Fn(Node) -> Option<String>,
+        is_nested_function: &'f dyn Fn(Node) -> bool,
+    }
+
+    fn walk(node: Node, in_loop: bool, scan: &Scan, out: &mut Vec<(usize, String)>) {
+        if in_loop {
+            if let Some(name) = (scan.defer_callee)(node) {
+                out.push((node.start_position().row + 1, name));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if (scan.is_nested_function)(child) {
+                continue;
+            }
+            let child_in_loop = if (scan.is_defer_scope)(child) {
+                false
+            } else {
+                in_loop || (scan.is_loop)(child)
+            };
+            walk(child, child_in_loop, scan, out);
+        }
+    }
+
+    let scan = Scan {
+        is_loop: &is_loop,
+        is_defer_scope: &is_defer_scope,
+        defer_callee: &defer_callee,
+        is_nested_function: &is_nested_function,
+    };
+    let mut out = Vec::new();
+    walk(body, false, &scan, &mut out);
+    out.into_iter()
         .map(|(line, callee_name)| DeferInLoopRef { line, callee_name })
         .collect()
 }

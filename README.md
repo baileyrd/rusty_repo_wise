@@ -942,6 +942,17 @@ There is no callee-name table here, unlike most of the cluster: the
 `defer` keyword *is* the whole signal, so the finding names the deferred
 call (`Close`, `Unlock`) purely to make itself actionable.
 
+**A `func` literal ends the defer scope**, and getting that right is what
+keeps the marker from penalizing its own remedy. A `defer` runs when the
+innermost enclosing *function* returns, and a function literal is such a
+function even though it gets no `Symbol` of its own — so wrapping a loop
+body in `func() {...}()`, the fix this marker recommends, means the
+`defer` now runs at the end of that iteration and is correctly not
+flagged. The same rule covers the extremely common `defer wg.Done()`
+inside a goroutine's literal. The walk still recurses *into* literals, so
+a loop nested inside one keeps its defers flagged; only the
+enclosing-loop state is dropped at the boundary. Tests pin both halves.
+
 Its default penalty (−0.6) sits in the heavier tier for the same reason
 `blocking_io_under_lock` does — the cost doesn't land on the flagged
 line. A single `defer` in a loop fires the marker once but leaks one

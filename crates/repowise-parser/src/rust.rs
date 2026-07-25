@@ -199,6 +199,15 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let nested_loop_quadratic = body
+                        .map(|b| {
+                            metrics::quadratic_loop_nestings(
+                                b,
+                                |n| loop_iterable(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -229,6 +238,7 @@ impl<'a> Walker<'a> {
                         json_parse_in_loop,
                         regex_compile_in_loop,
                         nested_loop_with_io,
+                        nested_loop_quadratic,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -269,6 +279,7 @@ impl<'a> Walker<'a> {
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
+                        nested_loop_quadratic: Vec::new(),
                     });
                 }
             }
@@ -299,6 +310,7 @@ impl<'a> Walker<'a> {
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
+                        nested_loop_quadratic: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -458,6 +470,55 @@ fn is_loop(n: Node) -> bool {
         n.kind(),
         "while_expression" | "while_let_expression" | "loop_expression" | "for_expression"
     )
+}
+
+/// The base collection a `for` loop iterates over, for
+/// `nested_loop_quadratic` (issue #187): `items` for all of
+/// `for x in items`, `for x in &items`, and `for x in items.iter()`.
+/// `None` for `while`/`loop` (no iterable to compare) and for any
+/// iterable that doesn't normalize down to a plain identifier.
+///
+/// Ranges (`for i in 0..n`) are deliberately excluded even though a
+/// doubly-nested one is also quadratic: that shape is usually a
+/// deliberate, irreducible grid/matrix traversal, whereas iterating the
+/// same *collection* twice is the accidental all-pairs scan this marker
+/// is after -- the one that's usually replaceable with a set/map lookup.
+fn loop_iterable(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "for_expression" {
+        return None;
+    }
+    base_collection_name(node.child_by_field_name("value")?, source)
+}
+
+/// Peel `&`/`&mut` and a trailing iterator-adapter call off an iterable
+/// expression, returning the underlying identifier if one is left. Only
+/// adapters that yield the *same* underlying collection are peeled, so
+/// `items` and `items.iter()` compare equal while `items.filter(..)`
+/// (a different, narrower sequence) doesn't normalize at all.
+fn base_collection_name(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(text(node, source).to_string()),
+        "reference_expression" => base_collection_name(
+            node.child_by_field_name("value")
+                .or_else(|| node.named_child(0))?,
+            source,
+        ),
+        "call_expression" => {
+            let func = node.child_by_field_name("function")?;
+            if func.kind() != "field_expression" {
+                return None;
+            }
+            let field = func.child_by_field_name("field")?;
+            if !matches!(
+                text(field, source),
+                "iter" | "iter_mut" | "into_iter" | "clone" | "as_slice" | "values" | "keys"
+            ) {
+                return None;
+            }
+            base_collection_name(func.child_by_field_name("value")?, source)
+        }
+        _ => None,
+    }
 }
 
 /// If `node` is a `call_expression`, the callee name to match against
@@ -1408,5 +1469,63 @@ mod tests {
         // A single loop triggers io_in_loop only, not nested_loop_with_io.
         assert_eq!(single_loop.io_in_loop.len(), 1);
         assert!(single_loop.nested_loop_with_io.is_empty());
+    }
+
+    #[test]
+    fn flags_nested_loops_over_the_same_collection_but_not_unrelated_ones() {
+        let rec = extract_str(
+            r#"
+            fn all_pairs(items: &[i32]) -> usize {
+                let mut n = 0;
+                for x in items {
+                    for y in items.iter() {
+                        if x == y {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            }
+
+            fn cross_product(rows: &[i32], cols: &[i32]) -> usize {
+                let mut n = 0;
+                for r in rows {
+                    for c in cols {
+                        n += (r + c) as usize;
+                    }
+                }
+                n
+            }
+
+            fn index_walk(items: &[i32]) -> usize {
+                let mut n = 0;
+                for i in 0..items.len() {
+                    for j in 0..items.len() {
+                        n += i + j;
+                    }
+                }
+                n
+            }
+            "#,
+        );
+        let all_pairs = rec.symbols.iter().find(|s| s.name == "all_pairs").unwrap();
+        let cross_product = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "cross_product")
+            .unwrap();
+        let index_walk = rec.symbols.iter().find(|s| s.name == "index_walk").unwrap();
+
+        // `items` and `items.iter()` normalize to the same collection.
+        assert_eq!(all_pairs.nested_loop_quadratic.len(), 1);
+        assert_eq!(all_pairs.nested_loop_quadratic[0].iterable, "items");
+
+        // Two unrelated collections is a legitimate cross product.
+        assert!(cross_product.nested_loop_quadratic.is_empty());
+
+        // Ranges are deliberately excluded -- a doubly-nested index walk
+        // is usually a deliberate grid traversal, not an accidental
+        // all-pairs scan over one collection.
+        assert!(index_walk.nested_loop_quadratic.is_empty());
     }
 }

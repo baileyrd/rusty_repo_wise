@@ -160,6 +160,7 @@ mod tests {
             json_parse_in_loop: Vec::new(),
             regex_compile_in_loop: Vec::new(),
             nested_loop_with_io: Vec::new(),
+            nested_loop_quadratic: Vec::new(),
             param_count: 0,
             primitive_param_count: 0,
             body_hash: None,

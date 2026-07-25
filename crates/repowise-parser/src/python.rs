@@ -191,6 +191,15 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let nested_loop_quadratic = body
+                        .map(|b| {
+                            metrics::quadratic_loop_nestings(
+                                b,
+                                |n| loop_iterable(n, self.source),
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -216,6 +225,7 @@ impl<'a> Walker<'a> {
                         json_parse_in_loop,
                         regex_compile_in_loop,
                         nested_loop_with_io,
+                        nested_loop_quadratic,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -251,6 +261,7 @@ impl<'a> Walker<'a> {
                         json_parse_in_loop: Vec::new(),
                         regex_compile_in_loop: Vec::new(),
                         nested_loop_with_io: Vec::new(),
+                        nested_loop_quadratic: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -421,6 +432,59 @@ fn condition_of(n: Node) -> Option<Node> {
 /// ones (`if`/`elif`/`except`/ternary/`match` case).
 fn is_loop(n: Node) -> bool {
     matches!(n.kind(), "for_statement" | "while_statement")
+}
+
+/// The base collection a `for` loop iterates over, for
+/// `nested_loop_quadratic` (issue #187): `items` for all of
+/// `for x in items`, `for x in enumerate(items)`, `for x in
+/// sorted(items)`. `None` for `while` (no iterable to compare) and for
+/// any iterable that doesn't normalize down to a plain identifier --
+/// including `range(n)`, deliberately, since a doubly-nested range loop
+/// is usually a deliberate grid/matrix traversal rather than the
+/// accidental all-pairs scan over one collection this marker is after.
+fn loop_iterable(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "for_statement" {
+        return None;
+    }
+    base_collection_name(node.child_by_field_name("right")?, source)
+}
+
+/// Peel a wrapping iteration helper (`enumerate`/`sorted`/`reversed`/
+/// `list`/`set`/`tuple`) or a same-collection view method
+/// (`.values()`/`.keys()`/`.items()`/`.copy()`) off an iterable
+/// expression, returning the underlying identifier if one is left. Only
+/// wrappers over the *same* underlying collection are peeled, so
+/// `items` and `enumerate(items)` compare equal while a genuinely
+/// different sequence (`filter(..)`, a comprehension) doesn't normalize
+/// at all.
+fn base_collection_name(node: Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(text(node, source).to_string()),
+        "call" => {
+            let func = node.child_by_field_name("function")?;
+            match func.kind() {
+                "identifier" => {
+                    if !matches!(
+                        text(func, source),
+                        "enumerate" | "sorted" | "reversed" | "list" | "set" | "tuple"
+                    ) {
+                        return None;
+                    }
+                    let args = node.child_by_field_name("arguments")?;
+                    base_collection_name(args.named_child(0)?, source)
+                }
+                "attribute" => {
+                    let attr = func.child_by_field_name("attribute")?;
+                    if !matches!(text(attr, source), "values" | "keys" | "items" | "copy") {
+                        return None;
+                    }
+                    base_collection_name(func.child_by_field_name("object")?, source)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// If `node` is a `call`, the callee name to match against `is_io_call`
@@ -890,5 +954,27 @@ mod tests {
 
         assert_eq!(single_loop.io_in_loop.len(), 1);
         assert!(single_loop.nested_loop_with_io.is_empty());
+    }
+
+    #[test]
+    fn flags_nested_loops_over_the_same_collection_but_not_unrelated_ones() {
+        let rec = extract_str(
+            "def all_pairs(items):\n    n = 0\n    for x in items:\n        for y in enumerate(items):\n            n += 1\n    return n\n\ndef cross_product(rows, cols):\n    n = 0\n    for r in rows:\n        for c in cols:\n            n += 1\n    return n\n\ndef index_walk(items):\n    n = 0\n    for i in range(len(items)):\n        for j in range(len(items)):\n            n += 1\n    return n\n",
+        );
+        let all_pairs = rec.symbols.iter().find(|s| s.name == "all_pairs").unwrap();
+        let cross_product = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "cross_product")
+            .unwrap();
+        let index_walk = rec.symbols.iter().find(|s| s.name == "index_walk").unwrap();
+
+        // `items` and `enumerate(items)` normalize to the same collection.
+        assert_eq!(all_pairs.nested_loop_quadratic.len(), 1);
+        assert_eq!(all_pairs.nested_loop_quadratic[0].iterable, "items");
+
+        assert!(cross_product.nested_loop_quadratic.is_empty());
+        // `range(..)` is deliberately excluded, same as Rust's ranges.
+        assert!(index_walk.nested_loop_quadratic.is_empty());
     }
 }

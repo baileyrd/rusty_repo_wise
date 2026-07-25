@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and fourteen of
+//! `repowise_core::Symbol::primitive_param_count`), and fifteen of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -53,7 +53,10 @@
 //! `repowise_core::Symbol::blocking_io_under_lock`), and `.reduce(..)`
 //! callbacks spreading their accumulator into a new array
 //! (`array_spread_in_reduce`, TS/JS-only -- see
-//! `repowise_core::Symbol::array_spread_in_reduce`).
+//! `repowise_core::Symbol::array_spread_in_reduce`), and SQL strings
+//! that look like accidental cartesian joins (`sql_cartesian_join`,
+//! Rust/Python/TS+JS -- see
+//! `repowise_core::Symbol::sql_cartesian_join`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -240,6 +243,15 @@ fn default_blocking_io_under_lock() -> f64 {
 fn default_array_spread_in_reduce() -> f64 {
     0.6
 }
+// Same weight as the other quadratic-*shape* markers (issue #195): a
+// missing join predicate turns an `n`-row and `m`-row query into an
+// `n * m`-row one. Arguably the most severe marker in the cluster --
+// it's a correctness bug as well as a performance one -- but it's also
+// the most heuristic (a text scan, not a SQL parse), so it sits at the
+// same tier rather than above it.
+fn default_sql_cartesian_join() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -310,6 +322,8 @@ pub struct HealthWeights {
     pub blocking_io_under_lock: f64,
     #[serde(default = "default_array_spread_in_reduce")]
     pub array_spread_in_reduce: f64,
+    #[serde(default = "default_sql_cartesian_join")]
+    pub sql_cartesian_join: f64,
 }
 
 impl Default for HealthWeights {
@@ -341,6 +355,7 @@ impl Default for HealthWeights {
             blocking_sync_in_async: default_blocking_sync_in_async(),
             blocking_io_under_lock: default_blocking_io_under_lock(),
             array_spread_in_reduce: default_array_spread_in_reduce(),
+            sql_cartesian_join: default_sql_cartesian_join(),
         }
     }
 }
@@ -382,6 +397,7 @@ impl HealthWeights {
             FindingKind::BlockingSyncInAsync => self.blocking_sync_in_async,
             FindingKind::BlockingIoUnderLock => self.blocking_io_under_lock,
             FindingKind::ArraySpreadInReduce => self.array_spread_in_reduce,
+            FindingKind::SqlCartesianJoin => self.sql_cartesian_join,
         }
     }
 }
@@ -414,6 +430,7 @@ pub enum FindingKind {
     BlockingSyncInAsync,
     BlockingIoUnderLock,
     ArraySpreadInReduce,
+    SqlCartesianJoin,
 }
 
 impl FindingKind {
@@ -445,6 +462,7 @@ impl FindingKind {
             FindingKind::BlockingSyncInAsync => "blocking-sync-in-async",
             FindingKind::BlockingIoUnderLock => "blocking-io-under-lock",
             FindingKind::ArraySpreadInReduce => "array-spread-in-reduce",
+            FindingKind::SqlCartesianJoin => "sql-cartesian-join",
         }
     }
 }
@@ -868,6 +886,23 @@ fn check_function_markers(
                  the whole array every step, making a linear fold quadratic; push onto the \
                  accumulator and return it instead",
                 spread.accumulator
+            ),
+        });
+    }
+    // Already filtered to SQL strings whose comma-joined tables lack
+    // connecting predicates at extraction time (see
+    // `repowise_parser::metrics::sql_cartesian_joins`); every entry
+    // here is already flagged.
+    for query in &sym.sql_cartesian_join {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(query.line),
+            kind: FindingKind::SqlCartesianJoin,
+            detail: format!(
+                "SQL joins tables `{}` with no predicate connecting them -- this returns \
+                 the full cartesian product; add an ON/WHERE join condition",
+                query.tables
             ),
         });
     }

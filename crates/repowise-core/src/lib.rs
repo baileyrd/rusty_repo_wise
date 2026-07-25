@@ -341,6 +341,13 @@ pub struct Symbol {
     /// JavaScript only -- this is specific to the JS array method, with
     /// no equivalent in this port's other languages.
     pub array_spread_in_reduce: Vec<ArraySpreadInReduceRef>,
+    /// SQL query strings that list several comma-joined tables without
+    /// enough join predicates to connect them -- an accidental cartesian
+    /// product returning `n * m` rows. A text-level scan of string
+    /// literals, not a real SQL parse. Empty for symbols with no body,
+    /// and for languages this extraction isn't implemented for yet --
+    /// currently Rust, Python, and TypeScript/JavaScript.
+    pub sql_cartesian_join: Vec<SqlCartesianJoinRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -482,6 +489,15 @@ pub struct BlockingIoUnderLockRef {
 pub struct ArraySpreadInReduceRef {
     pub line: usize,
     pub accumulator: String,
+}
+
+/// A single SQL string literal that looks like an accidental cartesian
+/// join. `line` points at the string literal; `tables` lists the
+/// comma-joined table names that appeared unconnected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqlCartesianJoinRef {
+    pub line: usize,
+    pub tables: String,
 }
 
 impl Symbol {

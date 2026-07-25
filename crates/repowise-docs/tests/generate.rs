@@ -36,6 +36,7 @@ fn build_index(root: &std::path::Path) -> RepoIndex {
         blocking_sync_in_async: Vec::new(),
         blocking_io_under_lock: Vec::new(),
         array_spread_in_reduce: Vec::new(),
+        sql_cartesian_join: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,

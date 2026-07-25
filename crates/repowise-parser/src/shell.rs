@@ -124,6 +124,7 @@ impl<'a> Walker<'a> {
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

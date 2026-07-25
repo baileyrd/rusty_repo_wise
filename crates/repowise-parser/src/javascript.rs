@@ -140,6 +140,7 @@ impl<'a> Walker<'a> {
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -182,6 +183,7 @@ impl<'a> Walker<'a> {
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join: Vec::new(),
                     });
                 }
             }
@@ -427,6 +429,15 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let sql_cartesian_join = body
+            .map(|b| {
+                metrics::sql_cartesian_joins(
+                    b,
+                    |n| string_literal_content(n, self.source),
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -463,6 +474,7 @@ impl<'a> Walker<'a> {
             blocking_sync_in_async: Vec::new(),
             blocking_io_under_lock: Vec::new(),
             array_spread_in_reduce,
+            sql_cartesian_join,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -691,6 +703,19 @@ fn callback_return_expression<'a>(callback: Node<'a>) -> Option<Node<'a>> {
         .named_children(&mut cursor)
         .find(|c| c.kind() == "return_statement");
     returned.and_then(|r| r.named_child(0))
+}
+
+/// The text inside a string-literal node, for `sql_cartesian_join`
+/// (issue #195). Covers quoted strings and template literals. Returns `None` for any other node.
+fn string_literal_content(node: Node, source: &str) -> Option<String> {
+    if !matches!(node.kind(), "string" | "template_string") {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let content = node
+        .named_children(&mut cursor)
+        .find(|c| matches!(c.kind(), "string_content" | "string_fragment"));
+    content.map(|c| text(c, source).to_string())
 }
 
 /// The base collection a `for...of`/`for...in` loop iterates over, for

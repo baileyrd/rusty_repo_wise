@@ -8,7 +8,7 @@ use repowise_core::{
     ComplexConditionalRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
     ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
     PdConcatInLoopRef, RegexCompileInLoopRef, RepoIndex, ResourceConstructionInLoopRef,
-    SerialAwaitInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
+    SerialAwaitInLoopRef, SqlCartesianJoinRef, StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -56,6 +56,7 @@ fn symbol(
         blocking_sync_in_async: Vec::new(),
         blocking_io_under_lock: Vec::new(),
         array_spread_in_reduce: Vec::new(),
+        sql_cartesian_join: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -1025,6 +1026,57 @@ fn flags_one_finding_per_array_spread_in_reduce_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(3)));
     assert!(lines.contains(&Some(7)));
     assert!(findings_for(&report, "clean", FindingKind::ArraySpreadInReduce).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_sql_cartesian_join_pointing_at_its_own_line() {
+    let mut queries = symbol(
+        "dao.rs",
+        "queries",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    queries.sql_cartesian_join = vec![
+        SqlCartesianJoinRef {
+            line: 3,
+            tables: "orders, customers".to_string(),
+        },
+        SqlCartesianJoinRef {
+            line: 7,
+            tables: "a, b, c".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "dao.rs",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "dao.rs",
+        vec![queries, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "queries", FindingKind::SqlCartesianJoin);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(3)));
+    assert!(lines.contains(&Some(7)));
+    assert!(findings_for(&report, "clean", FindingKind::SqlCartesianJoin).is_empty());
 }
 
 #[test]

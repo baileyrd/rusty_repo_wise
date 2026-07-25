@@ -801,74 +801,56 @@ pub fn unbounded_goroutines_in_loops(
     launch_callee: impl Fn(Node) -> Option<String>,
     is_nested_function: impl Fn(Node) -> bool,
 ) -> Vec<GoroutineInUnboundedLoopRef> {
-    fn has_bound(
-        node: Node,
-        is_bound: &dyn Fn(Node) -> bool,
-        launch_callee: &dyn Fn(Node) -> Option<String>,
-        is_nested_function: &dyn Fn(Node) -> bool,
-    ) -> bool {
+    // The four classifiers travel together through both recursions, so
+    // they're bundled rather than threaded as four separate parameters.
+    struct Scan<'f> {
+        is_loop: &'f dyn Fn(Node) -> bool,
+        is_bound: &'f dyn Fn(Node) -> bool,
+        launch_callee: &'f dyn Fn(Node) -> Option<String>,
+        is_nested_function: &'f dyn Fn(Node) -> bool,
+    }
+
+    fn has_bound(node: Node, scan: &Scan) -> bool {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if is_nested_function(child) || launch_callee(child).is_some() {
+            if (scan.is_nested_function)(child) || (scan.launch_callee)(child).is_some() {
                 continue;
             }
-            if is_bound(child) || has_bound(child, is_bound, launch_callee, is_nested_function) {
+            if (scan.is_bound)(child) || has_bound(child, scan) {
                 return true;
             }
         }
         false
     }
 
-    fn walk(
-        node: Node,
-        in_loop: bool,
-        bounded: bool,
-        is_loop: &dyn Fn(Node) -> bool,
-        is_bound: &dyn Fn(Node) -> bool,
-        launch_callee: &dyn Fn(Node) -> Option<String>,
-        is_nested_function: &dyn Fn(Node) -> bool,
-        out: &mut Vec<(usize, String)>,
-    ) {
+    fn walk(node: Node, in_loop: bool, bounded: bool, scan: &Scan, out: &mut Vec<(usize, String)>) {
         if in_loop && !bounded {
-            if let Some(name) = launch_callee(node) {
+            if let Some(name) = (scan.launch_callee)(node) {
                 out.push((node.start_position().row + 1, name));
             }
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if is_nested_function(child) {
+            if (scan.is_nested_function)(child) {
                 continue;
             }
-            let child_is_loop = is_loop(child);
+            let child_is_loop = (scan.is_loop)(child);
             // Once any enclosing loop is bounded, everything inside it
             // stays suppressed -- an inner loop can't un-bound the
             // semaphore the outer one already acquired.
-            let child_bounded = bounded
-                || (child_is_loop && has_bound(child, is_bound, launch_callee, is_nested_function));
-            walk(
-                child,
-                in_loop || child_is_loop,
-                child_bounded,
-                is_loop,
-                is_bound,
-                launch_callee,
-                is_nested_function,
-                out,
-            );
+            let child_bounded = bounded || (child_is_loop && has_bound(child, scan));
+            walk(child, in_loop || child_is_loop, child_bounded, scan, out);
         }
     }
 
+    let scan = Scan {
+        is_loop: &is_loop,
+        is_bound: &is_bound,
+        launch_callee: &launch_callee,
+        is_nested_function: &is_nested_function,
+    };
     let mut out = Vec::new();
-    walk(
-        body,
-        false,
-        false,
-        &is_loop,
-        &is_bound,
-        &launch_callee,
-        &is_nested_function,
-        &mut out,
-    );
+    walk(body, false, false, &scan, &mut out);
     out.into_iter()
         .map(|(line, callee_name)| GoroutineInUnboundedLoopRef { line, callee_name })
         .collect()

@@ -41,6 +41,7 @@ fn symbol(name: &str, complexity: usize) -> Symbol {
         defer_in_loop: Vec::new(),
         goroutine_in_unbounded_loop: Vec::new(),
         membership_test_in_loop: Vec::new(),
+        sync_io_calls: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,
@@ -96,6 +97,7 @@ fn default_weights_match_this_crates_original_hardcoded_penalties() {
     assert_eq!(defaults.defer_in_loop, 0.6);
     assert_eq!(defaults.goroutine_in_unbounded_loop, 0.6);
     assert_eq!(defaults.membership_test_in_loop, 0.6);
+    assert_eq!(defaults.hot_path_sync_io, 0.3);
 }
 
 #[test]

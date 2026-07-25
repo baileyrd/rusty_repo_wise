@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and eighteen of
+//! `repowise_core::Symbol::primitive_param_count`), and nineteen of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -66,7 +66,11 @@
 //! membership tests against a list inside a loop body
 //! (`membership_test_in_loop`, Rust/Python/TS+JS-only, and only where a
 //! local binding makes the collection's kind evident -- see
-//! `repowise_core::Symbol::membership_test_in_loop`).
+//! `repowise_core::Symbol::membership_test_in_loop`), and synchronous
+//! I/O calls made from a function whose file git analytics flags as a
+//! hotspot (`hot_path_sync_io`, Rust/Python/TS+JS-only, and the only
+//! marker here built from an empirical signal as well as a structural
+//! one -- see `analyze_with_hotspots`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -88,7 +92,7 @@ pub use near_duplicate::{find_near_duplicates, NearDuplicateCandidate};
 
 use repowise_core::{Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// A function/method longer than this (in lines) is flagged.
@@ -289,6 +293,15 @@ fn default_goroutine_in_unbounded_loop() -> f64 {
 fn default_membership_test_in_loop() -> f64 {
     0.6
 }
+// The per-occurrence tier (issue #186), same as `io_in_loop`: an
+// individual blocking call is a real cost but a bounded one, and unlike
+// the quadratic-shape markers it doesn't get worse with input size. The
+// precision here comes from the hotspot gate rather than from a heavier
+// weight -- the marker only fires at all where churn history says the
+// code actually runs and changes.
+fn default_hot_path_sync_io() -> f64 {
+    0.3
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -367,6 +380,8 @@ pub struct HealthWeights {
     pub goroutine_in_unbounded_loop: f64,
     #[serde(default = "default_membership_test_in_loop")]
     pub membership_test_in_loop: f64,
+    #[serde(default = "default_hot_path_sync_io")]
+    pub hot_path_sync_io: f64,
 }
 
 impl Default for HealthWeights {
@@ -402,6 +417,7 @@ impl Default for HealthWeights {
             defer_in_loop: default_defer_in_loop(),
             goroutine_in_unbounded_loop: default_goroutine_in_unbounded_loop(),
             membership_test_in_loop: default_membership_test_in_loop(),
+            hot_path_sync_io: default_hot_path_sync_io(),
         }
     }
 }
@@ -447,6 +463,7 @@ impl HealthWeights {
             FindingKind::DeferInLoop => self.defer_in_loop,
             FindingKind::GoroutineInUnboundedLoop => self.goroutine_in_unbounded_loop,
             FindingKind::MembershipTestInLoop => self.membership_test_in_loop,
+            FindingKind::HotPathSyncIo => self.hot_path_sync_io,
         }
     }
 }
@@ -483,6 +500,7 @@ pub enum FindingKind {
     DeferInLoop,
     GoroutineInUnboundedLoop,
     MembershipTestInLoop,
+    HotPathSyncIo,
 }
 
 impl FindingKind {
@@ -518,6 +536,7 @@ impl FindingKind {
             FindingKind::DeferInLoop => "defer-in-loop",
             FindingKind::GoroutineInUnboundedLoop => "goroutine-in-unbounded-loop",
             FindingKind::MembershipTestInLoop => "membership-test-in-loop",
+            FindingKind::HotPathSyncIo => "hot-path-sync-io",
         }
     }
 }
@@ -564,10 +583,36 @@ pub fn analyze(index: &RepoIndex, graph: &RepoGraph) -> HealthReport {
     analyze_with_weights(index, graph, &HealthWeights::default())
 }
 
+/// Score `index` with `weights`, using no hotspot data — every marker
+/// except `hot_path_sync_io`, which needs it. Equivalent to
+/// `analyze_with_hotspots` with an empty hot-file set.
 pub fn analyze_with_weights(
     index: &RepoIndex,
     graph: &RepoGraph,
     weights: &HealthWeights,
+) -> HealthReport {
+    analyze_with_hotspots(index, graph, weights, &HashSet::new())
+}
+
+/// Score `index` with `weights`, additionally reporting
+/// `hot_path_sync_io` for synchronous I/O calls in files listed in
+/// `hot_files` (issue #186).
+///
+/// This crate deliberately knows nothing about git. Deciding *which*
+/// files are hot needs churn history, which lives in `repowise-git`, so
+/// the caller computes that set and passes it in as plain paths —
+/// keeping `repowise-health` a pure function of the index, the call
+/// graph, and its inputs, exactly as it was before this marker existed.
+///
+/// Adding a parameter here rather than to `analyze`/`analyze_with_weights`
+/// is also what keeps every existing caller (CLI/docs/dashboard/MCP/
+/// server) compiling unchanged: a caller with no git data in hand keeps
+/// calling the old entry point and simply never sees this marker.
+pub fn analyze_with_hotspots(
+    index: &RepoIndex,
+    graph: &RepoGraph,
+    weights: &HealthWeights,
+    hot_files: &HashSet<PathBuf>,
 ) -> HealthReport {
     let mut findings = Vec::new();
 
@@ -583,7 +628,13 @@ pub fn analyze_with_weights(
             if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
                 continue;
             }
-            check_function_markers(sym, graph, skip_dead_code, &mut findings);
+            check_function_markers(
+                sym,
+                graph,
+                skip_dead_code,
+                hot_files.contains(&file.path),
+                &mut findings,
+            );
         }
     }
 
@@ -606,10 +657,12 @@ pub fn analyze_with_weights(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_function_markers(
     sym: &Symbol,
     graph: &RepoGraph,
     skip_dead_code: bool,
+    in_hot_file: bool,
     findings: &mut Vec<Finding>,
 ) {
     let length = sym.end_line.saturating_sub(sym.start_line) + 1;
@@ -1015,6 +1068,28 @@ fn check_function_markers(
                 test.collection
             ),
         });
+    }
+    // The only marker in this crate built from two independent signals:
+    // a structural one (a blocking call is present) and an empirical one
+    // (git says this file changes often). Neither alone is a finding --
+    // a blocking read in a rarely-touched setup path is fine, and a
+    // hotspot with no blocking I/O has nothing to fix here.
+    if in_hot_file {
+        for call in &sym.sync_io_calls {
+            findings.push(Finding {
+                file: sym.file.clone(),
+                symbol: Some(sym.name.clone()),
+                line: Some(call.line),
+                kind: FindingKind::HotPathSyncIo,
+                detail: format!(
+                    "blocking `{}` call in a git hotspot -- this file is among the most \
+                     frequently changed, complexity-weighted files in the repo, so a synchronous \
+                     call here is on a path that demonstrably gets exercised and edited; \
+                     consider an async or buffered equivalent",
+                    call.callee_name
+                ),
+            });
+        }
     }
     if !skip_dead_code && graph.call_in_degree(&sym.id) == 0 {
         findings.push(Finding {

@@ -141,6 +141,7 @@ mod tests {
             defer_in_loop: Vec::new(),
             goroutine_in_unbounded_loop: Vec::new(),
             membership_test_in_loop: Vec::new(),
+            sync_io_calls: Vec::new(),
             param_count: 1,
             primitive_param_count: 0,
             body_hash: None,

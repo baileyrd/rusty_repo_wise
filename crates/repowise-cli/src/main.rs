@@ -370,6 +370,44 @@ fn cmd_deps(file: &Path, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Upper bound on how many files count as "hot" when scoring
+/// `hot_path_sync_io` (issue #186).
+const HOT_PATH_MAX_FILES: usize = 10;
+
+/// ...and the fraction of the repo that bound is additionally capped
+/// to. Without this, a small repo has *every* file in its top 10, which
+/// silently turns `hot_path_sync_io` into "any sync I/O anywhere" and
+/// throws away the empirical half of the signal that justifies the
+/// marker. A repo of 8 files gets a top 2; the cap only stops binding
+/// once there are 40+ files.
+const HOT_PATH_REPO_FRACTION: usize = 4;
+
+/// The hottest files by hotspot score: the top
+/// `HOT_PATH_MAX_FILES`, further capped to a
+/// `1/HOT_PATH_REPO_FRACTION` slice of the repo, and never including a
+/// file scoring zero (no churn or no complexity is not a hot path by
+/// any definition). A relative rank rather than an absolute score
+/// threshold, because hotspot scores are churn x complexity and so
+/// aren't comparable between repos -- "the files this repo churns
+/// hardest" travels; "score above 500" doesn't.
+///
+/// Returns an empty set when git history isn't available (no repo, a
+/// shallow clone, git missing). Failing soft is deliberate:
+/// `hot_path_sync_io` is the only marker that needs this, and losing one
+/// marker is a much better outcome than refusing to score at all.
+fn hot_path_files(root: &Path, index: &RepoIndex) -> std::collections::HashSet<PathBuf> {
+    let Ok(analytics) = repowise_git::GitAnalytics::collect(root) else {
+        return std::collections::HashSet::new();
+    };
+    let limit = HOT_PATH_MAX_FILES.min((index.files.len() / HOT_PATH_REPO_FRACTION).max(1));
+    repowise_git::hotspots(index, &analytics)
+        .into_iter()
+        .filter(|h| h.score > 0)
+        .take(limit)
+        .map(|h| h.file)
+        .collect()
+}
+
 fn cmd_health(path: &Path, worst: usize, weights_path: Option<&Path>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let index = RepoIndex::load(&root)?;
@@ -382,7 +420,8 @@ fn cmd_health(path: &Path, worst: usize, weights_path: Option<&Path>) -> anyhow:
         }
         None => repowise_health::HealthWeights::default(),
     };
-    let report = repowise_health::analyze_with_weights(&index, &graph, &weights);
+    let hot_files = hot_path_files(&root, &index);
+    let report = repowise_health::analyze_with_hotspots(&index, &graph, &weights, &hot_files);
 
     println!("Repowise code health for {}", index.root.display());
     println!(

@@ -9,7 +9,7 @@ use repowise_core::{
     DeferInLoopRef, GoroutineInUnboundedLoopRef, IoInLoopRef, JsonParseInLoopRef,
     ListInsertZeroInLoopRef, LockInLoopRef, MembershipTestInLoopRef, NestedLoopQuadraticRef,
     NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef,
-    SerialAwaitInLoopRef, SqlCartesianJoinRef, StringConcatInLoopRef,
+    SerialAwaitInLoopRef, SqlCartesianJoinRef, StringConcatInLoopRef, SyncIoCallRef,
 };
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -1023,6 +1023,32 @@ pub fn unbounded_goroutines_in_loops(
     out.into_iter()
         .map(|(line, callee_name)| GoroutineInUnboundedLoopRef { line, callee_name })
         .collect()
+}
+
+/// Every I/O-shaped call anywhere in `body`, for `hot_path_sync_io`
+/// (issue #186). Deliberately *not* loop-scoped: the point of this
+/// marker is that a blocking call's cost depends on how often the
+/// enclosing function actually runs, which no amount of AST inspection
+/// can tell you. `repowise-health` supplies that half by cross-checking
+/// the containing file against git hotspot data, so this side just
+/// records every candidate and lets the caller decide.
+///
+/// Reuses `io_in_loop`'s callee-name table verbatim -- the definition of
+/// "I/O-shaped" doesn't change just because the context does.
+pub fn sync_io_calls_in_body(
+    body: Node,
+    call_callee: impl Fn(Node) -> Option<String>,
+    is_io_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<SyncIoCallRef> {
+    matches_in_body(
+        body,
+        |n| call_callee(n).filter(|name| is_io_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| SyncIoCallRef { line, callee_name })
+    .collect()
 }
 
 /// Blocking synchronous calls found anywhere in an async function's

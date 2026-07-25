@@ -6,6 +6,108 @@ repo routing work through PRs).
 
 ---
 
+## PR #232 — Add hot_path_sync_io health marker (completes issue #72)
+**2026-07-25** · [#232](https://github.com/baileyrd/rusty_repo_wise/pull/232) · closes [#186](https://github.com/baileyrd/rusty_repo_wise/issues/186)
+
+- **Added:** `hot_path_sync_io`, the **nineteenth and final** slice of
+  issue #72's Performance-signal cluster. Flags a synchronous, blocking
+  I/O call in a function whose file the git hotspot analytics rank among
+  the repo's churn-and-complexity-heaviest.
+- **The only marker built from two independent signals:** a structural
+  one (a blocking call is present) and an empirical one (git says this
+  file changes often). Neither alone is a finding — a blocking read in a
+  rarely-run setup path is fine, and a hotspot with no blocking I/O has
+  nothing to fix. The intersection is far higher-precision than either
+  half.
+- **`Symbol` gains `sync_io_calls: Vec<SyncIoCallRef>`** (each entry:
+  `line`, `callee_name`) — every I/O-shaped call anywhere in the body,
+  not just inside a loop like `io_in_loop`.
+- **How git data gets in without compromising `repowise-health`.** The
+  crate is a pure function of the index and the call graph and knows
+  nothing about git; taking a git dependency to serve one marker would
+  be a bad trade. The *caller* computes the hot-file set and passes it
+  in as plain paths, through a new `analyze_with_hotspots(index, graph,
+  weights, hot_files)`. `analyze`/`analyze_with_weights` still exist and
+  delegate with an empty set, so docs/dashboard/MCP/server compile and
+  behave exactly as before and simply never see this marker. A test pins
+  that the no-git path reports nothing here.
+- **"Hot" is a relative rank, not an absolute score** — hotspot scores
+  are churn × complexity and aren't comparable between repos. The set is
+  the top 10 files, *further capped to a quarter of the repo*, excluding
+  anything scoring zero.
+- **That second cap came out of end-to-end verification**, not design: a
+  plain top-10 marked every file in a two-file repo as hot, silently
+  degrading the marker into "any sync I/O anywhere" and discarding the
+  empirical half of the signal it exists for.
+- **Fails soft:** no git history (no repo, shallow clone, git missing)
+  yields an empty set and the marker quietly doesn't fire. Losing one
+  marker beats refusing to score the codebase.
+- **Call recognition reuses `io_in_loop`'s callee table verbatim**; only
+  the scope changes, a whole-body scan rather than a loop-body one.
+- **New `FindingKind::HotPathSyncIo`** (penalty −0.3), the
+  per-occurrence tier alongside `io_in_loop`: a single blocking call is
+  a real but bounded cost that doesn't worsen with input size, and the
+  precision comes from the hotspot gate rather than a heavier weight.
+- **Verified end to end** against a real git repo: two files with
+  identical blocking `open().read()` + `json.loads`, one churned nine
+  times and one committed once. Only the churned file is flagged.
+- **Scope:** Rust, Python, and TypeScript/JavaScript.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update`.
+- **Issue #72 is now complete** — all 19 Performance-signal sub-issues
+  are implemented, and the health scorer covers 31 distinct markers.
+
+---
+
+## PR #231 — Add membership_test_in_loop health marker
+**2026-07-25** · [#231](https://github.com/baileyrd/rusty_repo_wise/pull/231) · closes [#182](https://github.com/baileyrd/rusty_repo_wise/issues/182)
+
+- **Added:** `membership_test_in_loop`, the eighteenth slice of issue
+  #72's Performance-signal cluster. Flags an `x in xs` /
+  `xs.contains(&x)` / `xs.includes(x)` test inside a loop body where
+  `xs` is a list. Each test scans the whole list, so one per iteration
+  makes the loop O(n × m) while it reads as linear.
+- **`Symbol` gains `membership_test_in_loop: Vec<MembershipTestInLoopRef>`**
+  (each entry: `line`, `collection`).
+- **The design call the issue asked for.** #182's own acceptance
+  criteria flagged that recognizing a list-typed collection "needs at
+  least approximate type information … may need its own scoping/design
+  pass on how far to push type inference." The answer taken here:
+  **don't build type inference.** Instead use the narrow slice reliably
+  visible in one function's own text — a local binding whose initializer
+  shape names the collection kind outright (`xs = [..]`,
+  `let xs = vec![..]`, `const xs = new Set(..)`). A first pass collects
+  those into a name → kind map; the loop walk only flags a test that
+  resolves to a list.
+- **Deliberately low-recall, high-precision.** A parameter, a field, an
+  imported constant, or any unclear initializer never enters the map and
+  is skipped. A false positive here tells someone to "fix" a lookup that
+  was already O(1), which is worse than staying quiet. A name rebound to
+  a different kind is demoted for the same reason — one pass can't know
+  which binding is live at the test site.
+- **Rust is where the binding map earns its keep:** `Vec::contains` and
+  `HashSet::contains` are spelled identically at the call site, so
+  nothing local separates the O(n) scan from the O(1) lookup. There the
+  *declared type* wins over the initializer, which is what makes
+  `let seen: HashSet<_> = xs.into_iter().collect();` resolvable when
+  `.collect()` alone says nothing.
+- **Two things fall out for free in JS/TS:** `Set.has` is never a
+  membership target (it's already the recommended form), and substring
+  checks need no special case — strings share `includes`/`indexOf` with
+  arrays, but a string binding never resolves to a list.
+- **New `FindingKind::MembershipTestInLoop`** (penalty −0.6), the
+  quadratic-*shape* tier alongside `nested_loop_quadratic`.
+- **Testing:** list vs. set/dict in all three languages, plus `not in`,
+  inline list literals, unknown bindings, rebinding, the Rust
+  declared-type case, and the JS string receiver — plus a health-side
+  per-occurrence test and a `HealthWeights::default()` assertion.
+- **Verified end to end** on a Python and a JS fixture: only the
+  list-bound collection is flagged in each; the set, dict, parameter,
+  and string receivers stay quiet.
+- **Scope:** Rust, Python, and TypeScript/JavaScript.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update`.
+
+---
+
 ## PR #229 — Fix defer_in_loop flagging defers inside func literals
 **2026-07-25** · [#229](https://github.com/baileyrd/rusty_repo_wise/pull/229)
 

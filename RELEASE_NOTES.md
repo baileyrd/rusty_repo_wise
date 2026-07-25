@@ -6,6 +6,68 @@ repo routing work through PRs).
 
 ---
 
+## PR #218 — Add blocking_sync_in_async health marker
+**2026-07-25** · [#218](https://github.com/baileyrd/rusty_repo_wise/pull/218) · closes [#184](https://github.com/baileyrd/rusty_repo_wise/issues/184)
+
+- **Added:** `blocking_sync_in_async`, the twelfth slice of issue #72's
+  Performance-signal cluster. Flags a known blocking synchronous call
+  inside an `async fn`/`async def` body — a blocking call on an async
+  executor's worker thread stalls the whole reactor, silently degrading
+  every *other* task sharing that thread.
+- **A different detection shape.** This is the first marker in the
+  cluster whose context is the enclosing **function** rather than an
+  enclosing loop, exactly as its issue called out. It shares none of the
+  `is_loop` machinery:
+  - **New per-language `is_async_fn`** — Rust checks for a
+    `function_modifiers` named child containing `async`; Python checks
+    for the anonymous `async` token child tree-sitter-python emits on an
+    `async def`. Both were verified empirically against the grammars
+    before the classifiers were written.
+  - **New `repowise-parser::metrics::matches_in_body`** — the non-loop
+    counterpart to `matches_in_loops`: same nested-function skipping, no
+    loop tracking. `blocking_calls_in_async` wraps it.
+  - The extractor only scans a body when `is_async_fn` returns true, so
+    non-async functions cost nothing and can never produce entries.
+- **`Symbol` gains `blocking_sync_in_async: Vec<BlockingSyncInAsyncRef>`**
+  (each entry: `line`, `callee_name`).
+- **Scope:** **Rust and Python only**, the two languages the issue scoped
+  it to. The other 14 parsed languages have no `is_async_fn` classifier
+  and always produce an empty list.
+- **Pattern tables**, matched on the qualified two-segment path since a
+  bare `sleep`/`read`/`get` would be far too generic:
+  - Rust: `thread::sleep`, `fs::read_to_string`, `fs::read`, `fs::write`,
+    `fs::copy`, `fs::remove_file`, `fs::create_dir_all`.
+  - Python: `time.sleep`, `requests.get`/`post`/`put`/`delete`/`head`/
+    `request`, `subprocess.run`/`call`/`check_output`, `os.system`.
+  - Python additionally accepts a *bare identifier* callee for `open`,
+    distinctive enough as a builtin on its own; a method-form
+    `fh.open()` yields the qualified form and never matches that entry.
+  - Both tables are deliberately limited to calls with a clear async
+    replacement, so every hit has an actionable fix.
+- **Correctness detail:** in Rust, `tokio::fs::read_to_string` and
+  `std::fs::read_to_string` reduce to the *same* `fs::read_to_string`
+  two-segment path, and the tokio one is the async variant that must not
+  be flagged. A call that is itself being `.await`ed is therefore never
+  reported — being awaited is the only local evidence distinguishing the
+  async variant from the blocking one, since this port has no
+  import-resolution or type information to consult. Pinned by a test
+  with a `tokio::fs::read_to_string(path).await` fixture.
+- **New `FindingKind::BlockingSyncInAsync`** (penalty −0.6, elevated
+  above the flat −0.3 per-occurrence tier for a *different* reason than
+  the quadratic-shape markers: the cost lands on every other task
+  sharing the executor, not just on the function containing the call).
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206/#208/#210/#212/#214/#216).
+- 7 of #72's 19 sub-issues remain open — this closes only #184, not
+  #72 itself.
+
+---
+
 ## PR #216 — Add pd_concat_in_loop health marker
 **2026-07-25** · [#216](https://github.com/baileyrd/rusty_repo_wise/pull/216) · closes [#192](https://github.com/baileyrd/rusty_repo_wise/issues/192)
 

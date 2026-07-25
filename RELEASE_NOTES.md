@@ -6,6 +6,61 @@ repo routing work through PRs).
 
 ---
 
+## PR #214 — Add serial_await_in_loop health marker
+**2026-07-25** · [#214](https://github.com/baileyrd/rusty_repo_wise/pull/214) · closes [#181](https://github.com/baileyrd/rusty_repo_wise/issues/181)
+
+- **Added:** `serial_await_in_loop`, the tenth slice of issue #72's
+  Performance-signal cluster. Flags an awaited async call inside a loop
+  body — each iteration blocks on the previous one, turning what could
+  be one concurrent batch into N sequential round-trips.
+- **`Symbol` gains `serial_await_in_loop: Vec<SerialAwaitInLoopRef>`**
+  (each entry: `line`, `callee_name`), populated at parse time.
+- **New `repowise-parser::metrics::serial_awaits_in_loops`**, a thin
+  wrapper over the existing `matches_in_loops` shared walk — no new
+  walking machinery this time, only a new per-language classifier.
+- **Scope:** **Rust, Python, and TypeScript/JavaScript** — the three
+  parsed languages whose grammars carry async syntax, which the issue
+  explicitly asked be confirmed before committing to a language list.
+  Verified empirically against each grammar: `await_expression` in Rust
+  and TS/JS, `await` in Python. The other 13 parsed languages get an
+  empty `serial_await_in_loop` list.
+- **Two deliberate narrowings**, both covered by a test per language:
+  - *Only awaits whose operand is a call are flagged.* An await on an
+    already-created future (`await somePromise`) isn't reported — the
+    issue describes "each iteration's async call", and requiring a call
+    is also what lets every finding name what's being awaited.
+  - *Awaits of concurrency combinators are excluded* —
+    `Promise.all`/`allSettled`/`race`/`any` (TS/JS),
+    `join_all`/`try_join_all`/`join`/`try_join`/`select_all` (Rust),
+    `gather`/`as_completed` (Python). Those are precisely the *fix* this
+    marker recommends, so awaiting one inside a loop is the deliberate
+    chunked-concurrency shape (`for chunk in chunks { await
+    Promise.all(chunk.map(..)) }`), not the serial one — flagging it
+    would punish the correct pattern.
+- **Matching precision:** TS/JS matches the combinator on its qualified
+  `Promise.all` form, since a bare `all`/`race` would be far too
+  generic. Python matches bare `gather`/`as_completed` (distinctive on
+  their own, and robust to `from asyncio import gather`) but
+  deliberately omits `asyncio.wait` — a bare `wait` is not distinctive,
+  and omitting it costs at most a false positive, never a false
+  negative.
+- **New `FindingKind::SerialAwaitInLoop`** (penalty −0.3 — the
+  per-occurrence loop-body tier, deliberately *not* the −0.6
+  quadratic-*shape* tier used by `nested_loop_with_io`/
+  `nested_loop_quadratic`: one serialized await is one extra round-trip,
+  not an order-of-magnitude blowup).
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206/#208/#210/#212).
+- 9 of #72's 19 sub-issues remain open — this closes only #181, not
+  #72 itself.
+
+---
+
 ## PR #212 — Add nested_loop_quadratic health marker
 **2026-07-25** · [#212](https://github.com/baileyrd/rusty_repo_wise/pull/212) · closes [#187](https://github.com/baileyrd/rusty_repo_wise/issues/187)
 

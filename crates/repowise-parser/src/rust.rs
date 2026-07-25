@@ -294,6 +294,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join,
                         defer_in_loop: Vec::new(),
+                        goroutine_in_unbounded_loop: Vec::new(),
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -342,6 +343,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
+                        goroutine_in_unbounded_loop: Vec::new(),
                     });
                 }
             }
@@ -380,6 +382,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
+                        goroutine_in_unbounded_loop: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via

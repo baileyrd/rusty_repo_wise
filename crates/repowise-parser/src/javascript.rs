@@ -142,6 +142,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
+                        goroutine_in_unbounded_loop: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -186,6 +187,7 @@ impl<'a> Walker<'a> {
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
                         defer_in_loop: Vec::new(),
+                        goroutine_in_unbounded_loop: Vec::new(),
                     });
                 }
             }
@@ -478,6 +480,7 @@ impl<'a> Walker<'a> {
             array_spread_in_reduce,
             sql_cartesian_join,
             defer_in_loop: Vec::new(),
+            goroutine_in_unbounded_loop: Vec::new(),
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);

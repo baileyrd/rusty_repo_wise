@@ -6,10 +6,10 @@
 
 use repowise_core::{
     ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, ComplexConditionalRef,
-    DeferInLoopRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
-    NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
-    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, SqlCartesianJoinRef,
-    StringConcatInLoopRef,
+    DeferInLoopRef, GoroutineInUnboundedLoopRef, IoInLoopRef, JsonParseInLoopRef,
+    ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
+    PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef, SerialAwaitInLoopRef,
+    SqlCartesianJoinRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -768,6 +768,91 @@ pub fn defers_in_loops(
     matches_in_loops(body, is_loop, defer_callee, is_nested_function)
         .into_iter()
         .map(|(line, callee_name)| DeferInLoopRef { line, callee_name })
+        .collect()
+}
+
+/// Go `go` statements launched inside a loop body that has no visible
+/// concurrency bound, for `goroutine_in_unbounded_loop` (issue #190).
+///
+/// This can't reuse `matches_in_loops`: the suppression is scoped to a
+/// *specific* loop, so the walk has to know which loop it's inside and
+/// whether that loop (or any loop enclosing it) carries a bound, rather
+/// than tracking a single "am I in a loop" boolean.
+///
+/// `is_bound` classifies a node as a recognized concurrency-bounding
+/// operation -- for Go, a channel send or receive, which is the acquire
+/// half of the standard semaphore/worker-pool idiom. A loop counts as
+/// bounded if such a node appears anywhere in its body **outside** any
+/// `go` statement: a channel operation *inside* the launched goroutine
+/// (`go func() { results <- work() }()`) is the goroutine doing its own
+/// work, not the loop throttling how many of them exist, so scanning
+/// into launch subtrees would suppress exactly the case this marker is
+/// for. `sync.WaitGroup` deliberately doesn't count -- it bounds
+/// *completion* tracking, not *concurrency*, so a `wg.Add`/`wg.Done`
+/// loop stays flagged.
+///
+/// `launch_callee` returns the launched call's name for a launch node
+/// and `None` for everything else; its `Some`-ness is also what marks a
+/// subtree as a launch to skip during the bound scan.
+pub fn unbounded_goroutines_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    is_bound: impl Fn(Node) -> bool,
+    launch_callee: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<GoroutineInUnboundedLoopRef> {
+    // The four classifiers travel together through both recursions, so
+    // they're bundled rather than threaded as four separate parameters.
+    struct Scan<'f> {
+        is_loop: &'f dyn Fn(Node) -> bool,
+        is_bound: &'f dyn Fn(Node) -> bool,
+        launch_callee: &'f dyn Fn(Node) -> Option<String>,
+        is_nested_function: &'f dyn Fn(Node) -> bool,
+    }
+
+    fn has_bound(node: Node, scan: &Scan) -> bool {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if (scan.is_nested_function)(child) || (scan.launch_callee)(child).is_some() {
+                continue;
+            }
+            if (scan.is_bound)(child) || has_bound(child, scan) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn walk(node: Node, in_loop: bool, bounded: bool, scan: &Scan, out: &mut Vec<(usize, String)>) {
+        if in_loop && !bounded {
+            if let Some(name) = (scan.launch_callee)(node) {
+                out.push((node.start_position().row + 1, name));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if (scan.is_nested_function)(child) {
+                continue;
+            }
+            let child_is_loop = (scan.is_loop)(child);
+            // Once any enclosing loop is bounded, everything inside it
+            // stays suppressed -- an inner loop can't un-bound the
+            // semaphore the outer one already acquired.
+            let child_bounded = bounded || (child_is_loop && has_bound(child, scan));
+            walk(child, in_loop || child_is_loop, child_bounded, scan, out);
+        }
+    }
+
+    let scan = Scan {
+        is_loop: &is_loop,
+        is_bound: &is_bound,
+        launch_callee: &launch_callee,
+        is_nested_function: &is_nested_function,
+    };
+    let mut out = Vec::new();
+    walk(body, false, false, &scan, &mut out);
+    out.into_iter()
+        .map(|(line, callee_name)| GoroutineInUnboundedLoopRef { line, callee_name })
         .collect()
 }
 

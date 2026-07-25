@@ -354,6 +354,10 @@ pub struct Symbol {
     /// file open until the whole function exits. Go only -- no other
     /// language in this port has a defer-to-function-exit construct.
     pub defer_in_loop: Vec<DeferInLoopRef>,
+    /// `go` statements inside a loop body with no visible concurrency
+    /// bound, spawning one goroutine per iteration. Go only -- no other
+    /// language in this port launches concurrency with a bare keyword.
+    pub goroutine_in_unbounded_loop: Vec<GoroutineInUnboundedLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -512,6 +516,16 @@ pub struct SqlCartesianJoinRef {
 /// actionable -- the resource being held is named right there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeferInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
+}
+
+/// A single `go` statement launched inside a loop body that has no
+/// visible concurrency bound. `line` points at the `go`; `callee_name`
+/// is the launched call's name, or `func literal` for the inline
+/// `go func() {...}()` form, which has no name to report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoroutineInUnboundedLoopRef {
     pub line: usize,
     pub callee_name: String,
 }

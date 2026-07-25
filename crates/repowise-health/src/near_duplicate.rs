@@ -307,6 +307,7 @@ mod tests {
             array_spread_in_reduce: Vec::new(),
             sql_cartesian_join: Vec::new(),
             defer_in_loop: Vec::new(),
+            goroutine_in_unbounded_loop: Vec::new(),
             param_count: 1,
             primitive_param_count: 0,
             // Distinct per symbol (keyed off start_line) so two

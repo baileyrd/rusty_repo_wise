@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-eight rule-based markers: long functions, high cyclomatic complexity,
+  twenty-nine rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and sixteen of repowise's Performance-signal
+  declared parameter types), and seventeen of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -142,7 +142,13 @@ specifics per layer), not full feature parity:
   (`defer_in_loop` — a Go `defer` statement inside a loop body, where the
   deferred call runs at the enclosing *function's* return rather than at
   the end of the iteration that queued it, so every resource stays held
-  until the whole loop finishes; Go only) — except for shell scripts,
+  until the whole loop finishes; Go only), and an unbounded goroutine
+  launch in a loop (`goroutine_in_unbounded_loop` — a Go `go` statement
+  inside a loop body whose only bound would be the iteration count, so a
+  large input spawns an unbounded goroutine fan-out; suppressed when the
+  loop body carries a channel send/receive outside the launch, the
+  acquire half of the standard semaphore/worker-pool idiom; Go only)
+  — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -180,7 +186,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
 Every other repowise language is unimplemented. The health scorer now
-implements 28 distinct markers. That exceeds repowise's headline "~25
+implements 29 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
 (issue #72 alone enumerates 19). The remaining gap is not a count but a
@@ -233,7 +239,9 @@ dashboard is one static page with no per-file drill-down or live search
   return-shape extractor (`array_spread_in_reduce`), and a
   language-agnostic string-literal SQL scanner
   (`sql_cartesian_join`), and (Go) the first Go loop classifier plus a
-  `defer`-statement callee extractor (`defer_in_loop`).
+  `defer`-statement callee extractor (`defer_in_loop`), and (Go) a
+  channel-operation bound classifier scoped per enclosing loop
+  (`goroutine_in_unbounded_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -344,6 +352,7 @@ to `[0, 10]`:
 | Array spread in reduce (`array_spread_in_reduce`) | a `.reduce(..)` callback returning an array literal that spreads its own accumulator | −0.6 |
 | SQL cartesian join (`sql_cartesian_join`) | a SQL string with comma-joined tables and too few connecting predicates | −0.6 |
 | Defer in loop (`defer_in_loop`) | a Go `defer` statement inside a loop body | −0.6 |
+| Goroutine in unbounded loop (`goroutine_in_unbounded_loop`) | a Go `go` statement inside a loop body with no channel-based concurrency bound | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -359,7 +368,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-eight; everything else keeps its default
+# only overriding two of the twenty-nine; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -939,6 +948,38 @@ line. A single `defer` in a loop fires the marker once but leaks one
 resource *per iteration*, so the damage scales with the loop's trip
 count rather than with how often the marker matches; counting it
 linearly would understate it badly.
+
+**Goroutine in unbounded loop (`goroutine_in_unbounded_loop`)** flags a
+Go `go` statement inside a loop body whose only limit on concurrency
+would be the iteration count. One goroutine per input item works fine in
+testing with a handful of items and fails only in production at scale,
+where it exhausts memory locally or overwhelms whatever the goroutines
+call.
+
+**The "unbounded" qualifier is the whole design.** A loop is treated as
+bounded when its body contains a channel send (`sem <- struct{}{}`) or
+receive (`<-tokens`) — the acquire half of Go's standard semaphore and
+worker-pool idioms, and the only mechanism recognized here.
+`sync.WaitGroup` deliberately does *not* suppress: `wg.Add`/`wg.Wait`
+bound how *completion* is tracked, not how many goroutines run at once,
+so a `WaitGroup` fan-out stays flagged. A test pins both halves.
+
+The bound scan **skips the launched goroutine's own subtree**, which is
+what keeps the marker useful. In `go func() { results <- work(v) }()`
+the channel send is the goroutine reporting its result, not the loop
+throttling how many exist; counting it would suppress precisely the case
+worth flagging. A test pins that too. Suppression is also scoped per
+loop and inherited inward — an inner loop can't un-bound the semaphore
+an enclosing loop already acquired — which is why this marker needs its
+own walk rather than reusing the `matches_in_loops` "am I inside a loop"
+boolean the rest of the cluster shares.
+
+The inline `go func() {...}()` form has no callee name to report, so it
+shows as `func literal` rather than being dropped — it's by far the most
+common shape, and dropping it would blind the marker to it. Its default
+penalty (−0.6) sits in the heavier tier for the same reason
+`defer_in_loop` does: one statement fires the marker once but spawns a
+goroutine per iteration.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

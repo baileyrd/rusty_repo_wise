@@ -366,6 +366,14 @@ pub struct Symbol {
     /// collection's kind is locally evident -- see
     /// `repowise_parser::metrics::list_membership_tests_in_loops`.
     pub membership_test_in_loop: Vec<MembershipTestInLoopRef>,
+    /// Synchronous, blocking I/O-shaped calls found anywhere in this
+    /// function's body -- not just inside a loop, unlike `io_in_loop`.
+    /// On its own this is not a finding: a blocking read in a rarely-run
+    /// setup path is fine. `repowise-health` only reports these when the
+    /// containing file is *also* a git hotspot, which is what makes the
+    /// combination `hot_path_sync_io`. Rust/Python/TypeScript+JavaScript
+    /// only, the same scope as `io_in_loop`'s callee table.
+    pub sync_io_calls: Vec<SyncIoCallRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -545,6 +553,14 @@ pub struct GoroutineInUnboundedLoopRef {
 pub struct MembershipTestInLoopRef {
     pub line: usize,
     pub collection: String,
+}
+
+/// A single synchronous I/O-shaped call in a function body. `line`
+/// points at the call; `callee_name` is the recognized I/O callee.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncIoCallRef {
+    pub line: usize,
+    pub callee_name: String,
 }
 
 impl Symbol {

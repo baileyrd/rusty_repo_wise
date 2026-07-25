@@ -256,6 +256,16 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let sync_io_calls = body
+                        .map(|b| {
+                            metrics::sync_io_calls_in_body(
+                                b,
+                                |n| call_expression_callee(n, self.source),
+                                is_io_call,
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -294,6 +304,7 @@ impl<'a> Walker<'a> {
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
                         membership_test_in_loop,
+                        sync_io_calls,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -339,6 +350,7 @@ impl<'a> Walker<'a> {
                         defer_in_loop: Vec::new(),
                         goroutine_in_unbounded_loop: Vec::new(),
                         membership_test_in_loop: Vec::new(),
+                        sync_io_calls: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);

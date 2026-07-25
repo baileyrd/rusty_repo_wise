@@ -9,12 +9,13 @@ use repowise_core::{
     JsonParseInLoopRef, Language, ListInsertZeroInLoopRef, LockInLoopRef, MembershipTestInLoopRef,
     NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
     RepoIndex, ResourceConstructionInLoopRef, SerialAwaitInLoopRef, SqlCartesianJoinRef,
-    StringConcatInLoopRef, Symbol, SymbolKind,
+    StringConcatInLoopRef, Symbol, SymbolKind, SyncIoCallRef,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
-    analyze, FindingKind, BUMPY_ROAD_MIN_BUMPS, GOD_CLASS_METHODS, HIGH_COMPLEXITY,
-    HIGH_NESTING_DEPTH, LONG_FUNCTION_LINES, PRIMITIVE_OBSESSION_MIN_COUNT, TOO_MANY_PARAMS,
+    analyze, analyze_with_hotspots, FindingKind, HealthWeights, BUMPY_ROAD_MIN_BUMPS,
+    GOD_CLASS_METHODS, HIGH_COMPLEXITY, HIGH_NESTING_DEPTH, LONG_FUNCTION_LINES,
+    PRIMITIVE_OBSESSION_MIN_COUNT, TOO_MANY_PARAMS,
 };
 use std::path::{Path, PathBuf};
 
@@ -61,6 +62,7 @@ fn symbol(
         defer_in_loop: Vec::new(),
         goroutine_in_unbounded_loop: Vec::new(),
         membership_test_in_loop: Vec::new(),
+        sync_io_calls: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -1240,6 +1242,93 @@ fn flags_one_finding_per_membership_test_naming_the_scanned_list() {
     assert!(lines.contains(&Some(7)));
     assert!(findings.iter().any(|f| f.detail.contains("allowed")));
     assert!(findings_for(&report, "clean", FindingKind::MembershipTestInLoop).is_empty());
+}
+
+#[test]
+fn flags_sync_io_only_in_files_the_caller_marks_as_hotspots() {
+    let mut hot = symbol(
+        "hot.rs",
+        "serve",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    hot.sync_io_calls = vec![
+        SyncIoCallRef {
+            line: 3,
+            callee_name: "read_to_string".to_string(),
+        },
+        SyncIoCallRef {
+            line: 6,
+            callee_name: "write_all".to_string(),
+        },
+    ];
+    // Identical structural signal, different file.
+    let mut cold = symbol(
+        "cold.rs",
+        "setup",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    cold.sync_io_calls = vec![SyncIoCallRef {
+        line: 4,
+        callee_name: "read_to_string".to_string(),
+    }];
+
+    let idx = index(vec![
+        file_record("hot.rs", vec![hot], Vec::new()),
+        file_record("cold.rs", vec![cold], Vec::new()),
+    ]);
+    let graph = RepoGraph::build(&idx);
+    let hot_files: std::collections::HashSet<PathBuf> = [PathBuf::from("hot.rs")].into();
+    let report = analyze_with_hotspots(&idx, &graph, &HealthWeights::default(), &hot_files);
+
+    let findings = findings_for(&report, "serve", FindingKind::HotPathSyncIo);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(3)));
+    assert!(lines.contains(&Some(6)));
+    assert!(findings.iter().any(|f| f.detail.contains("read_to_string")));
+
+    // The empirical half of the signal is what separates these two --
+    // `setup` has the same blocking call and is deliberately silent.
+    assert!(findings_for(&report, "setup", FindingKind::HotPathSyncIo).is_empty());
+}
+
+#[test]
+fn analyze_reports_no_hot_path_findings_without_hotspot_data() {
+    let mut sym_with_io = symbol(
+        "hot.rs",
+        "serve",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    sym_with_io.sync_io_calls = vec![SyncIoCallRef {
+        line: 3,
+        callee_name: "read_to_string".to_string(),
+    }];
+
+    let idx = index(vec![file_record("hot.rs", vec![sym_with_io], Vec::new())]);
+    let graph = RepoGraph::build(&idx);
+    // Plain `analyze` has no git data, so the marker can't fire -- every
+    // pre-existing caller keeps its exact previous behavior.
+    let report = analyze(&idx, &graph);
+
+    assert!(findings_for(&report, "serve", FindingKind::HotPathSyncIo).is_empty());
 }
 
 #[test]

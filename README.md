@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  thirty rule-based markers: long functions, high cyclomatic complexity,
+  thirty-one rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and eighteen of repowise's Performance-signal
+  declared parameter types), and all nineteen of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -152,7 +152,11 @@ specifics per layer), not full feature parity:
   (`membership_test_in_loop` — `x in xs`/`xs.contains(&x)`/
   `xs.includes(x)` inside a loop body where a local binding shows `xs`
   is a list rather than a set/map, so each check is an O(n) scan and the
-  loop is O(n × m) where it reads as linear; Rust/Python/TS+JS only)
+  loop is O(n × m) where it reads as linear; Rust/Python/TS+JS only),
+  and synchronous I/O on a hot path (`hot_path_sync_io` — a blocking
+  file/network call in a function whose file the git-hotspot analytics
+  rank among the repo's most churn-and-complexity-heavy, combining a
+  structural signal with an empirical one; Rust/Python/TS+JS only)
   — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
@@ -191,7 +195,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
 Every other repowise language is unimplemented. The health scorer now
-implements 30 distinct markers. That exceeds repowise's headline "~25
+implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
 (issue #72 alone enumerates 19). The remaining gap is not a count but a
@@ -248,7 +252,9 @@ dashboard is one static page with no per-file drill-down or live search
   channel-operation bound classifier scoped per enclosing loop
   (`goroutine_in_unbounded_loop`), and (Rust/Python/TS+JS) a
   binding-shape collection-kind classifier paired with a membership-test
-  extractor (`membership_test_in_loop`).
+  extractor (`membership_test_in_loop`), and (Rust/Python/TS+JS) a
+  whole-body rescan of the same I/O-callee table
+  (`hot_path_sync_io`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -361,6 +367,7 @@ to `[0, 10]`:
 | Defer in loop (`defer_in_loop`) | a Go `defer` statement inside a loop body | −0.6 |
 | Goroutine in unbounded loop (`goroutine_in_unbounded_loop`) | a Go `go` statement inside a loop body with no channel-based concurrency bound | −0.6 |
 | Membership test in loop (`membership_test_in_loop`) | an `x in xs`-shaped test inside a loop where a local binding shows `xs` is a list, not a set | −0.6 |
+| Hot-path sync I/O (`hot_path_sync_io`) | a blocking I/O call in a function whose file ranks among the repo's top git hotspots | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -376,7 +383,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the thirty; everything else keeps its default
+# only overriding two of the thirty-one; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -1039,6 +1046,52 @@ Its default penalty (−0.6) sits in the quadratic-*shape* tier alongside
 `nested_loop_quadratic`. Tests pin the list-vs-set split in all three
 languages, plus `not in`, inline list literals, unknown bindings, and
 rebinding.
+
+**Hot-path sync I/O (`hot_path_sync_io`)** is the only marker in this
+crate built from **two independent signals**: a structural one (a
+blocking file/network call is present in the function) and an empirical
+one (git says this file is a hotspot — high churn × complexity).
+Neither alone is a finding. A blocking read in a rarely-run setup path
+is fine, and a hotspot with no blocking I/O has nothing to fix here; it's
+the intersection that's worth reporting, and it's a much
+higher-precision flag than either half would be.
+
+**How the git data gets in without compromising the crate.**
+`repowise-health` is deliberately a pure function of the index and the
+call graph — it knows nothing about git, and adding a git dependency to
+get one marker would be a bad trade. Instead the *caller* computes which
+files are hot and passes them in as plain paths, via a new entry point:
+
+```rust
+analyze_with_hotspots(&index, &graph, &weights, &hot_files)
+```
+
+`analyze`/`analyze_with_weights` still exist and now delegate with an
+empty set, so every existing caller (docs, dashboard, MCP, server)
+compiles and behaves exactly as before and simply never sees this
+marker. Only `repowise health` currently supplies the set.
+
+"Hot" is a **relative rank**, not an absolute score: hotspot scores are
+churn × complexity and so aren't comparable between repos — "the files
+this repo churns hardest" travels, "score above 500" doesn't. The set is
+the top 10 files, *further capped to a quarter of the repo*, excluding
+anything scoring zero. That second cap matters more than it looks: a
+plain top-10 makes every file in a small repo hot, which silently
+degrades this into "any sync I/O anywhere" and throws away the empirical
+half of the signal that justifies the marker in the first place. (A
+two-file repo gets a top 1; the 10-file bound only starts binding at 40+
+files.)
+
+If git history isn't available — no repo, a shallow clone, git missing —
+the set is empty and the marker silently doesn't fire. Losing one marker
+is a far better outcome than refusing to score the codebase.
+
+The call-recognition half reuses `io_in_loop`'s callee table verbatim;
+what changes is only the scope, a whole-body scan rather than a
+loop-body one. Its default penalty (−0.3) sits in the per-occurrence
+tier alongside `io_in_loop`: an individual blocking call is a real but
+bounded cost that doesn't worsen with input size. The precision here
+comes from the hotspot gate, not from a heavier weight.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

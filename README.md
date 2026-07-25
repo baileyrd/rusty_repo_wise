@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-five rule-based markers: long functions, high cyclomatic complexity,
+  twenty-six rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and thirteen of repowise's Performance-signal
+  declared parameter types), and fourteen of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -130,7 +130,11 @@ specifics per layer), not full feature parity:
   on an enclosing loop), and blocking I/O under a lock
   (`blocking_io_under_lock` — an `io_in_loop`-table call made while a
   mutex/lock is held, serializing every other thread waiting on that lock
-  behind however long the I/O takes; Rust and Python only) — except for
+  behind however long the I/O takes; Rust and Python only), and an
+  array spread in a reduce (`array_spread_in_reduce` — a `.reduce(..)`
+  callback returning `[...acc, x]` instead of mutating and returning the
+  accumulator, which copies the whole array every step and turns a
+  linear fold quadratic; TypeScript/JavaScript only) — except for
   shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
@@ -168,9 +172,14 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 25 of repowise's ~25 markers — see
-"Health scoring" below for which ones and why the rest (the
-ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
+Every other repowise language is unimplemented. The health scorer now
+implements 26 distinct markers. That exceeds repowise's headline "~25
+markers" because that figure counts the Performance-signal work as a
+single item, while this port implements its pattern checks individually
+(issue #72 alone enumerates 19). The remaining gap is not a count but a
+kind: the ML-calibrated organizational-signal markers are still deferred
+— see "Health scoring" below for what is implemented and why the rest
+wait. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
 crate can layer an LLM-written summary on top of each one (`repowise
 generate`, see "LLM-assisted wiki summaries" below) — a first, narrow slice
@@ -213,7 +222,8 @@ dashboard is one static page with no per-file drill-down or live search
   `is_async_fn` classifier feeding a whole-body blocking-call scan
   (`blocking_sync_in_async`), and (Rust/Python) two lock-scope
   extractors reusing the I/O-callee-name table
-  (`blocking_io_under_lock`).
+  (`blocking_io_under_lock`), plus (TS/JS) a `reduce`-callback
+  return-shape extractor (`array_spread_in_reduce`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -321,6 +331,7 @@ to `[0, 10]`:
 | pandas concat in loop (`pd_concat_in_loop`) | a `pd.concat(..)` call inside a loop body | −0.6 |
 | Blocking sync in async (`blocking_sync_in_async`) | a known blocking call inside an `async fn`/`async def` body | −0.6 |
 | Blocking I/O under lock (`blocking_io_under_lock`) | a known I/O-shaped call made while a mutex/lock is held | −0.6 |
+| Array spread in reduce (`array_spread_in_reduce`) | a `.reduce(..)` callback returning an array literal that spreads its own accumulator | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -336,7 +347,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-five; everything else keeps its default
+# only overriding two of the twenty-six; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -831,6 +842,34 @@ Its default penalty (−0.6) matches `blocking_sync_in_async`'s and for
 the same reason: the cost lands on threads *other* than the one running
 the call. The other 14 parsed languages have no lock-scope extractor yet
 and so never produce entries here.
+
+**Array spread in reduce (`array_spread_in_reduce`)** flags a
+`.reduce(..)`/`.reduceRight(..)` callback that builds its result with
+array spread — `(acc, x) => [...acc, x]` — instead of mutating and
+returning the accumulator. The spread copies the *entire* accumulator on
+every step, so a linear fold becomes quadratic. It's a subtle trap
+precisely because the spread reads as idiomatic, immutable-style JS and
+gives no visual signal that it's doing a full copy each iteration.
+**TypeScript/JavaScript only** — this targets the JS array method, which
+has no equivalent in this port's other languages.
+
+Detection is self-contained in the `reduce` call rather than depending
+on any enclosing loop or function context: find a `call_expression`
+whose callee property is `reduce`/`reduceRight`, take its first
+argument as the callback, read that callback's first parameter as the
+accumulator, then check whether the callback's returned expression is an
+array literal containing a `spread_element` of that same accumulator.
+Both callback body forms are handled — the expression-bodied arrow
+(`=> [...acc, x]`) and a block body with a `return`.
+
+Two deliberate limits: only *top-level* returns in a block body are
+considered, so a `return` nested inside an `if` isn't found; and the
+spread must name the callback's own accumulator parameter, so spreading
+some unrelated array is not flagged. Both err toward under-reporting
+rather than guessing. The mutate-and-return form (`acc.push(x); return
+acc`) is the recommended fix and never matches — a test pins that, along
+with a plain scalar fold (`(acc, x) => acc + x`), which returns no array
+at all. Its default penalty (−0.6) sits in the quadratic-*shape* tier.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

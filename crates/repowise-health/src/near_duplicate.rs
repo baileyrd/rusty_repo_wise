@@ -304,6 +304,7 @@ mod tests {
             pd_concat_in_loop: Vec::new(),
             blocking_sync_in_async: Vec::new(),
             blocking_io_under_lock: Vec::new(),
+            array_spread_in_reduce: Vec::new(),
             param_count: 1,
             primitive_param_count: 0,
             // Distinct per symbol (keyed off start_line) so two

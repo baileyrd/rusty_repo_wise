@@ -139,6 +139,7 @@ impl<'a> Walker<'a> {
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
+                        array_spread_in_reduce: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -180,6 +181,7 @@ impl<'a> Walker<'a> {
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
+                        array_spread_in_reduce: Vec::new(),
                     });
                 }
             }
@@ -416,6 +418,15 @@ impl<'a> Walker<'a> {
                 )
             })
             .unwrap_or_default();
+        let array_spread_in_reduce = body
+            .map(|b| {
+                metrics::array_spreads_in_reduce(
+                    b,
+                    |n| spread_reduce_accumulator(n, self.source),
+                    is_nested_function,
+                )
+            })
+            .unwrap_or_default();
         let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
         self.symbols.push(Symbol {
             id: id.clone(),
@@ -451,6 +462,7 @@ impl<'a> Walker<'a> {
             pd_concat_in_loop: Vec::new(),
             blocking_sync_in_async: Vec::new(),
             blocking_io_under_lock: Vec::new(),
+            array_spread_in_reduce,
         });
         self.scope_stack.push(id);
         self.visit_children(func_node);
@@ -604,6 +616,81 @@ fn is_concurrency_combinator(name: &str) -> bool {
         name,
         "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any"
     )
+}
+
+/// A `.reduce(..)`/`.reduceRight(..)` call whose callback returns an
+/// array literal spreading its own accumulator, for
+/// `array_spread_in_reduce` (issue #194): `(acc, x) => [...acc, x]`.
+/// Returns the accumulator's parameter name.
+///
+/// `[...acc, x]` copies the entire accumulator on every step, so a
+/// linear fold becomes quadratic -- a subtle trap, because the spread
+/// reads as idiomatic immutable-style JS and gives no visual signal of
+/// the copy. The mutate-and-return form (`acc.push(x); return acc`) is
+/// the fix and never matches here.
+fn spread_reduce_accumulator(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let func = node.child_by_field_name("function")?;
+    if func.kind() != "member_expression" {
+        return None;
+    }
+    let property = func.child_by_field_name("property")?;
+    if !matches!(text(property, source), "reduce" | "reduceRight") {
+        return None;
+    }
+    let callback = node.child_by_field_name("arguments")?.named_child(0)?;
+    if !matches!(callback.kind(), "arrow_function" | "function_expression") {
+        return None;
+    }
+    let accumulator = callback_first_param(callback, source)?;
+    let returned = callback_return_expression(callback)?;
+    if returned.kind() != "array" {
+        return None;
+    }
+    let mut cursor = returned.walk();
+    let spreads_accumulator = returned.named_children(&mut cursor).any(|element| {
+        element.kind() == "spread_element"
+            && element
+                .named_child(0)
+                .is_some_and(|inner| text(inner, source) == accumulator)
+    });
+    if spreads_accumulator {
+        Some(accumulator)
+    } else {
+        None
+    }
+}
+
+/// A callback's first parameter name -- the accumulator, for a `reduce`
+/// callback. Handles both `(acc, x) => ..` (a `formal_parameters` list)
+/// and a single-parameter `acc => ..` (a bare identifier).
+fn callback_first_param(callback: Node, source: &str) -> Option<String> {
+    if let Some(single) = callback.child_by_field_name("parameter") {
+        return Some(text(single, source).to_string());
+    }
+    let params = callback.child_by_field_name("parameters")?;
+    Some(text(params.named_child(0)?, source).to_string())
+}
+
+/// The expression a callback returns: the body itself for an
+/// expression-bodied arrow (`=> [...acc, x]`), or the value of a
+/// top-level `return` in a block body.
+///
+/// Only top-level returns are considered -- a `return` nested inside an
+/// `if` isn't found. Coarse in the safe direction: it under-reports
+/// rather than guessing about conditional accumulator shapes.
+fn callback_return_expression<'a>(callback: Node<'a>) -> Option<Node<'a>> {
+    let body = callback.child_by_field_name("body")?;
+    if body.kind() != "statement_block" {
+        return Some(body);
+    }
+    let mut cursor = body.walk();
+    let returned = body
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "return_statement");
+    returned.and_then(|r| r.named_child(0))
 }
 
 /// The base collection a `for...of`/`for...in` loop iterates over, for
@@ -1186,6 +1273,31 @@ mod tests {
         // not both to the `Object` global -- otherwise two unrelated
         // collections would falsely compare equal.
         assert!(object_keys.nested_loop_quadratic.is_empty());
+    }
+
+    #[test]
+    fn flags_spread_accumulator_reduce_but_not_a_mutating_one() {
+        let rec = extract_js(
+            "function spreads(xs) {\n  return xs.reduce((acc, x) => [...acc, x], []);\n}\n\nfunction spreadsInBlock(xs) {\n  return xs.reduce((acc, x) => { return [...acc, x]; }, []);\n}\n\nfunction mutates(xs) {\n  return xs.reduce((acc, x) => { acc.push(x); return acc; }, []);\n}\n\nfunction sums(xs) {\n  return xs.reduce((acc, x) => acc + x, 0);\n}\n",
+        );
+        let spreads = rec.symbols.iter().find(|s| s.name == "spreads").unwrap();
+        let spreads_in_block = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "spreadsInBlock")
+            .unwrap();
+        let mutates = rec.symbols.iter().find(|s| s.name == "mutates").unwrap();
+        let sums = rec.symbols.iter().find(|s| s.name == "sums").unwrap();
+
+        // Both the expression-bodied and block-bodied spread forms.
+        assert_eq!(spreads.array_spread_in_reduce.len(), 1);
+        assert_eq!(spreads.array_spread_in_reduce[0].accumulator, "acc");
+        assert_eq!(spreads_in_block.array_spread_in_reduce.len(), 1);
+
+        // The mutate-and-return form is the fix -- never flagged.
+        assert!(mutates.array_spread_in_reduce.is_empty());
+        // A plain scalar fold returns no array at all.
+        assert!(sums.array_spread_in_reduce.is_empty());
     }
 
     #[test]

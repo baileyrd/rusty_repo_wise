@@ -4,11 +4,11 @@
 //! resolution, which isn't relevant here and would otherwise touch disk.
 
 use repowise_core::{
-    BlockingIoUnderLockRef, BlockingSyncInAsyncRef, CallRef, ComplexConditionalRef, FileRecord,
-    IoInLoopRef, JsonParseInLoopRef, Language, ListInsertZeroInLoopRef, LockInLoopRef,
-    NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
-    RepoIndex, ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef, Symbol,
-    SymbolKind,
+    ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, CallRef,
+    ComplexConditionalRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
+    ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
+    PdConcatInLoopRef, RegexCompileInLoopRef, RepoIndex, ResourceConstructionInLoopRef,
+    SerialAwaitInLoopRef, StringConcatInLoopRef, Symbol, SymbolKind,
 };
 use repowise_graph::RepoGraph;
 use repowise_health::{
@@ -55,6 +55,7 @@ fn symbol(
         pd_concat_in_loop: Vec::new(),
         blocking_sync_in_async: Vec::new(),
         blocking_io_under_lock: Vec::new(),
+        array_spread_in_reduce: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -973,6 +974,57 @@ fn flags_one_finding_per_blocking_io_under_lock_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(4)));
     assert!(lines.contains(&Some(6)));
     assert!(findings_for(&report, "clean", FindingKind::BlockingIoUnderLock).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_array_spread_in_reduce_pointing_at_its_own_line() {
+    let mut spreads = symbol(
+        "fold.ts",
+        "spreads",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    spreads.array_spread_in_reduce = vec![
+        ArraySpreadInReduceRef {
+            line: 3,
+            accumulator: "acc".to_string(),
+        },
+        ArraySpreadInReduceRef {
+            line: 7,
+            accumulator: "out".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "fold.ts",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "fold.ts",
+        vec![spreads, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "spreads", FindingKind::ArraySpreadInReduce);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(3)));
+    assert!(lines.contains(&Some(7)));
+    assert!(findings_for(&report, "clean", FindingKind::ArraySpreadInReduce).is_empty());
 }
 
 #[test]

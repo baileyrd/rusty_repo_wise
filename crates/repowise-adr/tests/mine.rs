@@ -97,6 +97,7 @@ fn mines_and_links_adrs_and_decision_commits() {
         pd_concat_in_loop: Vec::new(),
         blocking_sync_in_async: Vec::new(),
         blocking_io_under_lock: Vec::new(),
+        array_spread_in_reduce: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,

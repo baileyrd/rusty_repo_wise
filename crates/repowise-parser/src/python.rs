@@ -266,6 +266,10 @@ impl<'a> Walker<'a> {
                         pd_concat_in_loop,
                         blocking_sync_in_async,
                         blocking_io_under_lock,
+                        // `array_spread_in_reduce` is TypeScript/JavaScript-only
+                        // (issue #194): it targets the JS array method, which has no
+                        // equivalent in this port's other languages.
+                        array_spread_in_reduce: Vec::new(),
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -306,6 +310,7 @@ impl<'a> Walker<'a> {
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
+                        array_spread_in_reduce: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);

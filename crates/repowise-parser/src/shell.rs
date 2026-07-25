@@ -123,6 +123,7 @@ impl<'a> Walker<'a> {
                         pd_concat_in_loop: Vec::new(),
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
+                        array_spread_in_reduce: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

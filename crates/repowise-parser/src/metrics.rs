@@ -5,10 +5,10 @@
 //! deterministic scoring.
 
 use repowise_core::{
-    BlockingIoUnderLockRef, BlockingSyncInAsyncRef, ComplexConditionalRef, IoInLoopRef,
-    JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef,
-    NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef,
-    SerialAwaitInLoopRef, StringConcatInLoopRef,
+    ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, ComplexConditionalRef,
+    IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
+    NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
+    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -640,6 +640,21 @@ pub fn ios_inside_lock_block(
     .into_iter()
     .map(|(line, callee_name)| BlockingIoUnderLockRef { line, callee_name })
     .collect()
+}
+
+/// `.reduce(..)` callbacks spreading their accumulator into a new array,
+/// for `array_spread_in_reduce` (issue #194). Scans the whole body --
+/// the shape is self-contained in the `reduce` call, so no enclosing
+/// loop or function context is involved.
+pub fn array_spreads_in_reduce(
+    body: Node,
+    spread_reduce_accumulator: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<ArraySpreadInReduceRef> {
+    matches_in_body(body, spread_reduce_accumulator, is_nested_function)
+        .into_iter()
+        .map(|(line, accumulator)| ArraySpreadInReduceRef { line, accumulator })
+        .collect()
 }
 
 /// Blocking synchronous calls found anywhere in an async function's

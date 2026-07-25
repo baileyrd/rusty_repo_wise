@@ -334,6 +334,13 @@ pub struct Symbol {
     /// isn't implemented for yet -- currently Rust and Python, the two
     /// the issue scoped it to.
     pub blocking_io_under_lock: Vec<BlockingIoUnderLockRef>,
+    /// `.reduce(..)` callbacks that build their result with array spread
+    /// (`(acc, x) => [...acc, x]`) instead of mutating and returning the
+    /// accumulator. The spread copies the entire accumulator on every
+    /// step, turning a linear fold into a quadratic one. TypeScript/
+    /// JavaScript only -- this is specific to the JS array method, with
+    /// no equivalent in this port's other languages.
+    pub array_spread_in_reduce: Vec<ArraySpreadInReduceRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -466,6 +473,15 @@ pub struct BlockingSyncInAsyncRef {
 pub struct BlockingIoUnderLockRef {
     pub line: usize,
     pub callee_name: String,
+}
+
+/// A single `.reduce(..)` callback spreading its accumulator into a new
+/// array. `line` points at the `reduce` call; `accumulator` is the
+/// callback's first parameter name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArraySpreadInReduceRef {
+    pub line: usize,
+    pub accumulator: String,
 }
 
 impl Symbol {

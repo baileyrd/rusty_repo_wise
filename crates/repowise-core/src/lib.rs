@@ -348,6 +348,12 @@ pub struct Symbol {
     /// and for languages this extraction isn't implemented for yet --
     /// currently Rust, Python, and TypeScript/JavaScript.
     pub sql_cartesian_join: Vec<SqlCartesianJoinRef>,
+    /// `defer` statements inside a loop body. Go defers run at the
+    /// *enclosing function's* return, not at the end of the iteration
+    /// that created them, so a `defer f.Close()` in a loop holds every
+    /// file open until the whole function exits. Go only -- no other
+    /// language in this port has a defer-to-function-exit construct.
+    pub defer_in_loop: Vec<DeferInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -498,6 +504,16 @@ pub struct ArraySpreadInReduceRef {
 pub struct SqlCartesianJoinRef {
     pub line: usize,
     pub tables: String,
+}
+
+/// A single `defer` statement found inside a loop body. `line` points at
+/// the `defer` itself; `callee_name` is the deferred call's function or
+/// method name (`Close`, `Unlock`, ...), which is what makes the finding
+/// actionable -- the resource being held is named right there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
 }
 
 impl Symbol {

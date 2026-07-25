@@ -5,7 +5,7 @@
 
 use repowise_core::{
     ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, CallRef,
-    ComplexConditionalRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
+    ComplexConditionalRef, DeferInLoopRef, FileRecord, IoInLoopRef, JsonParseInLoopRef, Language,
     ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
     PdConcatInLoopRef, RegexCompileInLoopRef, RepoIndex, ResourceConstructionInLoopRef,
     SerialAwaitInLoopRef, SqlCartesianJoinRef, StringConcatInLoopRef, Symbol, SymbolKind,
@@ -57,6 +57,7 @@ fn symbol(
         blocking_io_under_lock: Vec::new(),
         array_spread_in_reduce: Vec::new(),
         sql_cartesian_join: Vec::new(),
+        defer_in_loop: Vec::new(),
         param_count,
         primitive_param_count: 0,
         body_hash,
@@ -1077,6 +1078,60 @@ fn flags_one_finding_per_sql_cartesian_join_pointing_at_its_own_line() {
     assert!(lines.contains(&Some(3)));
     assert!(lines.contains(&Some(7)));
     assert!(findings_for(&report, "clean", FindingKind::SqlCartesianJoin).is_empty());
+}
+
+#[test]
+fn flags_one_finding_per_defer_in_loop_naming_the_deferred_call() {
+    let mut leaky = symbol(
+        "server.go",
+        "leaky",
+        SymbolKind::Function,
+        1,
+        10,
+        None,
+        2,
+        1,
+        None,
+    );
+    leaky.defer_in_loop = vec![
+        DeferInLoopRef {
+            line: 4,
+            callee_name: "Close".to_string(),
+        },
+        DeferInLoopRef {
+            line: 8,
+            callee_name: "Unlock".to_string(),
+        },
+    ];
+    let clean = symbol(
+        "server.go",
+        "clean",
+        SymbolKind::Function,
+        12,
+        16,
+        None,
+        1,
+        1,
+        None,
+    );
+
+    let idx = index(vec![file_record(
+        "server.go",
+        vec![leaky, clean],
+        Vec::new(),
+    )]);
+    let graph = RepoGraph::build(&idx);
+    let report = analyze(&idx, &graph);
+
+    let findings = findings_for(&report, "leaky", FindingKind::DeferInLoop);
+    assert_eq!(findings.len(), 2);
+    let lines: Vec<Option<usize>> = findings.iter().map(|f| f.line).collect();
+    assert!(lines.contains(&Some(4)));
+    assert!(lines.contains(&Some(8)));
+    // The deferred call's name is what makes the finding actionable.
+    assert!(findings.iter().any(|f| f.detail.contains("Close")));
+    assert!(findings.iter().any(|f| f.detail.contains("Unlock")));
+    assert!(findings_for(&report, "clean", FindingKind::DeferInLoop).is_empty());
 }
 
 #[test]

@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and fifteen of
+//! `repowise_core::Symbol::primitive_param_count`), and sixteen of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -56,7 +56,10 @@
 //! `repowise_core::Symbol::array_spread_in_reduce`), and SQL strings
 //! that look like accidental cartesian joins (`sql_cartesian_join`,
 //! Rust/Python/TS+JS -- see
-//! `repowise_core::Symbol::sql_cartesian_join`).
+//! `repowise_core::Symbol::sql_cartesian_join`), and `defer` statements
+//! inside a loop body (`defer_in_loop`, Go-only, since no other language
+//! here has a defer-to-function-exit construct -- see
+//! `repowise_core::Symbol::defer_in_loop`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -252,6 +255,15 @@ fn default_array_spread_in_reduce() -> f64 {
 fn default_sql_cartesian_join() -> f64 {
     0.6
 }
+// The heavier tier (issue #189) for the same reason as
+// `blocking_io_under_lock`: the cost doesn't land on the flagged line.
+// One `defer` inside a loop is a single occurrence but leaks one
+// resource *per iteration*, so the damage scales with the loop's trip
+// count rather than with how many times the marker fires -- counting it
+// linearly like `lock_in_loop` would understate it badly.
+fn default_defer_in_loop() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -324,6 +336,8 @@ pub struct HealthWeights {
     pub array_spread_in_reduce: f64,
     #[serde(default = "default_sql_cartesian_join")]
     pub sql_cartesian_join: f64,
+    #[serde(default = "default_defer_in_loop")]
+    pub defer_in_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -356,6 +370,7 @@ impl Default for HealthWeights {
             blocking_io_under_lock: default_blocking_io_under_lock(),
             array_spread_in_reduce: default_array_spread_in_reduce(),
             sql_cartesian_join: default_sql_cartesian_join(),
+            defer_in_loop: default_defer_in_loop(),
         }
     }
 }
@@ -398,6 +413,7 @@ impl HealthWeights {
             FindingKind::BlockingIoUnderLock => self.blocking_io_under_lock,
             FindingKind::ArraySpreadInReduce => self.array_spread_in_reduce,
             FindingKind::SqlCartesianJoin => self.sql_cartesian_join,
+            FindingKind::DeferInLoop => self.defer_in_loop,
         }
     }
 }
@@ -431,6 +447,7 @@ pub enum FindingKind {
     BlockingIoUnderLock,
     ArraySpreadInReduce,
     SqlCartesianJoin,
+    DeferInLoop,
 }
 
 impl FindingKind {
@@ -463,6 +480,7 @@ impl FindingKind {
             FindingKind::BlockingIoUnderLock => "blocking-io-under-lock",
             FindingKind::ArraySpreadInReduce => "array-spread-in-reduce",
             FindingKind::SqlCartesianJoin => "sql-cartesian-join",
+            FindingKind::DeferInLoop => "defer-in-loop",
         }
     }
 }
@@ -903,6 +921,24 @@ fn check_function_markers(
                 "SQL joins tables `{}` with no predicate connecting them -- this returns \
                  the full cartesian product; add an ON/WHERE join condition",
                 query.tables
+            ),
+        });
+    }
+    // Already filtered to `defer`s lexically inside a loop body at
+    // extraction time (see `repowise_parser::metrics::defers_in_loops`);
+    // every entry here is already flagged.
+    for deferred in &sym.defer_in_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(deferred.line),
+            kind: FindingKind::DeferInLoop,
+            detail: format!(
+                "`defer {}(..)` inside a loop -- Go runs deferred calls when the *function* \
+                 returns, not at the end of each iteration, so one is queued per iteration and \
+                 the resource stays held until the whole loop finishes; move the loop body into \
+                 its own function, or call `{}` explicitly instead of deferring it",
+                deferred.callee_name, deferred.callee_name
             ),
         });
     }

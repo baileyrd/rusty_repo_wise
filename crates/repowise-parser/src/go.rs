@@ -105,6 +105,7 @@ impl<'a> Walker<'a> {
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
+                        defer_in_loop: Vec::new(),
                         param_count: 0,
                         primitive_param_count: 0,
                         body_hash: None,
@@ -150,6 +151,16 @@ impl<'a> Walker<'a> {
                         .unwrap_or(0);
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
+                    let defer_in_loop = body
+                        .map(|b| {
+                            metrics::defers_in_loops(
+                                b,
+                                is_loop,
+                                |n| defer_callee(n, self.source),
+                                is_nested_function,
+                            )
+                        })
+                        .unwrap_or_default();
                     let kind = if parent.is_some() {
                         SymbolKind::Method
                     } else {
@@ -182,6 +193,7 @@ impl<'a> Walker<'a> {
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
+                        defer_in_loop,
                         param_count,
                         primitive_param_count: 0,
                         body_hash,
@@ -228,6 +240,7 @@ impl<'a> Walker<'a> {
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
                         sql_cartesian_join: Vec::new(),
+                        defer_in_loop: Vec::new(),
                         param_count,
                         primitive_param_count: 0,
                         body_hash: None,
@@ -320,6 +333,31 @@ fn is_decision(n: Node, source: &str) -> bool {
             .unwrap_or(false),
         _ => false,
     }
+}
+
+/// Go has exactly one loop keyword: `for` covers the C-style
+/// three-clause form, the condition-only form, the bare infinite form,
+/// and `for ... := range ...`, all under a single `for_statement` node.
+fn is_loop(n: Node) -> bool {
+    n.kind() == "for_statement"
+}
+
+/// For a `defer_statement`, the name of the call it defers (`Close` for
+/// `defer f.Close()`, `cleanup` for `defer cleanup()`); `None` for every
+/// other node. A defer always wraps a call expression -- Go rejects
+/// `defer x` for a non-call `x` at compile time -- so a `defer_statement`
+/// without one is a parse artifact and is skipped rather than reported
+/// with an empty name.
+fn defer_callee(n: Node, source: &str) -> Option<String> {
+    if n.kind() != "defer_statement" {
+        return None;
+    }
+    let mut cursor = n.walk();
+    let call = n
+        .children(&mut cursor)
+        .find(|c| c.kind() == "call_expression")?;
+    let name = call_target_name(call.child_by_field_name("function")?, source);
+    Some(name).filter(|s| !s.is_empty())
 }
 
 /// Only nested named function declarations get their own symbol; a
@@ -422,5 +460,91 @@ mod tests {
         let rec = extract_str("package app\n\ntype Shape interface {\n\tArea() int\n}\n");
         let area = rec.symbols.iter().find(|s| s.name == "Area").unwrap();
         assert_eq!(area.complexity, 0);
+    }
+
+    #[test]
+    fn flags_defer_inside_a_loop_but_not_one_in_the_function_body() {
+        let rec = extract_str(
+            "package app\n\
+             \n\
+             func leaky(paths []string) {\n\
+             \tdefer cleanup()\n\
+             \tfor _, p := range paths {\n\
+             \t\tf := open(p)\n\
+             \t\tdefer f.Close()\n\
+             \t}\n\
+             }\n\
+             \n\
+             func tidy(paths []string) {\n\
+             \tfor _, p := range paths {\n\
+             \t\tf := open(p)\n\
+             \t\tf.Close()\n\
+             \t}\n\
+             \tdefer cleanup()\n\
+             }\n",
+        );
+
+        let leaky = rec.symbols.iter().find(|s| s.name == "leaky").unwrap();
+        assert_eq!(leaky.defer_in_loop.len(), 1);
+        assert_eq!(leaky.defer_in_loop[0].callee_name, "Close");
+        assert_eq!(leaky.defer_in_loop[0].line, 7);
+
+        // `defer cleanup()` sits directly in the function body in both
+        // functions -- that's the correct use, and never flagged.
+        let tidy = rec.symbols.iter().find(|s| s.name == "tidy").unwrap();
+        assert!(tidy.defer_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_defer_in_every_go_loop_form_and_at_any_nesting_depth() {
+        let rec = extract_str(
+            "package app\n\
+             \n\
+             func everyForm(rows [][]string) {\n\
+             \tfor i := 0; i < len(rows); i++ {\n\
+             \t\tdefer countUp()\n\
+             \t\tfor _, cell := range rows[i] {\n\
+             \t\t\tdefer release(cell)\n\
+             \t\t}\n\
+             \t}\n\
+             \tfor {\n\
+             \t\tdefer unlock()\n\
+             \t\tbreak\n\
+             \t}\n\
+             }\n",
+        );
+
+        let sym = rec.symbols.iter().find(|s| s.name == "everyForm").unwrap();
+        let names: Vec<_> = sym
+            .defer_in_loop
+            .iter()
+            .map(|d| d.callee_name.as_str())
+            .collect();
+        // Three-clause `for`, `for ... := range`, and the bare infinite
+        // `for` are all one `for_statement` node kind, and the walk keeps
+        // reporting once inside a loop regardless of how deep it goes.
+        assert_eq!(names, vec!["countUp", "release", "unlock"]);
+    }
+
+    #[test]
+    fn a_defer_in_a_nested_function_literals_loop_belongs_to_the_outer_symbol() {
+        // Go's `is_nested_function` only skips nested *declarations*; a
+        // `func() {...}` literal has no symbol of its own, so its loops
+        // fold into the enclosing function, same as its complexity does.
+        let rec = extract_str(
+            "package app\n\
+             \n\
+             func outer(paths []string) {\n\
+             \trun(func() {\n\
+             \t\tfor _, p := range paths {\n\
+             \t\t\tdefer close(p)\n\
+             \t\t}\n\
+             \t})\n\
+             }\n",
+        );
+
+        let outer = rec.symbols.iter().find(|s| s.name == "outer").unwrap();
+        assert_eq!(outer.defer_in_loop.len(), 1);
+        assert_eq!(outer.defer_in_loop[0].callee_name, "close");
     }
 }

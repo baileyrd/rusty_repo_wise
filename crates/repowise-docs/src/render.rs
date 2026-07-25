@@ -138,6 +138,7 @@ mod tests {
             blocking_io_under_lock: Vec::new(),
             array_spread_in_reduce: Vec::new(),
             sql_cartesian_join: Vec::new(),
+            defer_in_loop: Vec::new(),
             param_count: 1,
             primitive_param_count: 0,
             body_hash: None,

@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-seven rule-based markers: long functions, high cyclomatic complexity,
+  twenty-eight rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and fifteen of repowise's Performance-signal
+  declared parameter types), and sixteen of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -138,7 +138,11 @@ specifics per layer), not full feature parity:
   cartesian join (`sql_cartesian_join` — a query string listing several
   comma-joined tables with no predicate connecting them, silently
   returning `n × m` rows; a coarse text scan of string literals, not a
-  SQL parse, in Rust/Python/TS+JS) — except for shell scripts,
+  SQL parse, in Rust/Python/TS+JS), and a `defer` in a loop
+  (`defer_in_loop` — a Go `defer` statement inside a loop body, where the
+  deferred call runs at the enclosing *function's* return rather than at
+  the end of the iteration that queued it, so every resource stays held
+  until the whole loop finishes; Go only) — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -176,7 +180,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
 Every other repowise language is unimplemented. The health scorer now
-implements 27 distinct markers. That exceeds repowise's headline "~25
+implements 28 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
 (issue #72 alone enumerates 19). The remaining gap is not a count but a
@@ -228,7 +232,8 @@ dashboard is one static page with no per-file drill-down or live search
   (`blocking_io_under_lock`), plus (TS/JS) a `reduce`-callback
   return-shape extractor (`array_spread_in_reduce`), and a
   language-agnostic string-literal SQL scanner
-  (`sql_cartesian_join`).
+  (`sql_cartesian_join`), and (Go) the first Go loop classifier plus a
+  `defer`-statement callee extractor (`defer_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -338,6 +343,7 @@ to `[0, 10]`:
 | Blocking I/O under lock (`blocking_io_under_lock`) | a known I/O-shaped call made while a mutex/lock is held | −0.6 |
 | Array spread in reduce (`array_spread_in_reduce`) | a `.reduce(..)` callback returning an array literal that spreads its own accumulator | −0.6 |
 | SQL cartesian join (`sql_cartesian_join`) | a SQL string with comma-joined tables and too few connecting predicates | −0.6 |
+| Defer in loop (`defer_in_loop`) | a Go `defer` statement inside a loop body | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -353,7 +359,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-seven; everything else keeps its default
+# only overriding two of the twenty-eight; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -906,6 +912,33 @@ so unusual formatting can confuse the table list. Its default penalty
 (−0.6) sits in the quadratic-*shape* tier rather than above it —
 arguably the most severe marker in the cluster, but also the most
 heuristic, so it doesn't get its own tier.
+
+**Defer in loop (`defer_in_loop`)** flags a Go `defer` statement inside a
+loop body. Go runs deferred calls when the enclosing *function* returns,
+not at the end of the iteration that queued them, so `defer f.Close()`
+inside a loop over ten thousand paths holds ten thousand file handles
+open until the loop — and the rest of the function — has finished. It's
+one of Go's best-known footguns, and it looks completely correct
+locally: the same line one directory up in the function body is the
+right thing to write.
+
+**Go only**, and unavoidably so: no other language in this port has a
+defer-to-function-exit construct at all, so there is nothing to detect
+elsewhere. This is also the marker that gave Go its first per-language
+classifier — Go sat outside the whole Performance-signal cluster until
+now, and only needed an `is_loop` arm (Go has exactly one loop keyword,
+so the C-style, condition-only, infinite, and `range` forms are all a
+single `for_statement` node) plus a `defer_statement` callee extractor.
+There is no callee-name table here, unlike most of the cluster: the
+`defer` keyword *is* the whole signal, so the finding names the deferred
+call (`Close`, `Unlock`) purely to make itself actionable.
+
+Its default penalty (−0.6) sits in the heavier tier for the same reason
+`blocking_io_under_lock` does — the cost doesn't land on the flagged
+line. A single `defer` in a loop fires the marker once but leaks one
+resource *per iteration*, so the damage scales with the loop's trip
+count rather than with how often the marker matches; counting it
+linearly would understate it badly.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

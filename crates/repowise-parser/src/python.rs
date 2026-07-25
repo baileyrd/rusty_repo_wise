@@ -221,6 +221,18 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let blocking_sync_in_async = if is_async_fn(node) {
+                        body.map(|b| {
+                            metrics::blocking_calls_in_async(
+                                b,
+                                |n| blocking_callee(n, self.source),
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -249,6 +261,7 @@ impl<'a> Walker<'a> {
                         nested_loop_quadratic,
                         serial_await_in_loop,
                         pd_concat_in_loop,
+                        blocking_sync_in_async,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -287,6 +300,7 @@ impl<'a> Walker<'a> {
                         nested_loop_quadratic: Vec::new(),
                         serial_await_in_loop: Vec::new(),
                         pd_concat_in_loop: Vec::new(),
+                        blocking_sync_in_async: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -457,6 +471,63 @@ fn condition_of(n: Node) -> Option<Node> {
 /// ones (`if`/`elif`/`except`/ternary/`match` case).
 fn is_loop(n: Node) -> bool {
     matches!(n.kind(), "for_statement" | "while_statement")
+}
+
+/// True when this `function_definition` is declared `async def`, for
+/// `blocking_sync_in_async` (issue #184). The `async` keyword is an
+/// anonymous token child in tree-sitter-python (not a named node), so
+/// this walks all children rather than just the named ones.
+fn is_async_fn(node: Node) -> bool {
+    if node.kind() != "function_definition" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(|c| c.kind() == "async");
+    found
+}
+
+/// The callee of a blocking synchronous call, for
+/// `blocking_sync_in_async` (issue #184): `time.sleep` for
+/// `time.sleep(1)`, `open` for a bare `open(path)`.
+///
+/// Accepts both the qualified `module.function` form and a bare
+/// identifier callee, because the two need different safety bars: a
+/// bare `sleep`/`get` would be far too generic to match, but a bare
+/// `open(..)` is Python's builtin and distinctive enough. A call
+/// written as a *method* (`fh.open()`) yields the qualified form and so
+/// never matches the bare-`open` entry.
+fn blocking_callee(node: Node, source: &str) -> Option<String> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let func = node.child_by_field_name("function")?;
+    let name = match func.kind() {
+        "attribute" => qualified_call_name(node, source)?,
+        "identifier" => text(func, source).to_string(),
+        _ => return None,
+    };
+    is_blocking_call(&name).then_some(name)
+}
+
+/// A small fixed table of blocking stdlib/`requests` calls -- heuristic
+/// and coarse, like `is_io_call`. Deliberately limited to calls with a
+/// clear async replacement, so every hit has an actionable fix.
+fn is_blocking_call(name: &str) -> bool {
+    matches!(
+        name,
+        "time.sleep"
+            | "requests.get"
+            | "requests.post"
+            | "requests.put"
+            | "requests.delete"
+            | "requests.head"
+            | "requests.request"
+            | "subprocess.run"
+            | "subprocess.call"
+            | "subprocess.check_output"
+            | "os.system"
+            | "open"
+    )
 }
 
 /// A small fixed table of `module.function` paths recognized as a
@@ -1092,5 +1163,40 @@ mod tests {
         // be flagged -- that's the fix, not the problem -- and the
         // `pd.concat` is outside the loop entirely.
         assert!(concat_once.pd_concat_in_loop.is_empty());
+    }
+
+    #[test]
+    fn flags_blocking_calls_in_an_async_def_but_not_a_sync_one() {
+        let rec = extract_str(
+            "import time\nimport requests\n\nasync def blocks(url):\n    time.sleep(1)\n    r = requests.get(url)\n    return r\n\ndef sync_is_fine(url):\n    time.sleep(1)\n    return requests.get(url)\n\nasync def opens_a_file(path):\n    fh = open(path)\n    return fh\n",
+        );
+        let blocks = rec.symbols.iter().find(|s| s.name == "blocks").unwrap();
+        let sync_is_fine = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "sync_is_fine")
+            .unwrap();
+        let opens_a_file = rec
+            .symbols
+            .iter()
+            .find(|s| s.name == "opens_a_file")
+            .unwrap();
+
+        assert_eq!(blocks.blocking_sync_in_async.len(), 2);
+        let names: Vec<&str> = blocks
+            .blocking_sync_in_async
+            .iter()
+            .map(|b| b.callee_name.as_str())
+            .collect();
+        assert!(names.contains(&"time.sleep"));
+        assert!(names.contains(&"requests.get"));
+
+        // The same calls in a plain `def` are not this marker's concern.
+        assert!(sync_is_fine.blocking_sync_in_async.is_empty());
+
+        // A bare builtin `open(..)` is distinctive enough to match on
+        // its own, unlike a bare `sleep`/`get`.
+        assert_eq!(opens_a_file.blocking_sync_in_async.len(), 1);
+        assert_eq!(opens_a_file.blocking_sync_in_async[0].callee_name, "open");
     }
 }

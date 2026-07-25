@@ -33,6 +33,7 @@ fn symbol(file: &str, name: &str, kind: SymbolKind, start_line: usize, end_line:
         nested_loop_quadratic: Vec::new(),
         serial_await_in_loop: Vec::new(),
         pd_concat_in_loop: Vec::new(),
+        blocking_sync_in_async: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,

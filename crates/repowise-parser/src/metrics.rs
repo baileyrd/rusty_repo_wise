@@ -5,9 +5,10 @@
 //! deterministic scoring.
 
 use repowise_core::{
-    ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
-    NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
-    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef,
+    BlockingSyncInAsyncRef, ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef,
+    ListInsertZeroInLoopRef, LockInLoopRef, NestedLoopQuadraticRef, NestedLoopWithIoRef,
+    PdConcatInLoopRef, RegexCompileInLoopRef, ResourceConstructionInLoopRef, SerialAwaitInLoopRef,
+    StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -508,6 +509,51 @@ pub fn ios_in_nested_loops(
     .into_iter()
     .map(|(line, callee_name)| NestedLoopWithIoRef { line, callee_name })
     .collect()
+}
+
+/// Calls anywhere in a body matching `classify`, skipping nested
+/// function bodies. The non-loop counterpart to `matches_in_loops`, for
+/// markers whose context is the enclosing *function* rather than an
+/// enclosing loop.
+fn matches_in_body<T>(
+    body: Node,
+    classify: impl Fn(Node) -> Option<T>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<(usize, T)> {
+    fn walk<T>(
+        node: Node,
+        classify: &dyn Fn(Node) -> Option<T>,
+        is_nested_function: &dyn Fn(Node) -> bool,
+        out: &mut Vec<(usize, T)>,
+    ) {
+        if let Some(value) = classify(node) {
+            out.push((node.start_position().row + 1, value));
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_nested_function(child) {
+                continue;
+            }
+            walk(child, classify, is_nested_function, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(body, &classify, &is_nested_function, &mut out);
+    out
+}
+
+/// Blocking synchronous calls found anywhere in an async function's
+/// body, for `blocking_sync_in_async` (issue #184). The caller decides
+/// whether the enclosing function is async; this just finds the calls.
+pub fn blocking_calls_in_async(
+    body: Node,
+    blocking_callee: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<BlockingSyncInAsyncRef> {
+    matches_in_body(body, blocking_callee, is_nested_function)
+        .into_iter()
+        .map(|(line, callee_name)| BlockingSyncInAsyncRef { line, callee_name })
+        .collect()
 }
 
 /// `pandas.concat` calls found inside a loop body, for

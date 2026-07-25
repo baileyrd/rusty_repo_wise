@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-three rule-based markers: long functions, high cyclomatic complexity,
+  twenty-four rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and eleven of repowise's Performance-signal
+  declared parameter types), and twelve of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -121,7 +121,13 @@ specifics per layer), not full feature parity:
   `pd.concat(..)` accumulating rows one at a time inside a loop body,
   which copies the whole growing DataFrame every iteration and makes the
   loop quadratic; Python only, since pandas has no equivalent in this
-  port's other languages) — except for shell scripts,
+  port's other languages), and a blocking sync call in an async function
+  (`blocking_sync_in_async` — a known blocking call (`std::thread::sleep`,
+  `time.sleep`, `requests.get`, blocking `std::fs`/`open`) inside an
+  `async fn`/`async def`, which stalls the executor thread and every
+  other task sharing it; Rust and Python only, and the one marker in
+  this cluster keyed on the enclosing *function* being async rather than
+  on an enclosing loop) — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -158,7 +164,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 23 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 24 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -199,7 +205,9 @@ dashboard is one static page with no per-file drill-down or live search
   (`nested_loop_quadratic`), and a per-language awaited-call extractor
   with a concurrency-combinator exclusion table
   (`serial_await_in_loop`), and (Python only) a qualified
-  pandas-concat-callee table (`pd_concat_in_loop`).
+  pandas-concat-callee table (`pd_concat_in_loop`), plus (Rust/Python) an
+  `is_async_fn` classifier feeding a whole-body blocking-call scan
+  (`blocking_sync_in_async`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -305,6 +313,7 @@ to `[0, 10]`:
 | Nested loop quadratic (`nested_loop_quadratic`) | an inner loop iterating the same collection as an enclosing loop | −0.6 |
 | Serial await in loop (`serial_await_in_loop`) | an awaited async call inside a loop body (excluding awaits of concurrency combinators) | −0.3 |
 | pandas concat in loop (`pd_concat_in_loop`) | a `pd.concat(..)` call inside a loop body | −0.6 |
+| Blocking sync in async (`blocking_sync_in_async`) | a known blocking call inside an `async fn`/`async def` body | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -320,7 +329,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-three; everything else keeps its default
+# only overriding two of the twenty-four; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -736,6 +745,45 @@ default penalty (−0.6) sits in the quadratic-*shape* tier alongside
 `nested_loop_with_io`/`nested_loop_quadratic` rather than the flat −0.3
 per-occurrence tier, because one such call is an order-of-magnitude
 blowup rather than one extra unit of work.
+
+**Blocking sync in async (`blocking_sync_in_async`)** flags a known
+blocking, synchronous call inside an `async fn`/`async def` body — a
+blocking call on an async executor's worker thread stalls the whole
+reactor, silently degrading every *other* task sharing that thread.
+**Rust and Python only**, the two languages the marker's issue scoped it
+to as having the clearest async-function AST node and a fixed set of
+well-known blocking stdlib calls.
+
+This is the one marker in the Performance-signal cluster whose context
+is the enclosing **function** rather than an enclosing loop, so it
+shares none of the `is_loop` machinery. Instead each language gets an
+`is_async_fn` classifier — Rust checks for a `function_modifiers` child
+containing `async`; Python checks for the anonymous `async` token child
+that tree-sitter-python emits on an `async def` — and the extractor only
+scans a body at all when that returns true. The scan itself is a new
+`repowise-parser::metrics::matches_in_body`, the non-loop counterpart to
+`matches_in_loops`: same nested-function skipping, no loop tracking.
+
+Tables are matched on the qualified two-segment path (`thread::sleep`,
+`fs::read_to_string` for Rust; `time.sleep`, `requests.get`,
+`subprocess.run`, `os.system` for Python), since a bare
+`sleep`/`read`/`get` would be far too generic. Python additionally
+accepts a *bare identifier* callee for `open`, which is distinctive
+enough as a builtin on its own — a call written as a method (`fh.open()`)
+yields the qualified form and so never matches that entry.
+
+One correctness detail worth naming: in Rust, `tokio::fs::read_to_string`
+and `std::fs::read_to_string` reduce to the *same* two-segment path, and
+the async one must not be flagged. A call that is itself being `.await`ed
+is therefore never reported — being awaited is the only local evidence
+distinguishing the async variant from the blocking one. Covered by a
+test.
+
+Its default penalty (−0.6) is elevated above the flat −0.3
+per-occurrence tier for a different reason than the quadratic-shape
+markers: the cost lands on every other task sharing the executor, not
+just on the function containing the call. The other 14 parsed languages
+have no `is_async_fn` classifier yet and so never produce entries here.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

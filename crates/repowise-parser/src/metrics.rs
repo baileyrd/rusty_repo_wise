@@ -8,7 +8,8 @@ use repowise_core::{
     ArraySpreadInReduceRef, BlockingIoUnderLockRef, BlockingSyncInAsyncRef, ComplexConditionalRef,
     IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
     NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
-    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef,
+    ResourceConstructionInLoopRef, SerialAwaitInLoopRef, SqlCartesianJoinRef,
+    StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
 use tree_sitter::Node;
@@ -642,6 +643,101 @@ pub fn ios_inside_lock_block(
     .collect()
 }
 
+/// Clause keywords that terminate a `FROM` or `WHERE` region in the
+/// coarse SQL scan below.
+const SQL_CLAUSE_KEYWORDS: &[&str] = &[
+    " where ", " group ", " order ", " having ", " limit ", " union ", " offset ",
+];
+
+/// The region of `lowered` starting just after `keyword` and ending at
+/// the next clause keyword (or end of string).
+fn sql_clause_after(lowered: &str, keyword: &str) -> Option<(usize, String)> {
+    let start = lowered.find(keyword)? + keyword.len();
+    let rest = &lowered[start..];
+    let end = SQL_CLAUSE_KEYWORDS
+        .iter()
+        .filter_map(|k| rest.find(k))
+        .min()
+        .unwrap_or(rest.len());
+    Some((start, rest[..end].to_string()))
+}
+
+/// Whether a SQL query text looks like an accidental cartesian product:
+/// a comma-separated multi-table `FROM` clause without enough join
+/// predicates to connect the tables. Returns the table names when so.
+///
+/// Deliberately a coarse text scan, not a SQL parse -- the same
+/// heuristic framing as `repowise_workspace::contracts`' route-pattern
+/// table. It only looks at the comma-join form: a `FROM` clause
+/// containing an explicit `JOIN` is left alone entirely, since the
+/// `ON` predicate that belongs to it is the thing that would need
+/// matching up and an explicit join is rarely the accidental case.
+/// A query assembled by string concatenation is invisible to it, since
+/// only one literal is ever in hand at a time.
+pub fn sql_cartesian_join_tables(sql: &str) -> Option<Vec<String>> {
+    let lowered = format!(" {} ", sql.to_lowercase().replace(['\n', '\t'], " "));
+    if !lowered.contains(" select ") {
+        return None;
+    }
+    let (_, from_clause) = sql_clause_after(&lowered, " from ")?;
+    // An explicit `JOIN ... ON` is a different (and usually deliberate)
+    // shape than a comma join -- out of scope here.
+    if from_clause.contains(" join ") {
+        return None;
+    }
+    let tables: Vec<String> = from_clause
+        .split(',')
+        .filter_map(|entry| entry.split_whitespace().next().map(str::to_string))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tables.len() < 2 {
+        return None;
+    }
+    // Each additional table needs at least one predicate tying it to
+    // another, so `n` tables need `n - 1` qualified equality predicates.
+    let predicates = match sql_clause_after(&lowered, " where ") {
+        Some((_, where_clause)) => qualified_equality_predicate_count(&where_clause),
+        None => 0,
+    };
+    if predicates >= tables.len() - 1 {
+        return None;
+    }
+    Some(tables)
+}
+
+/// Count `a.b = c.d`-shaped predicates -- both sides qualified, which is
+/// what distinguishes a join condition from a plain column filter like
+/// `a.id = 5`.
+fn qualified_equality_predicate_count(where_clause: &str) -> usize {
+    static PREDICATE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = PREDICATE.get_or_init(|| {
+        regex::Regex::new(r"\w+\.\w+\s*=\s*\w+\.\w+").expect("static regex is valid")
+    });
+    re.find_iter(where_clause).count()
+}
+
+/// SQL string literals that look like accidental cartesian joins, for
+/// `sql_cartesian_join` (issue #195). `string_content` yields the text
+/// inside a string-literal node, or `None` for any other node.
+pub fn sql_cartesian_joins(
+    body: Node,
+    string_content: impl Fn(Node) -> Option<String>,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<SqlCartesianJoinRef> {
+    matches_in_body(
+        body,
+        |n| {
+            string_content(n)
+                .and_then(|sql| sql_cartesian_join_tables(&sql))
+                .map(|tables| tables.join(", "))
+        },
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, tables)| SqlCartesianJoinRef { line, tables })
+    .collect()
+}
+
 /// `.reduce(..)` callbacks spreading their accumulator into a new array,
 /// for `array_spread_in_reduce` (issue #194). Scans the whole body --
 /// the shape is self-contained in the `reduce` call, so no enclosing
@@ -813,4 +909,56 @@ pub fn body_hash(body: Node, source: &str) -> Option<u64> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     normalized.hash(&mut hasher);
     Some(hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sql_cartesian_join_flags_comma_join_without_predicate() {
+        let tables = sql_cartesian_join_tables("SELECT * FROM orders, customers").unwrap();
+        assert_eq!(tables, vec!["orders", "customers"]);
+    }
+
+    #[test]
+    fn sql_cartesian_join_accepts_a_proper_where_join() {
+        assert!(sql_cartesian_join_tables(
+            "SELECT * FROM orders o, customers c WHERE o.customer_id = c.id"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sql_cartesian_join_ignores_explicit_join_syntax() {
+        assert!(sql_cartesian_join_tables(
+            "SELECT * FROM orders JOIN customers ON orders.customer_id = customers.id"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sql_cartesian_join_needs_a_predicate_per_extra_table() {
+        let tables =
+            sql_cartesian_join_tables("SELECT * FROM a, b, c WHERE a.id = b.a_id").unwrap();
+        assert_eq!(tables, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn sql_cartesian_join_ignores_a_plain_column_filter() {
+        let tables =
+            sql_cartesian_join_tables("SELECT * FROM orders o, customers c WHERE o.status = 1")
+                .unwrap();
+        assert_eq!(tables, vec!["orders", "customers"]);
+    }
+
+    #[test]
+    fn sql_cartesian_join_ignores_single_table_queries() {
+        assert!(sql_cartesian_join_tables("SELECT * FROM orders WHERE id = 1").is_none());
+    }
+
+    #[test]
+    fn sql_cartesian_join_ignores_non_sql_text() {
+        assert!(sql_cartesian_join_tables("just a normal string, with commas").is_none());
+    }
 }

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+regex = "1"
 repowise-core = { path = "../repowise-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true

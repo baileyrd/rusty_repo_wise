@@ -241,6 +241,15 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or_default();
+                    let sql_cartesian_join = body
+                        .map(|b| {
+                            metrics::sql_cartesian_joins(
+                                b,
+                                |n| string_literal_content(n, self.source),
+                                |n| n.kind() == "function_item",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let primitive_param_count = metrics::primitive_param_count(
                         node.child_by_field_name("parameters"),
@@ -283,6 +292,7 @@ impl<'a> Walker<'a> {
                         // (issue #194): it targets the JS array method, which has no
                         // equivalent in this port's other languages.
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -329,6 +339,7 @@ impl<'a> Walker<'a> {
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join: Vec::new(),
                     });
                 }
             }
@@ -365,6 +376,7 @@ impl<'a> Walker<'a> {
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join: Vec::new(),
                     });
                     // `mod foo;` (no inline body) declares that another
                     // file defines this module. Resolve it directly via
@@ -558,6 +570,19 @@ fn contains_lock_call(node: Node, source: &str) -> bool {
         .children(&mut cursor)
         .any(|c| contains_lock_call(c, source));
     found
+}
+
+/// The text inside a string-literal node, for `sql_cartesian_join`
+/// (issue #195). Covers both plain and raw string literals. Returns `None` for any other node.
+fn string_literal_content(node: Node, source: &str) -> Option<String> {
+    if !matches!(node.kind(), "string_literal" | "raw_string_literal") {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let content = node
+        .named_children(&mut cursor)
+        .find(|c| matches!(c.kind(), "string_content" | "string_fragment"));
+    content.map(|c| text(c, source).to_string())
 }
 
 /// True when this `function_item` is declared `async fn`, for
@@ -1840,5 +1865,27 @@ mod tests {
         // Same call, but it completes before the guard is acquired.
         assert!(io_before_lock.blocking_io_under_lock.is_empty());
         assert!(no_lock_at_all.blocking_io_under_lock.is_empty());
+    }
+
+    #[test]
+    fn flags_a_cartesian_join_sql_literal_but_not_a_properly_joined_one() {
+        let rec = extract_str(
+            r#"
+            fn cartesian(db: &Db) {
+                db.query("SELECT * FROM orders, customers").unwrap();
+            }
+
+            fn joined(db: &Db) {
+                db.query("SELECT * FROM orders o, customers c WHERE o.cust_id = c.id")
+                    .unwrap();
+            }
+            "#,
+        );
+        let cartesian = rec.symbols.iter().find(|s| s.name == "cartesian").unwrap();
+        let joined = rec.symbols.iter().find(|s| s.name == "joined").unwrap();
+
+        assert_eq!(cartesian.sql_cartesian_join.len(), 1);
+        assert_eq!(cartesian.sql_cartesian_join[0].tables, "orders, customers");
+        assert!(joined.sql_cartesian_join.is_empty());
     }
 }

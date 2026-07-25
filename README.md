@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-six rule-based markers: long functions, high cyclomatic complexity,
+  twenty-seven rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and fourteen of repowise's Performance-signal
+  declared parameter types), and fifteen of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -134,8 +134,11 @@ specifics per layer), not full feature parity:
   array spread in a reduce (`array_spread_in_reduce` — a `.reduce(..)`
   callback returning `[...acc, x]` instead of mutating and returning the
   accumulator, which copies the whole array every step and turns a
-  linear fold quadratic; TypeScript/JavaScript only) — except for
-  shell scripts,
+  linear fold quadratic; TypeScript/JavaScript only), and a SQL
+  cartesian join (`sql_cartesian_join` — a query string listing several
+  comma-joined tables with no predicate connecting them, silently
+  returning `n × m` rows; a coarse text scan of string literals, not a
+  SQL parse, in Rust/Python/TS+JS) — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -173,7 +176,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
 Every other repowise language is unimplemented. The health scorer now
-implements 26 distinct markers. That exceeds repowise's headline "~25
+implements 27 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
 (issue #72 alone enumerates 19). The remaining gap is not a count but a
@@ -223,7 +226,9 @@ dashboard is one static page with no per-file drill-down or live search
   (`blocking_sync_in_async`), and (Rust/Python) two lock-scope
   extractors reusing the I/O-callee-name table
   (`blocking_io_under_lock`), plus (TS/JS) a `reduce`-callback
-  return-shape extractor (`array_spread_in_reduce`).
+  return-shape extractor (`array_spread_in_reduce`), and a
+  language-agnostic string-literal SQL scanner
+  (`sql_cartesian_join`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -332,6 +337,7 @@ to `[0, 10]`:
 | Blocking sync in async (`blocking_sync_in_async`) | a known blocking call inside an `async fn`/`async def` body | −0.6 |
 | Blocking I/O under lock (`blocking_io_under_lock`) | a known I/O-shaped call made while a mutex/lock is held | −0.6 |
 | Array spread in reduce (`array_spread_in_reduce`) | a `.reduce(..)` callback returning an array literal that spreads its own accumulator | −0.6 |
+| SQL cartesian join (`sql_cartesian_join`) | a SQL string with comma-joined tables and too few connecting predicates | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -347,7 +353,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-six; everything else keeps its default
+# only overriding two of the twenty-seven; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -870,6 +876,36 @@ rather than guessing. The mutate-and-return form (`acc.push(x); return
 acc`) is the recommended fix and never matches — a test pins that, along
 with a plain scalar fold (`(acc, x) => acc + x`), which returns no array
 at all. Its default penalty (−0.6) sits in the quadratic-*shape* tier.
+
+**SQL cartesian join (`sql_cartesian_join`)** flags a SQL query string
+that lists several comma-joined tables without enough join predicates to
+connect them — an accidental cartesian product returning `n × m` rows.
+That's a correctness bug as much as a performance one, and it's the kind
+that surfaces in production rather than review. Implemented for **Rust,
+Python, and TypeScript/JavaScript** — the scan reads string-literal
+*contents*, so the SQL logic itself is language-agnostic and each
+language contributes only a three-line extractor for its own literal
+node kinds (Rust's `string_literal`/`raw_string_literal`, Python's
+`string`, JS/TS's `string`/`template_string`).
+
+The heuristic, deliberately coarse and **not** a SQL parse — the same
+framing as `repowise_workspace::contracts`' route-pattern table: take
+the `FROM` clause up to the next clause keyword, split it on commas, and
+require one qualified `a.b = c.d` equality predicate in the `WHERE`
+clause per additional table (`n` tables need `n − 1` predicates). Both
+sides of a predicate must be qualified, which is what separates a join
+condition from a plain column filter like `o.status = 1` — a test pins
+that such a filter does *not* count toward connecting tables.
+
+Three honest limits: a `FROM` clause containing an explicit `JOIN` is
+skipped entirely (its `ON` predicate is a different shape, and the
+explicit form is rarely the accidental case); a query assembled by
+string concatenation is invisible, since only one literal is ever in
+hand; and table aliases are read as the first whitespace-delimited token,
+so unusual formatting can confuse the table list. Its default penalty
+(−0.6) sits in the quadratic-*shape* tier rather than above it —
+arguably the most severe marker in the cluster, but also the most
+heuristic, so it doesn't get its own tier.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

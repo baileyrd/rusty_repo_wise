@@ -236,6 +236,15 @@ impl<'a> Walker<'a> {
                     let blocking_io_under_lock = body
                         .map(|b| collect_io_under_lock(b, self.source))
                         .unwrap_or_default();
+                    let sql_cartesian_join = body
+                        .map(|b| {
+                            metrics::sql_cartesian_joins(
+                                b,
+                                |n| string_literal_content(n, self.source),
+                                |n| n.kind() == "function_definition",
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
@@ -270,6 +279,7 @@ impl<'a> Walker<'a> {
                         // (issue #194): it targets the JS array method, which has no
                         // equivalent in this port's other languages.
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join,
                     });
                     self.scope_stack.push(id);
                     self.visit_children(node);
@@ -311,6 +321,7 @@ impl<'a> Walker<'a> {
                         blocking_sync_in_async: Vec::new(),
                         blocking_io_under_lock: Vec::new(),
                         array_spread_in_reduce: Vec::new(),
+                        sql_cartesian_join: Vec::new(),
                     });
                     self.class_stack.push(name);
                     self.visit_children(node);
@@ -559,6 +570,19 @@ fn collect_io_under_lock(node: Node, source: &str) -> Vec<repowise_core::Blockin
         out.extend(collect_io_under_lock(child, source));
     }
     out
+}
+
+/// The text inside a string-literal node, for `sql_cartesian_join`
+/// (issue #195). Covers plain and f-string literals. Returns `None` for any other node.
+fn string_literal_content(node: Node, source: &str) -> Option<String> {
+    if !matches!(node.kind(), "string" | "concatenated_string") {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let content = node
+        .named_children(&mut cursor)
+        .find(|c| matches!(c.kind(), "string_content" | "string_fragment"));
+    content.map(|c| text(c, source).to_string())
 }
 
 /// True when this `function_definition` is declared `async def`, for

@@ -6,6 +6,61 @@ repo routing work through PRs).
 
 ---
 
+## PR #220 — Add blocking_io_under_lock health marker
+**2026-07-25** · [#220](https://github.com/baileyrd/rusty_repo_wise/pull/220) · closes [#185](https://github.com/baileyrd/rusty_repo_wise/issues/185)
+
+- **Added:** `blocking_io_under_lock`, the thirteenth slice of issue
+  #72's Performance-signal cluster. Flags an I/O-shaped call — reusing
+  `io_in_loop`'s table, as the issue asked — made while a mutex/lock is
+  held. I/O under a lock serializes every *other* thread waiting on that
+  lock behind however long the I/O takes.
+- **Two lock-scope shapes, not one.** Rust and Python need genuinely
+  different extractors:
+  - **Rust is structural.** A `let guard = m.lock().unwrap();` binding
+    holds the guard until the end of its enclosing block, so every
+    statement *after* it is inside the critical section. New
+    `repowise-parser::metrics::matches_after_scope_marker` models that:
+    the in-scope flag propagates down into children but only turns on
+    for *subsequent* siblings, so each node is visited exactly once and
+    a nested block with its own guard can't double-report calls the
+    outer scope already covered. Reuses `is_lock_call`'s table and so
+    inherits its deliberate `RwLock::read`/`write` exclusion.
+  - **Python is delimited.** `with lock:` gives an explicit block,
+    scanned via the `matches_in_body` helper added for #184.
+- **The Python side is a name-based heuristic, deliberately.** Python's
+  `with` is generic, and `lock_in_loop` already documents the same
+  limitation from the other direction — without type information a lock
+  context manager is indistinguishable from a file handle or a database
+  transaction. That earlier marker's answer was to skip `with` entirely;
+  doing so here would mean dropping Python from a marker whose issue
+  names it explicitly. So this matches when the context expression's own
+  name looks like a lock (`with lock:`, `with self._write_lock:`,
+  `with mutex:`, `with threading.Lock():`). It will miss a lock bound to
+  an unconventional name and could in principle fire on a non-lock named
+  one; a test pins that a plain `with cm:` stays quiet rather than
+  guessing. Rust's side needs no such guess.
+- **`Symbol` gains `blocking_io_under_lock: Vec<BlockingIoUnderLockRef>`**
+  (each entry: `line`, `callee_name`).
+- **New `FindingKind::BlockingIoUnderLock`** (penalty −0.6, matching
+  `blocking_sync_in_async` for the same reason: the cost lands on
+  threads *other* than the one running the call).
+- **Scope:** **Rust and Python only**, per the issue. The other 14
+  parsed languages have no lock-scope extractor and always produce an
+  empty list.
+- **Mechanical fallout:** `Symbol`'s new field touched its construction
+  site in all 16 language parsers plus test fixtures across
+  `repowise-adr`/`repowise-dashboard`/`repowise-docs`/`repowise-git`/
+  `repowise-health`/`repowise-server` that build `Symbol` directly.
+- **README:** this brings the health scorer to **25 of repowise's ~25
+  markers**.
+- Pre-existing `.repowise/index.json` files need a re-`init`/`update` —
+  same as every prior `Symbol`-field-adding PR
+  (#127/#129/#196/#198/#200/#202/#204/#206/#208/#210/#212/#214/#216/#218).
+- 6 of #72's 19 sub-issues remain open — this closes only #185, not
+  #72 itself.
+
+---
+
 ## PR #218 — Add blocking_sync_in_async health marker
 **2026-07-25** · [#218](https://github.com/baileyrd/rusty_repo_wise/pull/218) · closes [#184](https://github.com/baileyrd/rusty_repo_wise/issues/184)
 

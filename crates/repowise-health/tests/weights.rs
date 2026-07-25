@@ -33,6 +33,7 @@ fn symbol(name: &str, complexity: usize) -> Symbol {
         nested_loop_with_io: Vec::new(),
         nested_loop_quadratic: Vec::new(),
         serial_await_in_loop: Vec::new(),
+        pd_concat_in_loop: Vec::new(),
         param_count: 0,
         primitive_param_count: 0,
         body_hash: None,
@@ -80,6 +81,7 @@ fn default_weights_match_this_crates_original_hardcoded_penalties() {
     assert_eq!(defaults.nested_loop_with_io, 0.6);
     assert_eq!(defaults.nested_loop_quadratic, 0.6);
     assert_eq!(defaults.serial_await_in_loop, 0.3);
+    assert_eq!(defaults.pd_concat_in_loop, 0.6);
 }
 
 #[test]

@@ -15,7 +15,7 @@
 //! `repowise_core::Symbol::complex_conditionals`), and primitive obsession
 //! (parameter lists leaning on bare primitives instead of domain types,
 //! Rust/TypeScript-only since it needs declared parameter types — see
-//! `repowise_core::Symbol::primitive_param_count`), and ten of
+//! `repowise_core::Symbol::primitive_param_count`), and eleven of
 //! repowise's Performance-signal cluster (issue #72): I/O-shaped calls
 //! found inside a loop body (`io_in_loop`, Rust/Python/TS+JS-only — see
 //! `repowise_core::Symbol::io_in_loop`), string concatenation
@@ -41,7 +41,9 @@
 //! `repowise_core::Symbol::nested_loop_quadratic`), and awaited async
 //! calls inside a loop body running serially instead of concurrently
 //! (`serial_await_in_loop`, same scope as `io_in_loop` -- see
-//! `repowise_core::Symbol::serial_await_in_loop`).
+//! `repowise_core::Symbol::serial_await_in_loop`), and `pandas.concat`
+//! calls inside a loop body (`pd_concat_in_loop`, Python-only -- see
+//! `repowise_core::Symbol::pd_concat_in_loop`).
 //! Git-history-based markers (churn, hotspots, bug-fix history) aren't
 //! implemented yet — that needs the git-analytics layer, which is a
 //! separate phase.
@@ -199,6 +201,14 @@ fn default_nested_loop_quadratic() -> f64 {
 fn default_serial_await_in_loop() -> f64 {
     0.3
 }
+// Same weight as the quadratic-*shape* markers rather than the flat 0.3
+// per-occurrence tier (issue #192): a `pandas.concat` inside a loop
+// copies the whole growing DataFrame every iteration, so a single
+// occurrence makes the enclosing loop quadratic in the number of rows --
+// an order-of-magnitude blowup, not one extra unit of work.
+fn default_pd_concat_in_loop() -> f64 {
+    0.6
+}
 
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
@@ -261,6 +271,8 @@ pub struct HealthWeights {
     pub nested_loop_quadratic: f64,
     #[serde(default = "default_serial_await_in_loop")]
     pub serial_await_in_loop: f64,
+    #[serde(default = "default_pd_concat_in_loop")]
+    pub pd_concat_in_loop: f64,
 }
 
 impl Default for HealthWeights {
@@ -288,6 +300,7 @@ impl Default for HealthWeights {
             nested_loop_with_io: default_nested_loop_with_io(),
             nested_loop_quadratic: default_nested_loop_quadratic(),
             serial_await_in_loop: default_serial_await_in_loop(),
+            pd_concat_in_loop: default_pd_concat_in_loop(),
         }
     }
 }
@@ -325,6 +338,7 @@ impl HealthWeights {
             FindingKind::NestedLoopWithIo => self.nested_loop_with_io,
             FindingKind::NestedLoopQuadratic => self.nested_loop_quadratic,
             FindingKind::SerialAwaitInLoop => self.serial_await_in_loop,
+            FindingKind::PdConcatInLoop => self.pd_concat_in_loop,
         }
     }
 }
@@ -353,6 +367,7 @@ pub enum FindingKind {
     NestedLoopWithIo,
     NestedLoopQuadratic,
     SerialAwaitInLoop,
+    PdConcatInLoop,
 }
 
 impl FindingKind {
@@ -380,6 +395,7 @@ impl FindingKind {
             FindingKind::NestedLoopWithIo => "nested-loop-with-io",
             FindingKind::NestedLoopQuadratic => "nested-loop-quadratic",
             FindingKind::SerialAwaitInLoop => "serial-await-in-loop",
+            FindingKind::PdConcatInLoop => "pd-concat-in-loop",
         }
     }
 }
@@ -730,6 +746,24 @@ fn check_function_markers(
                 "`{}` awaited inside a loop body -- each iteration blocks on the previous one; \
                  consider batching the whole set into one concurrent await",
                 await_call.callee_name
+            ),
+        });
+    }
+    // Already filtered to `pandas.concat` calls found inside a loop body
+    // at extraction time (see
+    // `repowise_parser::metrics::pd_concats_in_loops`); every entry here
+    // is already flagged, same as the other loop-body markers above.
+    for concat in &sym.pd_concat_in_loop {
+        findings.push(Finding {
+            file: sym.file.clone(),
+            symbol: Some(sym.name.clone()),
+            line: Some(concat.line),
+            kind: FindingKind::PdConcatInLoop,
+            detail: format!(
+                "`{}` called inside a loop body -- each call copies the whole growing \
+                 DataFrame, making the loop quadratic; collect the rows in a list and \
+                 concatenate once after the loop",
+                concat.callee_name
             ),
         });
     }

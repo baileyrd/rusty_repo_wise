@@ -120,6 +120,7 @@ impl<'a> Walker<'a> {
                         nested_loop_with_io: Vec::new(),
                         nested_loop_quadratic: Vec::new(),
                         serial_await_in_loop: Vec::new(),
+                        pd_concat_in_loop: Vec::new(),
                         // Shell functions take positional parameters
                         // ($1, $2, ...) rather than a declared parameter
                         // list — there's nothing in the grammar to count.

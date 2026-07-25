@@ -65,7 +65,7 @@ specifics per layer), not full feature parity:
   any other variable/command-substitution in the path has no static
   value to resolve, so it's recorded but left unresolved.
 - Score every file's health deterministically (0–10, no LLM/ML) from
-  twenty-two rule-based markers: long functions, high cyclomatic complexity,
+  twenty-three rule-based markers: long functions, high cyclomatic complexity,
   oversized parameter lists, god classes, duplicate code, near-duplicate code
   (`dry_violation` — Rabin-Karp rolling-hash overlap over tokenized
   text), possibly-dead code (zero resolved callers), low cohesion
@@ -78,7 +78,7 @@ specifics per layer), not full feature parity:
   chaining 3+ boolean operators, Rust/Python/TS+JS only), primitive
   obsession (`primitive_obsession` — a parameter list leaning on bare
   primitives instead of domain types, Rust/TypeScript only since it needs
-  declared parameter types), and ten of repowise's Performance-signal
+  declared parameter types), and eleven of repowise's Performance-signal
   cluster: I/O in a loop (`io_in_loop` — a known file/network/database
   call found inside a loop body where hoisting it above the loop is
   usually possible, Rust/Python/TS+JS only), string concatenation
@@ -117,7 +117,11 @@ specifics per layer), not full feature parity:
   each iteration blocks on the previous one instead of the whole batch
   running concurrently via `Promise.all`/`join_all`/`asyncio.gather`;
   awaits *of* those combinators are themselves excluded, Rust/Python/TS+JS
-  only) — except for shell scripts,
+  only), and a pandas concat in a loop (`pd_concat_in_loop` —
+  `pd.concat(..)` accumulating rows one at a time inside a loop body,
+  which copies the whole growing DataFrame every iteration and makes the
+  loop quadratic; Python only, since pandas has no equivalent in this
+  port's other languages) — except for shell scripts,
   which are deliberately exempt from the dead-code
   marker: a shell function is routinely invoked only from the command
   line, another script, or a cron job, none of which this port's call
@@ -154,7 +158,7 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer covers 22 of repowise's ~25 markers — see
+Every other repowise language is unimplemented. The health scorer covers 23 of repowise's ~25 markers — see
 "Health scoring" below for which ones and why the rest (the
 ML-calibrated organizational-signal markers) are deferred. `repowise-docs`'s
 per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
@@ -194,7 +198,8 @@ dashboard is one static page with no per-file drill-down or live search
   feeding a shared same-collection comparison
   (`nested_loop_quadratic`), and a per-language awaited-call extractor
   with a concurrency-combinator exclusion table
-  (`serial_await_in_loop`).
+  (`serial_await_in_loop`), and (Python only) a qualified
+  pandas-concat-callee table (`pd_concat_in_loop`).
 - `repowise-graph` — builds the dependency graph from a `RepoIndex` and
   answers overview/search/deps/call-in-degree queries.
 - `repowise-health` — deterministic code-health scoring built on top of
@@ -299,6 +304,7 @@ to `[0, 10]`:
 | Nested loop with I/O (`nested_loop_with_io`) | an `io_in_loop` call found at loop-nesting depth 2+ | −0.6 |
 | Nested loop quadratic (`nested_loop_quadratic`) | an inner loop iterating the same collection as an enclosing loop | −0.6 |
 | Serial await in loop (`serial_await_in_loop`) | an awaited async call inside a loop body (excluding awaits of concurrency combinators) | −0.3 |
+| pandas concat in loop (`pd_concat_in_loop`) | a `pd.concat(..)` call inside a loop body | −0.6 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -314,7 +320,7 @@ else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
 
 ```toml
-# only overriding two of the twenty-two; everything else keeps its default
+# only overriding two of the twenty-three; everything else keeps its default
 high_complexity = 2.0
 god_class = 3.0
 ```
@@ -705,6 +711,31 @@ markers rather than the −0.6 quadratic-*shape* tier: one serialized
 await is one extra round-trip, not an order-of-magnitude blowup. The
 other 13 languages have no per-language extractor yet and so never
 produce any entries for this marker.
+
+**pandas concat in loop (`pd_concat_in_loop`)** flags a
+`pd.concat(..)`/`pandas.concat(..)` call inside a loop body — the
+accumulate-one-row-at-a-time shape that pandas' own docs call out as an
+anti-pattern. Each call reallocates and copies the whole growing
+DataFrame, so a single occurrence makes the enclosing loop quadratic in
+the number of rows; the fix is to collect rows in a list and
+concatenate once after the loop. **Python only**, since pandas has no
+equivalent in this port's other supported languages — the other 15
+parsed languages always produce an empty list for this marker. Reuses
+Python's `is_loop` classifier and `qualified_call_name` helper
+unchanged.
+
+The table deliberately covers only `pd.concat`/`pandas.concat` and
+**not** a bare `.append(..)`, even though the marker's originating issue
+names `DataFrame.append` too. Without type information this port cannot
+tell `DataFrame.append` from `list.append` — and appending to a *list*
+inside a loop is precisely the fix this marker recommends, so flagging
+bare `.append` would penalize the correct pattern far more often than
+the wrong one. (`DataFrame.append` was also deprecated in pandas 1.4 and
+removed in 2.0, so its real-world incidence is shrinking regardless.) Its
+default penalty (−0.6) sits in the quadratic-*shape* tier alongside
+`nested_loop_with_io`/`nested_loop_quadratic` rather than the flat −0.3
+per-occurrence tier, because one such call is an order-of-magnitude
+blowup rather than one extra unit of work.
 
 **Near-duplicate code (`dry_violation`)** catches *partial* duplicates
 the exact-hash `Duplicate code` marker misses entirely — a function

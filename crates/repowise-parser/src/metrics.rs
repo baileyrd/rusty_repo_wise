@@ -6,7 +6,7 @@
 
 use repowise_core::{
     ComplexConditionalRef, IoInLoopRef, JsonParseInLoopRef, ListInsertZeroInLoopRef, LockInLoopRef,
-    NestedLoopQuadraticRef, NestedLoopWithIoRef, RegexCompileInLoopRef,
+    NestedLoopQuadraticRef, NestedLoopWithIoRef, PdConcatInLoopRef, RegexCompileInLoopRef,
     ResourceConstructionInLoopRef, SerialAwaitInLoopRef, StringConcatInLoopRef,
 };
 use std::hash::{Hash, Hasher};
@@ -507,6 +507,27 @@ pub fn ios_in_nested_loops(
     )
     .into_iter()
     .map(|(line, callee_name)| NestedLoopWithIoRef { line, callee_name })
+    .collect()
+}
+
+/// `pandas.concat` calls found inside a loop body, for
+/// `pd_concat_in_loop` (issue #192): each call copies the whole growing
+/// DataFrame, making the loop quadratic in the number of rows.
+pub fn pd_concats_in_loops(
+    body: Node,
+    is_loop: impl Fn(Node) -> bool,
+    call_callee: impl Fn(Node) -> Option<String>,
+    is_pd_concat_call: impl Fn(&str) -> bool,
+    is_nested_function: impl Fn(Node) -> bool,
+) -> Vec<PdConcatInLoopRef> {
+    matches_in_loops(
+        body,
+        is_loop,
+        |n| call_callee(n).filter(|name| is_pd_concat_call(name)),
+        is_nested_function,
+    )
+    .into_iter()
+    .map(|(line, callee_name)| PdConcatInLoopRef { line, callee_name })
     .collect()
 }
 

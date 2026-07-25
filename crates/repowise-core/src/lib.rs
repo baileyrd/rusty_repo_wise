@@ -307,6 +307,14 @@ pub struct Symbol {
     /// implemented for yet -- currently Rust, Python, and TypeScript/
     /// JavaScript, matching `io_in_loop`'s scope.
     pub serial_await_in_loop: Vec<SerialAwaitInLoopRef>,
+    /// `pandas.concat` calls found inside a loop body within the symbol,
+    /// accumulating rows one at a time instead of collecting them and
+    /// concatenating once after the loop. Each call reallocates and
+    /// copies the whole growing DataFrame, making the loop quadratic in
+    /// the number of rows. Python-only (pandas has no equivalent in this
+    /// port's other supported languages), and empty for symbols with no
+    /// body.
+    pub pd_concat_in_loop: Vec<PdConcatInLoopRef>,
 }
 
 /// A single flagged `if`/`while`/etc. condition: `line` points at the
@@ -413,6 +421,14 @@ pub struct NestedLoopQuadraticRef {
 /// `callee_name` is the awaited call's callee.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerialAwaitInLoopRef {
+    pub line: usize,
+    pub callee_name: String,
+}
+
+/// A single `pandas.concat` call found inside a loop body. `line` points
+/// at the call itself, not the enclosing loop or function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdConcatInLoopRef {
     pub line: usize,
     pub callee_name: String,
 }

@@ -57,6 +57,14 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+struct CacheEntry {
+    mtime: SystemTime,
+    index: RepoIndex,
+    graph: RepoGraph,
+}
 
 /// Start the MCP server over stdio, indexing `root` (which must already
 /// have a `.repowise/index.json` from a prior `repowise init`/`update`).
@@ -66,10 +74,7 @@ pub async fn run(root: PathBuf, workspace: Option<PathBuf>) -> anyhow::Result<()
     let workspace_repos = workspace
         .map(|path| repowise_workspace::load_resolved(&path))
         .transpose()?;
-    let server = RepowiseServer {
-        root,
-        workspace_repos,
-    };
+    let server = RepowiseServer::new(root, workspace_repos);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -79,10 +84,35 @@ pub async fn run(root: PathBuf, workspace: Option<PathBuf>) -> anyhow::Result<()
 struct RepowiseServer {
     root: PathBuf,
     workspace_repos: Option<Vec<repowise_workspace::ResolvedWorkspaceRepo>>,
+    cache: Arc<Mutex<Option<CacheEntry>>>,
 }
 
 impl RepowiseServer {
+    fn new(
+        root: PathBuf,
+        workspace_repos: Option<Vec<repowise_workspace::ResolvedWorkspaceRepo>>,
+    ) -> Self {
+        Self {
+            root,
+            workspace_repos,
+            cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
     fn load(&self) -> Result<(RepoIndex, RepoGraph), ErrorData> {
+        let index_path = self.root.join(".repowise").join("index.json");
+        let current_mtime = std::fs::metadata(&index_path)
+            .and_then(|m| m.modified())
+            .ok();
+
+        if let (Some(mtime), Ok(guard)) = (current_mtime, self.cache.lock()) {
+            if let Some(entry) = guard.as_ref() {
+                if entry.mtime == mtime {
+                    return Ok((entry.index.clone(), entry.graph.clone()));
+                }
+            }
+        }
+
         let index = RepoIndex::load(&self.root).map_err(|e| {
             ErrorData::internal_error(
                 format!("failed to load index at {}: {e}", self.root.display()),
@@ -90,6 +120,15 @@ impl RepowiseServer {
             )
         })?;
         let graph = RepoGraph::build(&index);
+
+        if let (Some(mtime), Ok(mut guard)) = (current_mtime, self.cache.lock()) {
+            *guard = Some(CacheEntry {
+                mtime,
+                index: index.clone(),
+                graph: graph.clone(),
+            });
+        }
+
         Ok((index, graph))
     }
 
@@ -1073,10 +1112,7 @@ mod tests {
         std::fs::write(root.join("lib.rs"), "pub fn helper() -> i32 { 1 }\n").unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(overview) = server.get_overview().unwrap();
         assert_eq!(overview.file_count, 1);
         assert_eq!(
@@ -1097,10 +1133,7 @@ mod tests {
         std::fs::write(root.join("lib.rs"), "pub fn HelperFunc() -> i32 { 1 }\n").unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(result) = server
             .search_codebase(Parameters(SearchParams {
                 query: "helperfunc".to_string(),
@@ -1116,10 +1149,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let result = server.search_codebase(Parameters(SearchParams {
             query: "  ".to_string(),
         }));
@@ -1141,10 +1171,7 @@ mod tests {
         std::fs::write(root.join("util.rs"), "pub fn helper() -> i32 { 1 }\n").unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(ctx) = server
             .get_context(Parameters(ContextParams {
                 file: "lib.rs".to_string(),
@@ -1166,10 +1193,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let result = server.get_context(Parameters(ContextParams {
             file: "missing.rs".to_string(),
         }));
@@ -1224,10 +1248,7 @@ mod tests {
 
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(risk) = server
             .get_risk(Parameters(RiskParams {
                 file: Some("lib.rs".to_string()),
@@ -1262,10 +1283,7 @@ mod tests {
 
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(risk) = server
             .get_risk(Parameters(RiskParams {
                 file: None,
@@ -1285,10 +1303,7 @@ mod tests {
         std::fs::write(root.join("lib.rs"), "fn helper() -> i32 { 1 }\n").unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(risk) = server
             .get_risk(Parameters(RiskParams {
                 file: Some("lib.rs".to_string()),
@@ -1307,10 +1322,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let result = server.get_risk(Parameters(RiskParams {
             file: Some("missing.rs".to_string()),
             top_n: 10,
@@ -1333,10 +1345,7 @@ mod tests {
         std::fs::write(root.join("lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
         git(&root, &["commit", "-q", "-am", "Grow lib"]);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(risk) = server
             .get_change_risk(Parameters(ChangeRiskParams { revspec: None }))
             .unwrap();
@@ -1362,10 +1371,7 @@ mod tests {
         std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
         git(&root, &["commit", "-q", "-am", "Grow a"]);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(risk) = server
             .get_change_risk(Parameters(ChangeRiskParams {
                 revspec: Some("base..HEAD".to_string()),
@@ -1382,10 +1388,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let result = server.get_change_risk(Parameters(ChangeRiskParams { revspec: None }));
         let Err(err) = result else {
             panic!("expected an error when the root isn't a git repository");
@@ -1404,10 +1407,7 @@ mod tests {
         .unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(search) = server
             .search_codebase(Parameters(SearchParams {
                 query: "target".to_string(),
@@ -1440,10 +1440,7 @@ mod tests {
         .unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(search) = server
             .search_codebase(Parameters(SearchParams {
                 query: "target".to_string(),
@@ -1475,10 +1472,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let result = server.get_symbol(Parameters(GetSymbolParams {
             symbol_id: "nonexistent".to_string(),
             context_lines: 0,
@@ -1518,10 +1512,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_two_decision_fixture(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let Json(why) = server
             .get_why(Parameters(WhyParams { targets: vec![] }))
             .unwrap();
@@ -1535,10 +1526,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_two_decision_fixture(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(why) = server
             .get_why(Parameters(WhyParams {
                 targets: vec!["src/queue.rs".to_string()],
@@ -1556,10 +1544,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_two_decision_fixture(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(search) = server
             .search_codebase(Parameters(SearchParams {
                 query: "OtherThing".to_string(),
@@ -1583,10 +1568,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_two_decision_fixture(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let Json(why) = server
             .get_why(Parameters(WhyParams {
                 targets: vec!["src/nonexistent.rs".to_string()],
@@ -1603,10 +1585,7 @@ mod tests {
         std::fs::write(root.join("solo.rs"), "fn solo() {}\n").unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let Json(dead) = server
             .get_dead_code(Parameters(DeadCodeParams::default()))
             .unwrap();
@@ -1627,10 +1606,7 @@ mod tests {
         std::fs::write(root.join("b.rs"), "fn dup() {}\n").unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root.clone(), None);
         let Json(all) = server
             .get_dead_code(Parameters(DeadCodeParams::default()))
             .unwrap();
@@ -1656,10 +1632,7 @@ mod tests {
         std::fs::write(root.join("b.rs"), "fn dup() {}\n").unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let Json(dead) = server
             .get_dead_code(Parameters(DeadCodeParams {
                 min_confidence: None,
@@ -1678,10 +1651,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let result = server.get_dead_code(Parameters(DeadCodeParams {
             min_confidence: Some("extreme".to_string()),
             safe_only: false,
@@ -1699,10 +1669,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let Json(output) = server.list_repos().unwrap();
 
         assert!(output.repos.is_empty());
@@ -1718,9 +1685,9 @@ mod tests {
         std::fs::create_dir_all(&unindexed_repo).unwrap();
         build_and_save_index(&indexed_repo);
 
-        let server = RepowiseServer {
+        let server = RepowiseServer::new(
             root,
-            workspace_repos: Some(vec![
+            Some(vec![
                 repowise_workspace::ResolvedWorkspaceRepo {
                     name: "indexed".to_string(),
                     path: indexed_repo,
@@ -1730,7 +1697,7 @@ mod tests {
                     path: unindexed_repo,
                 },
             ]),
-        };
+        );
         let Json(output) = server.list_repos().unwrap();
 
         assert_eq!(output.repos.len(), 2);
@@ -1790,10 +1757,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let Json(output) = server.get_architecture().unwrap();
 
         assert!(output.repos.is_empty());
@@ -1807,10 +1771,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let workspace_repos = two_repo_workspace(&root);
 
-        let server = RepowiseServer {
-            root: root.clone(),
-            workspace_repos: Some(workspace_repos),
-        };
+        let server = RepowiseServer::new(root.clone(), Some(workspace_repos));
         let Json(output) = server.get_architecture().unwrap();
 
         assert_eq!(output.repos.len(), 2);
@@ -1828,10 +1789,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         build_and_save_index(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: None,
-        };
+        let server = RepowiseServer::new(root, None);
         let result = server.get_blast_radius(Parameters(BlastRadiusParams {
             repo: "repo-a".to_string(),
             file: "src/foo.rs".to_string(),
@@ -1848,10 +1806,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let workspace_repos = two_repo_workspace(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: Some(workspace_repos),
-        };
+        let server = RepowiseServer::new(root, Some(workspace_repos));
         let result = server.get_blast_radius(Parameters(BlastRadiusParams {
             repo: "nonexistent".to_string(),
             file: "src/foo.rs".to_string(),
@@ -1868,10 +1823,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let workspace_repos = two_repo_workspace(&root);
 
-        let server = RepowiseServer {
-            root,
-            workspace_repos: Some(workspace_repos),
-        };
+        let server = RepowiseServer::new(root, Some(workspace_repos));
         let Json(output) = server
             .get_blast_radius(Parameters(BlastRadiusParams {
                 repo: "repo-a".to_string(),
@@ -1881,5 +1833,24 @@ mod tests {
 
         assert_eq!(output.importers.len(), 1);
         assert_eq!(output.importers[0].from_repo, "repo-b");
+    }
+
+    #[test]
+    fn mtime_caching_caches_index_and_graph_across_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), "pub fn helper() -> i32 { 1 }\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+
+        // First load populates cache
+        let (idx1, _) = server.load().unwrap();
+        assert_eq!(idx1.files.len(), 1);
+
+        // Second load hits cache
+        let (idx2, _) = server.load().unwrap();
+        assert_eq!(idx2.files.len(), 1);
+        assert_eq!(idx1.files[0].path, idx2.files[0].path);
     }
 }

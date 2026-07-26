@@ -125,6 +125,11 @@ impl<'a> Walker<'a> {
                             let param_count = metrics::count_params(
                                 func_declarator.child_by_field_name("parameters"),
                             );
+                            let primitive_param_count = metrics::primitive_param_count(
+                                func_declarator.child_by_field_name("parameters"),
+                                |n| param_type(n, self.source),
+                                is_primitive_type,
+                            );
                             self.symbols.push(Symbol {
                                 id: Symbol::make_id(self.path, &name, start_line),
                                 name,
@@ -157,7 +162,7 @@ impl<'a> Walker<'a> {
                                 membership_test_in_loop: Vec::new(),
                                 sync_io_calls: Vec::new(),
                                 param_count,
-                                primitive_param_count: 0,
+                                primitive_param_count,
                                 body_hash: None,
                             });
                             return;
@@ -218,6 +223,11 @@ impl<'a> Walker<'a> {
                             let param_count = metrics::count_params(
                                 func_declarator.child_by_field_name("parameters"),
                             );
+                            let primitive_param_count = metrics::primitive_param_count(
+                                func_declarator.child_by_field_name("parameters"),
+                                |n| param_type(n, self.source),
+                                is_primitive_type,
+                            );
                             let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                             let kind = if parent.is_some() {
                                 SymbolKind::Method
@@ -256,7 +266,7 @@ impl<'a> Walker<'a> {
                                 membership_test_in_loop: Vec::new(),
                                 sync_io_calls: Vec::new(),
                                 param_count,
-                                primitive_param_count: 0,
+                                primitive_param_count,
                                 body_hash,
                             });
                             self.scope_stack.push(id);
@@ -419,6 +429,45 @@ fn is_nested_function(n: Node) -> bool {
     n.kind() == "function_definition"
 }
 
+fn param_type(n: Node, source: &str) -> Option<String> {
+    if n.kind() != "parameter_declaration" {
+        return None;
+    }
+    let type_node = n.child_by_field_name("type")?;
+    let raw = text(type_node, source).trim();
+    let cleaned = raw
+        .trim_start_matches("const")
+        .trim()
+        .trim_matches('&')
+        .trim_matches('*')
+        .trim();
+    Some(cleaned.to_string())
+}
+
+fn is_primitive_type(t: &str) -> bool {
+    matches!(
+        t,
+        "int"
+            | "long"
+            | "short"
+            | "char"
+            | "float"
+            | "double"
+            | "bool"
+            | "size_t"
+            | "int8_t"
+            | "int16_t"
+            | "int32_t"
+            | "int64_t"
+            | "uint8_t"
+            | "uint16_t"
+            | "uint32_t"
+            | "uint64_t"
+            | "std::string"
+            | "string"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +548,15 @@ mod tests {
         assert!(one.body_hash.is_some());
         assert_eq!(one.body_hash, two.body_hash);
         assert!(short.body_hash.is_none());
+    }
+
+    #[test]
+    fn computes_primitive_param_count() {
+        let rec = extract_str(
+            "void process(int id, const std::string& name, bool flag, CustomWidget widget) {}\n",
+        );
+        let process = rec.symbols.iter().find(|s| s.name == "process").unwrap();
+        assert_eq!(process.param_count, 4);
+        assert_eq!(process.primitive_param_count, 3);
     }
 }

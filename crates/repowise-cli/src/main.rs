@@ -641,12 +641,35 @@ fn cmd_serve_dashboard(
     workspace: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
+    let static_dir = static_dir.or_else(|| {
+        let exe = std::env::current_exe().ok();
+        let candidates = [
+            PathBuf::from("web/dist"),
+            PathBuf::from("C:\\dev\\rusty_repo_wise\\web\\dist"),
+            exe.as_ref()
+                .and_then(|p| p.parent().map(|d| d.join("web/dist")))
+                .unwrap_or_default(),
+            exe.as_ref()
+                .and_then(|p| {
+                    p.parent()
+                        .and_then(|d| d.parent())
+                        .and_then(|d| d.parent())
+                        .map(|d| d.join("web/dist"))
+                })
+                .unwrap_or_default(),
+            PathBuf::from("crates/repowise-web/dist"),
+        ];
+        candidates.into_iter().find(|p| p.exists() && p.is_dir())
+    });
+
     if static_dir.is_none() {
         println!(
-            "No --static-dir given: serving the JSON API only (no frontend). \
-             Build one with `cd crates/repowise-web && trunk build` and pass \
-             --static-dir crates/repowise-web/dist."
+            "No --static-dir given and web/dist not found: serving the JSON API only (no frontend). \
+             Build one with `cd web && npm run build` and pass \
+             --static-dir web/dist."
         );
+    } else if let Some(ref dir) = static_dir {
+        println!("Serving static frontend from {}", dir.display());
     }
     println!("Dashboard server listening on http://{addr}");
     let runtime = tokio::runtime::Runtime::new()?;

@@ -40,3 +40,10 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+      - name: Install WASM target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Check WASM Web Crate
+        run: cargo check --manifest-path crates/repowise-web/Cargo.toml --target wasm32-unknown-unknown
+

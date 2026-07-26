@@ -151,7 +151,22 @@ impl<'a> Walker<'a> {
                             )
                         })
                         .unwrap_or(0);
+                    let complex_conditionals = body
+                        .map(|b| {
+                            metrics::complex_conditionals(
+                                b,
+                                condition_of,
+                                |n| is_boolean_operator(n, self.source),
+                                is_nested_function,
+                            )
+                        })
+                        .unwrap_or_default();
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
+                    let primitive_param_count = metrics::primitive_param_count(
+                        node.child_by_field_name("parameters"),
+                        |n| param_type(n, self.source),
+                        is_primitive_type,
+                    );
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
                         id: id.clone(),
@@ -164,7 +179,7 @@ impl<'a> Walker<'a> {
                         complexity,
                         max_nesting_depth,
                         bumpy_road_bumps,
-                        complex_conditionals: Vec::new(),
+                        complex_conditionals,
                         io_in_loop: Vec::new(),
                         string_concat_in_loop: Vec::new(),
                         resource_construction_in_loop: Vec::new(),
@@ -185,7 +200,7 @@ impl<'a> Walker<'a> {
                         membership_test_in_loop: Vec::new(),
                         sync_io_calls: Vec::new(),
                         param_count,
-                        primitive_param_count: 0,
+                        primitive_param_count,
                         body_hash,
                     });
                     self.scope_stack.push(id);
@@ -300,6 +315,50 @@ fn is_nested_function(n: Node) -> bool {
     matches!(n.kind(), "method_declaration" | "constructor_declaration")
 }
 
+fn param_type(n: Node, source: &str) -> Option<String> {
+    if !matches!(n.kind(), "formal_parameter" | "spread_parameter") {
+        return None;
+    }
+    let type_node = n.child_by_field_name("type")?;
+    Some(text(type_node, source).to_string())
+}
+
+fn is_primitive_type(t: &str) -> bool {
+    matches!(
+        t,
+        "byte"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "boolean"
+            | "char"
+            | "String"
+            | "Byte"
+            | "Short"
+            | "Integer"
+            | "Long"
+            | "Float"
+            | "Double"
+            | "Boolean"
+            | "Character"
+    )
+}
+fn is_boolean_operator(n: Node, source: &str) -> bool {
+    n.kind() == "binary_expression"
+        && n.child_by_field_name("operator")
+            .map(|op| matches!(text(op, source), "&&" | "||"))
+            .unwrap_or(false)
+}
+
+fn condition_of(n: Node) -> Option<Node> {
+    match n.kind() {
+        "if_statement" | "while_statement" | "do_statement" => n.child_by_field_name("condition"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +462,25 @@ mod tests {
         assert_eq!(area.complexity, 0);
         assert_eq!(area.param_count, 0);
         assert_eq!(area.parent.as_deref(), Some("Shape"));
+    }
+
+    #[test]
+    fn computes_primitive_param_count() {
+        let rec = extract_str(
+            "class C {\n  void process(int id, String name, boolean flag, CustomWidget widget) {}\n}\n",
+        );
+        let process = rec.symbols.iter().find(|s| s.name == "process").unwrap();
+        assert_eq!(process.param_count, 4);
+        assert_eq!(process.primitive_param_count, 3);
+    }
+
+    #[test]
+    fn flags_conditions_chaining_three_or_more_boolean_operators() {
+        let rec = extract_str(
+            "class C {\n  void check(int a, int b, int c, int d) {\n    if (a > 0 && b > 0 && c > 0 && d > 0) {\n      System.out.println(\"ok\");\n    }\n  }\n}\n",
+        );
+        let check = rec.symbols.iter().find(|s| s.name == "check").unwrap();
+        assert_eq!(check.complex_conditionals.len(), 1);
+        assert_eq!(check.complex_conditionals[0].operator_count, 3);
     }
 }

@@ -153,6 +153,11 @@ impl<'a> Walker<'a> {
                         })
                         .unwrap_or(0);
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
+                    let primitive_param_count = metrics::primitive_param_count(
+                        node.child_by_field_name("parameters"),
+                        |n| param_type(n, self.source),
+                        is_primitive_type,
+                    );
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     self.symbols.push(Symbol {
                         id: id.clone(),
@@ -186,7 +191,7 @@ impl<'a> Walker<'a> {
                         membership_test_in_loop: Vec::new(),
                         sync_io_calls: Vec::new(),
                         param_count,
-                        primitive_param_count: 0,
+                        primitive_param_count,
                         body_hash,
                     });
                     self.scope_stack.push(id);
@@ -320,6 +325,34 @@ fn is_nested_function(n: Node) -> bool {
     matches!(n.kind(), "method_declaration" | "constructor_declaration")
 }
 
+fn param_type(n: Node, source: &str) -> Option<String> {
+    if n.kind() != "parameter" {
+        return None;
+    }
+    let type_node = n.child_by_field_name("type")?;
+    Some(text(type_node, source).to_string())
+}
+
+fn is_primitive_type(t: &str) -> bool {
+    matches!(
+        t,
+        "int"
+            | "long"
+            | "short"
+            | "byte"
+            | "float"
+            | "double"
+            | "bool"
+            | "char"
+            | "string"
+            | "decimal"
+            | "Int32"
+            | "Int64"
+            | "Boolean"
+            | "String"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +457,15 @@ mod tests {
         let area = rec.symbols.iter().find(|s| s.name == "Area").unwrap();
         assert_eq!(area.complexity, 0);
         assert_eq!(area.parent.as_deref(), Some("IShape"));
+    }
+
+    #[test]
+    fn computes_primitive_param_count() {
+        let rec = extract_str(
+            "class C {\n  void Process(int id, string name, bool flag, CustomWidget widget) {}\n}\n",
+        );
+        let process = rec.symbols.iter().find(|s| s.name == "Process").unwrap();
+        assert_eq!(process.param_count, 4);
+        assert_eq!(process.primitive_param_count, 3);
     }
 }

@@ -6,6 +6,17 @@ repo routing work through PRs).
 
 ---
 
+## PR #233 — Parity Loop: Extend primitive parameter extraction to Java, Kotlin, Go, C++, C#; add WASM CI step; add MCP mtime caching
+**2026-07-25** · [#233](https://github.com/baileyrd/rusty_repo_wise/pull/233)
+
+- **Added:** primitive parameter type extraction (`primitive_param_count`) in `repowise-parser` for **Java**, **Kotlin**, **Go**, **C++**, and **C#** (`java.rs`, `kotlin.rs`, `go.rs`, `cpp.rs`, `csharp.rs`), extending `primitive_obsession` health marker detection in `repowise-health` across all major statically-typed languages.
+- **Added:** 5 new `repowise-parser` unit tests verifying primitive parameter count extraction across Java, Kotlin, Go, C++, and C#.
+- **Added:** CI verification step in `.github/workflows/ci-rust.yml` to compile and validate `crates/repowise-web` against target `wasm32-unknown-unknown`.
+- **Added:** Thread-safe `mtime`-validated in-memory index and dependency graph caching in `RepowiseServer` ([repowise-mcp/src/lib.rs](file:///c:/dev/rusty_repo_wise/crates/repowise-mcp/src/lib.rs)), avoiding redundant disk reads and petgraph construction across sequential MCP tool calls when `.repowise/index.json` is unchanged.
+- **Added:** `repowise-mcp` unit test verifying `mtime` caching behavior across `load()` calls.
+
+---
+
 ## PR #232 — Add hot_path_sync_io health marker (completes issue #72)
 **2026-07-25** · [#232](https://github.com/baileyrd/rusty_repo_wise/pull/232) · closes [#186](https://github.com/baileyrd/rusty_repo_wise/issues/186)
 

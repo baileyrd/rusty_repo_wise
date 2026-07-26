@@ -48,6 +48,7 @@ pub enum EdgeKind {
     Calls,
 }
 
+#[derive(Clone)]
 pub struct RepoGraph {
     pub graph: DiGraph<Node, EdgeKind>,
     file_index: HashMap<PathBuf, NodeIndex>,

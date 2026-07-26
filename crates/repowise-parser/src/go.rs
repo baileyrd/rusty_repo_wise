@@ -153,6 +153,11 @@ impl<'a> Walker<'a> {
                         })
                         .unwrap_or(0);
                     let param_count = metrics::count_params(node.child_by_field_name("parameters"));
+                    let primitive_param_count = metrics::primitive_param_count(
+                        node.child_by_field_name("parameters"),
+                        |n| param_type(n, self.source),
+                        is_primitive_type,
+                    );
                     let body_hash = body.and_then(|b| metrics::body_hash(b, self.source));
                     let defer_in_loop = body
                         .map(|b| {
@@ -213,7 +218,7 @@ impl<'a> Walker<'a> {
                         membership_test_in_loop: Vec::new(),
                         sync_io_calls: Vec::new(),
                         param_count,
-                        primitive_param_count: 0,
+                        primitive_param_count,
                         body_hash,
                     });
                     self.scope_stack.push(id);
@@ -434,6 +439,37 @@ fn is_concurrency_bound(n: Node, source: &str) -> bool {
 /// Rust's untracked closures.
 fn is_nested_function(n: Node) -> bool {
     n.kind() == "function_declaration"
+}
+
+fn param_type(n: Node, source: &str) -> Option<String> {
+    if !matches!(n.kind(), "parameter_declaration" | "variadic_parameter_declaration") {
+        return None;
+    }
+    let type_node = n.child_by_field_name("type")?;
+    Some(text(type_node, source).to_string())
+}
+
+fn is_primitive_type(t: &str) -> bool {
+    matches!(
+        t,
+        "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uintptr"
+            | "float32"
+            | "float64"
+            | "bool"
+            | "string"
+            | "byte"
+            | "rune"
+    )
 }
 
 #[cfg(test)]
@@ -753,5 +789,15 @@ mod tests {
         let named = rec.symbols.iter().find(|s| s.name == "named").unwrap();
         assert_eq!(named.goroutine_in_unbounded_loop.len(), 1);
         assert_eq!(named.goroutine_in_unbounded_loop[0].callee_name, "handle");
+    }
+
+    #[test]
+    fn computes_primitive_param_count() {
+        let rec = extract_str(
+            "package app\n\nfunc process(id int, name string, flag bool, cfg Config) {}\n",
+        );
+        let process = rec.symbols.iter().find(|s| s.name == "process").unwrap();
+        assert_eq!(process.param_count, 4);
+        assert_eq!(process.primitive_param_count, 3);
     }
 }

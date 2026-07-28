@@ -307,6 +307,7 @@ repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
+repowise hook install|uninstall|status [PATH]  # post-commit hook that refreshes the index after each commit
 repowise status [PATH]             # index freshness: stale/missing files, wiki + dashboard state
                                     #   --verbose to list the individual stale/missing files
 repowise dead-code [PATH]          # confidence-tiered dead-code candidates
@@ -1127,6 +1128,33 @@ ML-calibrated organizational-signal markers (`churn_risk`,
 question, not a mechanical gap). Hotspots and bug-fix history are now
 implemented (see "Git analytics" below) but aren't yet folded into the
 health score itself — that's a natural follow-up, not done here.
+
+## Auto-sync (post-commit hook)
+
+`repowise hook install` writes a `post-commit` hook into `.git/hooks` that
+refreshes the index after each commit; `uninstall` removes it and `status`
+reports which of three states you're in.
+
+The reference repowise drives auto-sync five ways (post-commit hook, file
+watcher, GitHub webhook, GitLab webhook, polling). Only the hook is
+implemented here, deliberately: it's the one mechanism needing **no new
+dependency, no daemon, and no server**. `repowise watch` would require a
+filesystem-notification crate and is not implemented.
+
+**The hook runs `repowise update` detached and silenced.** Git waits for
+`post-commit` to exit, so a slow re-index would stall every commit — which
+would be worse than having no auto-sync at all.
+
+**A `post-commit` hook this tool didn't write is never touched.** That path is
+somewhere users and other tools legitimately put things, so the hook body
+carries a marker line, and only its presence authorizes an overwrite or a
+delete. Anything else is reported as `foreign` and left byte-for-byte alone —
+`install` and `uninstall` both refuse rather than clobber. Re-installing our
+own hook is idempotent.
+
+A worktree or submodule (where `.git` is a *file*, not a directory) is
+reported as a clear error rather than silently creating a `.git/hooks`
+directory that git will never consult.
 
 ## Index status
 

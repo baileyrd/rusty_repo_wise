@@ -6,6 +6,39 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #249 — Parity: add `repowise hook install|uninstall|status`
+**2026-07-28** · closes [#238](https://github.com/baileyrd/rusty_repo_wise/issues/238)
+
+- **Added:** a `repowise-cli::hook` module and `repowise hook
+  install|uninstall|status`, writing a `post-commit` hook that refreshes the
+  index after each commit. Fifth issue of the parity round.
+- **One of the reference's five auto-sync mechanisms, chosen deliberately.**
+  The reference drives auto-sync through a post-commit hook, a file watcher,
+  GitHub and GitLab webhooks, and polling. The hook is the only one needing
+  **no new dependency, no daemon, and no server**. `repowise watch` would
+  require a filesystem-notification crate — a new third-party dependency, and
+  therefore a stop-and-ask rather than something to add unattended.
+- **The hook runs `repowise update` detached and silenced.** Git waits for
+  `post-commit` to exit, so a slow re-index would stall every commit. Auto-sync
+  that made `git commit` hang would be worse than no auto-sync.
+- **A hook this tool didn't write is never touched.** `.git/hooks/post-commit`
+  is somewhere users and other tools legitimately put things, so the body
+  carries a marker line and only its presence authorizes an overwrite or a
+  delete. Anything else classifies as `Foreign`: `install` and `uninstall` both
+  refuse, `status` says so, and a test asserts the foreign hook survives both
+  calls byte for byte.
+- **Re-installing our own hook is idempotent**, not an error — it refreshes the
+  script if the hook body has since changed.
+- **A worktree or submodule is an explicit error.** When `.git` is a *file*
+  rather than a directory, the real hooks live in the parent repo; creating
+  `.git/hooks` there would silently produce a hook git never runs. Reporting
+  that beats reporting success for something that will never fire.
+- The executable bit is set on Unix, and skipped on Windows with a comment
+  explaining why (git's bundled shell doesn't consult it).
+- 6 new tests (22 total in `repowise-cli`).
+
+---
+
 ## PR #248 — Parity: add bus factor to `repowise ownership`
 **2026-07-28** · closes [#239](https://github.com/baileyrd/rusty_repo_wise/issues/239)
 

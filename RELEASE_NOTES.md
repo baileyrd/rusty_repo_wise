@@ -6,6 +6,39 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #245 — Parity: expose dead-code detection as `repowise dead-code`
+**2026-07-28** · closes [#235](https://github.com/baileyrd/rusty_repo_wise/issues/235)
+
+- **Added:** `repowise dead-code [PATH]`, with `--min-confidence
+  <low|medium|high>` and `--limit <N>`. First issue of the parity round
+  against `repowise-dev/repowise`'s `docs/reference/CLI_REFERENCE.md`.
+- **No new analysis.** `repowise_health::find_dead_code` was already public
+  and already drove the `get_dead_code` MCP tool (#45) and the dashboard —
+  it just had no CLI surface. Every other analysis layer in this port
+  (`health`, `hotspots`, `ownership`, `coupled`, `deps`) had a command;
+  this closes an inconsistency in the port's own surface as much as a gap
+  against the reference.
+- **`--min-confidence` deliberately mirrors the MCP tool's argument** of
+  the same name, parsed through one shared `parse_min_confidence` so the
+  two surfaces can't accept different spellings over time.
+- **Rendering split into a pure `render_dead_code` function**, so filtering,
+  truncation, and the empty case are testable without an index on disk.
+  This adds the first `mod tests` to `repowise-cli` (6 tests) — the crate
+  previously had none, since its commands print inline.
+- **Truncation is stated, never silent:** the full matching count is printed
+  before the capped list, and an "N more not shown" line follows it, so a
+  truncated result can't be misread as a complete one.
+- **An empty result is a clean bill, not an error** — "no candidates at or
+  above the requested confidence tier", exit 0.
+- **Documented a precision caveat found while verifying end-to-end:** the
+  analysis doesn't exclude `#[test]` functions, which have no in-repo
+  callers by construction and so dominate the `high` tier (391 candidates
+  on this repo, mostly tests). Excluding them would change `get_dead_code`'s
+  results too, so it's called out in the README rather than silently changed
+  here.
+
+---
+
 ## Restore green CI: fix `cargo fmt` violations on `main`
 **2026-07-28**
 

@@ -1,5 +1,6 @@
 mod doctor;
 mod hook;
+mod impacted;
 
 use clap::{Parser, Subcommand};
 use repowise_core::RepoIndex;
@@ -87,6 +88,17 @@ enum Command {
     Coverage {
         #[command(subcommand)]
         action: CoverageAction,
+    },
+    /// Print the tests a change provably exercises, by intersecting the
+    /// diff's changed lines with the per-test coverage map.
+    ///
+    /// An empty list is NOT evidence that nothing is affected -- the
+    /// output always states which of those two it is.
+    ImpactedTests {
+        /// A single commit or a `base..head` range. Defaults to `HEAD`.
+        revspec: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// Run setup diagnostics: git availability, history depth, index
     /// presence, and which optional env-var-gated features are active.
@@ -345,6 +357,7 @@ fn main() -> anyhow::Result<()> {
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
         Command::Coverage { action } => cmd_coverage(action),
+        Command::ImpactedTests { revspec, path } => cmd_impacted_tests(revspec.as_deref(), &path),
         Command::Doctor { path } => cmd_doctor(&path),
         Command::Hook { action } => cmd_hook(action),
         Command::Status { path, verbose } => cmd_status(&path, verbose),
@@ -923,6 +936,18 @@ fn cmd_coverage_status(path: &Path, worst: usize) -> anyhow::Result<()> {
     for (file, pct) in scored.iter().take(worst) {
         println!("    {pct:>5.1}%  {}", display_path(file, &root));
     }
+    Ok(())
+}
+
+fn cmd_impacted_tests(revspec: Option<&str>, path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let changed = repowise_git::changed_lines(&root, revspec)?;
+    let coverage = repowise_core::coverage::CoverageData::load(&root).ok();
+    let result = impacted::select(&changed, coverage.as_ref());
+    print!(
+        "{}",
+        impacted::render(&result, revspec.unwrap_or("HEAD"), &root)
+    );
     Ok(())
 }
 

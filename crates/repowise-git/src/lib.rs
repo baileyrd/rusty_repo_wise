@@ -8,10 +8,12 @@
 
 mod blame;
 mod change_risk;
+mod changed_lines;
 mod issue_refs;
 mod log;
 
 pub use change_risk::{change_risk, ChangeRisk};
+pub use changed_lines::{changed_lines, ChangedLines};
 pub use log::CommitInfo;
 
 use repowise_core::RepoIndex;

@@ -1,16 +1,14 @@
 //! `repowise export` — copy generated wiki pages out to a directory
-//! (the markdown-tree half of issue #244).
+//! (issue #244).
 //!
 //! Generated pages otherwise live only under `.repowise/wiki/`, usable
 //! in place or through the dashboard. Exporting makes them publishable:
 //! a docs site, a PR artifact, an attachment to a review.
 //!
-//! **Scope.** The reference's `repowise export` covers two features in
-//! one line — "export wiki pages to files **or architecture model**".
-//! Only the first is implemented here. Which interchange format an
-//! architecture-model export should use (DOT? Mermaid? JSON Graph?) is a
-//! design decision the reference doesn't pin down, so issue #244 stays
-//! open for it rather than being closed by this.
+//! **Scope.** This module handles the markdown half of `repowise
+//! export`. The architecture-model half lives in
+//! `repowise_graph::json_graph`; only the non-empty-target guard for it
+//! ([`json_graph_dest`]) is here, so both formats share one policy.
 
 use std::path::{Path, PathBuf};
 
@@ -94,6 +92,37 @@ pub fn plan(wiki_root: &Path, out_dir: &Path, force: bool) -> anyhow::Result<Vec
             to: out_dir.join(&rel),
         })
         .collect())
+}
+
+/// File the JSON-graph export is written to, inside `out_dir`.
+pub const JSON_GRAPH_FILE: &str = "architecture.json";
+
+/// Prepare `out_dir` for a JSON-graph export and return the file to
+/// write.
+///
+/// Applies the same non-empty guard as the markdown export, with one
+/// carve-out: a directory whose only content is a previous
+/// `architecture.json` is treated as re-exportable without `--force`.
+/// Re-running an export over its own output is the normal case, and
+/// demanding `--force` for it would train people to pass `--force`
+/// habitually -- which is exactly when it stops protecting anything.
+pub fn json_graph_dest(out_dir: &Path, force: bool) -> anyhow::Result<PathBuf> {
+    let dest = out_dir.join(JSON_GRAPH_FILE);
+    if !force {
+        let other_content = std::fs::read_dir(out_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| e.file_name() != JSON_GRAPH_FILE);
+        if other_content {
+            anyhow::bail!(
+                "{} is not empty -- pass --force to write into it anyway",
+                out_dir.display()
+            );
+        }
+    }
+    std::fs::create_dir_all(out_dir)?;
+    Ok(dest)
 }
 
 /// Execute a plan, creating parent directories as needed.
@@ -237,5 +266,38 @@ mod tests {
             .to_string();
         assert!(err.contains("no wiki pages"), "{err}");
         assert!(err.contains("repowise docs"), "{err}");
+    }
+
+    #[test]
+    fn json_graph_dest_names_the_file_inside_the_target() {
+        let root = fixture("jsondest");
+        let out = root.join("out");
+        let dest = json_graph_dest(&out, false).unwrap();
+        assert_eq!(dest, out.join(JSON_GRAPH_FILE));
+        assert!(out.is_dir(), "target directory should be created");
+    }
+
+    #[test]
+    fn json_graph_refuses_a_target_holding_unrelated_files() {
+        let root = fixture("jsonnonempty");
+        let out = root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("notes.md"), "mine\n").unwrap();
+
+        let err = json_graph_dest(&out, false).unwrap_err().to_string();
+        assert!(err.contains("not empty"), "{err}");
+        assert!(json_graph_dest(&out, true).is_ok(), "--force overrides");
+    }
+
+    #[test]
+    fn re_exporting_over_a_previous_json_graph_does_not_need_force() {
+        // Re-running an export over its own output is the normal case.
+        // Demanding --force here would train people to pass it always,
+        // which is exactly when it stops protecting anything.
+        let root = fixture("jsonreexport");
+        let out = root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(JSON_GRAPH_FILE), "{}\n").unwrap();
+        assert!(json_graph_dest(&out, false).is_ok());
     }
 }

@@ -1047,6 +1047,7 @@ dependencies = [
  "repowise-parser",
  "repowise-server",
  "repowise-workspace",
+ "serde_json",
  "tokio",
 ]
 
@@ -1105,6 +1106,8 @@ dependencies = [
  "petgraph",
  "repowise-core",
  "repowise-parser",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

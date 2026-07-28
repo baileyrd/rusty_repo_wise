@@ -6,6 +6,42 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #255 — Parity: architecture-model export in JSON Graph Format
+**2026-07-28** · closes [#244](https://github.com/baileyrd/rusty_repo_wise/issues/244)
+
+- **Added:** `repowise_graph::json_graph` and `repowise export --format
+  json-graph`, writing the dependency graph to `<DIR>/architecture.json`.
+  Completes #244 — `--format markdown` (PR #254) remains the default.
+- **JGF was chosen over DOT and Mermaid** because it's the only one of the
+  three that carries per-node metadata losslessly. The graph's nodes know their
+  language, line count, symbol kind, complexity, nesting depth, and parent
+  type; DOT and Mermaid would discard all of it to render a picture. Serde is
+  already a workspace dependency, so this adds no new third-party crate.
+- **The export is portable.** Paths are repo-relative with forward slashes, and
+  symbol ids are rebuilt from the relative path rather than reusing
+  `Symbol::id` — which embeds an **absolute** path and would otherwise bake the
+  producing machine's directory layout into every id. A test caught exactly
+  that leak during development.
+- **Output is deterministic** (nodes in a `BTreeMap`, edges sorted), so two
+  exports of an unchanged repo are byte-identical and therefore diffable.
+- **The graph is partial, and says so.** Unresolved imports and calls have no
+  target node and therefore no edge. Rather than emit something that merely
+  *looks* complete, `graph.metadata.unresolved` reports the counts, names the
+  import stems that failed to resolve, and carries a note that absent edges do
+  not imply absent dependencies — and the command prints the same warning to
+  the terminal. On this repo that's **381 unresolved imports and 7804
+  unresolved calls**, which a reader drawing conclusions from the edges needs
+  to know.
+- **Re-exporting over a previous `architecture.json` doesn't need `--force`**,
+  though an unrelated file in the target still triggers the refusal. Demanding
+  `--force` for the ordinary re-run would train people to pass it habitually,
+  which is exactly when it stops protecting anything.
+- 10 new tests (7 in `repowise-graph` over a real parsed fixture with a
+  genuinely unresolvable external import, 3 in `repowise-cli` for the target
+  guard).
+
+---
+
 ## PR #254 — Parity: `repowise export` (markdown half), and fix the wiki page count
 **2026-07-28** · part of [#244](https://github.com/baileyrd/rusty_repo_wise/issues/244)
 

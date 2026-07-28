@@ -848,7 +848,22 @@ fn cmd_ownership(file: &Path, path: &Path) -> anyhow::Result<()> {
             o.percentage, o.lines, o.author
         );
     }
+    println!(
+        "{}",
+        render_bus_factor(repowise_git::bus_factor(&ownership))
+    );
     Ok(())
+}
+
+/// Phrase a bus factor so the number can't be read as a quality score.
+/// A bare "bus factor: 1" invites the reading "one owner, tidy" -- the
+/// opposite of what it means.
+fn render_bus_factor(bus_factor: usize) -> String {
+    match bus_factor {
+        0 => "  bus factor: n/a (no blameable lines)".to_string(),
+        1 => "  bus factor: 1 -- one author wrote most of this file".to_string(),
+        n => format!("  bus factor: {n} -- {n} authors between them wrote most of this file"),
+    }
 }
 
 fn cmd_coupled(file: &Path, path: &Path, top: usize) -> anyhow::Result<()> {
@@ -1471,5 +1486,19 @@ mod tests {
             out.contains("created since indexing aren't detected"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn bus_factor_phrasing_cannot_be_read_as_a_quality_score() {
+        // A bare "1" invites "one owner, tidy" -- the opposite of the meaning.
+        let one = render_bus_factor(1);
+        assert!(one.contains("one author wrote most"), "{one}");
+
+        let three = render_bus_factor(3);
+        assert!(three.contains("3 authors between them"), "{three}");
+
+        let none = render_bus_factor(0);
+        assert!(none.contains("n/a"), "{none}");
+        assert!(none.contains("no blameable lines"), "{none}");
     }
 }

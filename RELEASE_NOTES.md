@@ -6,6 +6,37 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #248 — Parity: add bus factor to `repowise ownership`
+**2026-07-28** · closes [#239](https://github.com/baileyrd/rusty_repo_wise/issues/239)
+
+- **Added:** `repowise_git::bus_factor(&[Ownership]) -> usize`, reported by
+  `repowise ownership`. Fourth issue of the parity round.
+- **Costs no extra git work.** It's a pure function over the per-author line
+  shares `ownership_of` already returns from `git blame --line-porcelain` — no
+  new invocation, no new data collection.
+- **Answers what `ownership` couldn't.** The existing output shows *who* owns a
+  file but not whether that ownership is dangerously concentrated: one author
+  at 95% and four authors at 25% each produced the same shape of output.
+- **Threshold is 50%, and the choice is documented.** The reference defines
+  "bus factor" in its computed glossary but doesn't publish its threshold, so
+  this picks a simple majority — the smallest set of people who between them
+  wrote most of the file. A higher bar (80%) would answer the different, less
+  actionable question "who wrote nearly all of it".
+- **Reported in words, not as a bare number.** "bus factor: 1" reads to some as
+  "one tidy owner", the exact opposite of the meaning, so the output spells it
+  out: `1 -- one author wrote most of this file`.
+- **Two degenerate cases distinguished:** a file with no blameable lines
+  returns `0` and prints `n/a`, which is deliberately *not* the same as a bus
+  factor of `1`. Shares that never reach the threshold (partial blame
+  attribution, rounding loss) fall back to counting every author rather than
+  silently returning a too-low number.
+- **Doesn't assume its input is sorted** — `ownership_of` returns
+  highest-share-first, but `bus_factor` sorts defensively, with a test pinning
+  that.
+- 6 new tests (5 in `repowise-git`, 1 in `repowise-cli`).
+
+---
+
 ## PR #247 — Parity: add `repowise status` (index freshness)
 **2026-07-28** · closes [#237](https://github.com/baileyrd/rusty_repo_wise/issues/237)
 

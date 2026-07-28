@@ -303,6 +303,43 @@ fn default_hot_path_sync_io() -> f64 {
     0.3
 }
 
+/// Coverage thresholds and penalties for issue #243's two markers.
+///
+/// All four numbers are documented, hand-picked, and deliberately round
+/// -- the same fixed-penalty approach every other marker here uses. The
+/// ML-calibrated-weights question in issue #62 stays open and undecided;
+/// nothing below presumes an answer to it.
+///
+/// `coverage_gap` is a whole-file marker and a mild one: under-tested is
+/// a real signal but a common and often-deliberate state (generated
+/// code, thin wrappers), so it costs less than a structural defect.
+fn default_coverage_gap() -> f64 {
+    0.4
+}
+
+/// `untested_hotspot` is the heaviest coverage penalty here because it
+/// needs *three* independent signals to agree -- the file churns, four
+/// or more files depend on it, and it is barely tested. Each alone is
+/// unremarkable; a well-tested hotspot is fine and an untested leaf
+/// nobody imports is fine. The intersection is where risk actually
+/// concentrates, which is the same reasoning behind `hot_path_sync_io`
+/// (#186) and the reason this can carry a real weight without drowning
+/// scores in false positives.
+fn default_untested_hotspot() -> f64 {
+    1.0
+}
+
+/// Below this line-coverage percentage a file earns `coverage_gap`.
+const COVERAGE_GAP_THRESHOLD: f64 = 50.0;
+
+/// Below this, and only in combination with the hotspot and dependent
+/// gates, a file earns `untested_hotspot`. Stricter than the plain gap
+/// threshold: this marker claims something much stronger.
+const UNTESTED_HOTSPOT_COVERAGE: f64 = 40.0;
+
+/// How many dependents make a file "centrally depended upon".
+const UNTESTED_HOTSPOT_MIN_DEPENDENTS: usize = 4;
+
 /// Per-marker scoring weights — the abstraction layer this crate's
 /// penalties live behind. `Default` matches the hand-picked values this
 /// crate always used (nothing changes for a caller that doesn't build
@@ -320,6 +357,10 @@ fn default_hot_path_sync_io() -> f64 {
 /// penalties as before, just no longer hardcoded as unreachable consts.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
 pub struct HealthWeights {
+    #[serde(default = "default_coverage_gap")]
+    pub coverage_gap: f64,
+    #[serde(default = "default_untested_hotspot")]
+    pub untested_hotspot: f64,
     #[serde(default = "default_long_function")]
     pub long_function: f64,
     #[serde(default = "default_high_complexity")]
@@ -418,6 +459,8 @@ impl Default for HealthWeights {
             goroutine_in_unbounded_loop: default_goroutine_in_unbounded_loop(),
             membership_test_in_loop: default_membership_test_in_loop(),
             hot_path_sync_io: default_hot_path_sync_io(),
+            coverage_gap: default_coverage_gap(),
+            untested_hotspot: default_untested_hotspot(),
         }
     }
 }
@@ -464,6 +507,8 @@ impl HealthWeights {
             FindingKind::GoroutineInUnboundedLoop => self.goroutine_in_unbounded_loop,
             FindingKind::MembershipTestInLoop => self.membership_test_in_loop,
             FindingKind::HotPathSyncIo => self.hot_path_sync_io,
+            FindingKind::CoverageGap => self.coverage_gap,
+            FindingKind::UntestedHotspot => self.untested_hotspot,
         }
     }
 }
@@ -501,6 +546,8 @@ pub enum FindingKind {
     GoroutineInUnboundedLoop,
     MembershipTestInLoop,
     HotPathSyncIo,
+    CoverageGap,
+    UntestedHotspot,
 }
 
 impl FindingKind {
@@ -537,6 +584,8 @@ impl FindingKind {
             FindingKind::GoroutineInUnboundedLoop => "goroutine-in-unbounded-loop",
             FindingKind::MembershipTestInLoop => "membership-test-in-loop",
             FindingKind::HotPathSyncIo => "hot-path-sync-io",
+            FindingKind::CoverageGap => "coverage-gap",
+            FindingKind::UntestedHotspot => "untested-hotspot",
         }
     }
 }
@@ -614,6 +663,28 @@ pub fn analyze_with_hotspots(
     weights: &HealthWeights,
     hot_files: &HashSet<PathBuf>,
 ) -> HealthReport {
+    analyze_with_context(index, graph, weights, hot_files, None)
+}
+
+/// Score `index` with `weights`, hotspot data, and optionally ingested
+/// test coverage -- reporting `coverage_gap` and `untested_hotspot`
+/// (issue #243) when coverage is present.
+///
+/// Follows the same precedent `analyze_with_hotspots` set for git data
+/// (#186): the caller supplies the extra signal, and every existing
+/// entry point keeps working and simply never sees these markers. Note
+/// that `CoverageData` lives in `repowise-core`, which this crate
+/// already depends on for `RepoIndex` -- so this adds no new dependency.
+///
+/// **These are ordinary fixed-penalty markers.** Nothing here presumes
+/// an answer to the ML-calibrated-weights question in issue #62.
+pub fn analyze_with_context(
+    index: &RepoIndex,
+    graph: &RepoGraph,
+    weights: &HealthWeights,
+    hot_files: &HashSet<PathBuf>,
+    coverage: Option<&repowise_core::coverage::CoverageData>,
+) -> HealthReport {
     let mut findings = Vec::new();
 
     for file in &index.files {
@@ -642,6 +713,7 @@ pub fn analyze_with_hotspots(
     check_duplicate_code(index, &mut findings);
     check_near_duplicate_code(index, &mut findings);
     check_low_cohesion(index, &mut findings);
+    check_coverage(index, graph, hot_files, coverage, &mut findings);
 
     let file_scores = score_files(index, &findings, weights);
     let average_score = if file_scores.is_empty() {
@@ -1101,6 +1173,63 @@ fn check_function_markers(
                      trait impl, entry point, or a call this heuristic couldn't resolve)"
                 .to_string(),
         });
+    }
+}
+
+/// `coverage_gap` and `untested_hotspot` (issue #243).
+///
+/// Silent when `coverage` is `None`: a repo that never ingested coverage
+/// must not be reported as untested. That distinction is carried all the
+/// way from `CoverageData::line_coverage_of`, which returns `None` for a
+/// file no report measured and `Some(0.0)` only for one that was
+/// measured with nothing executed.
+fn check_coverage(
+    index: &RepoIndex,
+    graph: &RepoGraph,
+    hot_files: &HashSet<PathBuf>,
+    coverage: Option<&repowise_core::coverage::CoverageData>,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(coverage) = coverage else {
+        return;
+    };
+
+    for file in &index.files {
+        // None => never measured. Skipping is the whole point: an
+        // unmeasured file is not an untested one.
+        let Some(pct) = coverage.line_coverage_of(&file.path) else {
+            continue;
+        };
+
+        let dependents = graph.dependents_of(&file.path).len();
+        if hot_files.contains(&file.path)
+            && dependents >= UNTESTED_HOTSPOT_MIN_DEPENDENTS
+            && pct < UNTESTED_HOTSPOT_COVERAGE
+        {
+            findings.push(Finding {
+                file: file.path.clone(),
+                symbol: None,
+                line: None,
+                kind: FindingKind::UntestedHotspot,
+                detail: format!(
+                    "churn hotspot with {dependents} dependent(s) at {pct:.0}% line coverage"
+                ),
+            });
+            // Don't also charge the milder gap marker for the same file:
+            // untested_hotspot already subsumes it, and stacking both
+            // would double-penalize one underlying fact.
+            continue;
+        }
+
+        if pct < COVERAGE_GAP_THRESHOLD {
+            findings.push(Finding {
+                file: file.path.clone(),
+                symbol: None,
+                line: None,
+                kind: FindingKind::CoverageGap,
+                detail: format!("{pct:.0}% line coverage"),
+            });
+        }
     }
 }
 

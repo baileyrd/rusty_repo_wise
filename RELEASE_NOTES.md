@@ -6,6 +6,43 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #253 — Parity: coverage health markers (`coverage_gap`, `untested_hotspot`)
+**2026-07-28** · closes [#243](https://github.com/baileyrd/rusty_repo_wise/issues/243)
+
+- **Added:** `FindingKind::CoverageGap` (−0.4) and
+  `FindingKind::UntestedHotspot` (−1.0), plus a new `analyze_with_context`
+  entry point. Ninth and final implementable issue of the parity round.
+- **`untested_hotspot` needs three independent signals to agree** — the file
+  is a churn hotspot, four or more files depend on it, and it's under 40%
+  covered. Each alone is unremarkable: a well-tested hotspot is fine, an
+  untested leaf nobody imports is fine. The intersection is where risk
+  concentrates, which is the same reasoning behind `hot_path_sync_io` (#186)
+  and why this can carry the heavier weight without flooding scores.
+- **The two markers never both charge one file.** `untested_hotspot` subsumes
+  `coverage_gap`, so a file earning the former skips the latter — stacking
+  both would double-penalize a single underlying fact.
+- **Without ingested coverage, neither marker fires.** A repo that never ran
+  `coverage add` must not be scored as untested, and that guarantee runs down
+  to `line_coverage_of` returning `None` for an unmeasured file versus
+  `Some(0.0)` for one measured with nothing executed. The first test in the
+  new suite pins it across all three entry points.
+- **Follows #186's precedent for extra signals:** the caller supplies
+  coverage, and `analyze`/`analyze_with_weights`/`analyze_with_hotspots` all
+  behave exactly as before and simply never see these markers. `CoverageData`
+  lives in `repowise-core`, which `repowise-health` already depended on, so
+  this adds **no new dependency**.
+- **Both penalties are `--weights`-configurable** like every other marker, and
+  all four constants (two thresholds, one dependent count, two penalties) carry
+  their rationale at the definition.
+- **Still fixed-penalty.** Nothing here presumes an answer to #62's
+  ML-calibrated-weights question, which stays open.
+- Writing the tests surfaced that `Language::Other` files never get import
+  edges at all (`repowise-graph` skips them), so a fixture using it can never
+  produce dependents — noted in the test so the next author doesn't repeat it.
+- 6 new tests in `repowise-health`.
+
+---
+
 ## PR #252 — Parity: add `repowise impacted-tests`
 **2026-07-28** · closes [#242](https://github.com/baileyrd/rusty_repo_wise/issues/242)
 

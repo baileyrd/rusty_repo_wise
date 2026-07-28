@@ -6,6 +6,38 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #252 — Parity: add `repowise impacted-tests`
+**2026-07-28** · closes [#242](https://github.com/baileyrd/rusty_repo_wise/issues/242)
+
+- **Added:** `repowise_git::changed_lines` (line-level diff extraction) and
+  `repowise impacted-tests [REVSPEC]`, intersecting a diff's changed lines with
+  the per-test coverage map from #241. Eighth issue of the parity round.
+- **Line-level, not file-level.** `change_risk` already resolved a revspec to
+  changed *files* via `--numstat`; impacted-test selection needs changed
+  *lines*, so this parses `git diff -U0` hunk headers. Deletion-only hunks
+  contribute nothing, which is correct — a coverage map records lines that
+  exist and ran, and a deleted line does neither.
+- **The safeguard is the feature.** Four distinct situations yield an empty
+  test list and only one means "no test is affected": `MapPresent`, `NoMap`,
+  `NoCoverage`, and `NoSourceLineChanges`. The three that *cannot* answer print
+  `CANNOT ANSWER` and say why. A developer who reads "no impacted tests" as
+  "safe to skip testing", when the real cause was that no coverage was ever
+  ingested, has been actively misled into shipping untested code.
+- **Even the genuine empty result is hedged** — it states the change is
+  untested *by the ingested suite*, not that it's safe.
+- **One predicate owns the distinction.** `Status::empty_list_is_meaningful()`
+  is the single place deciding whether an empty list is a finding or a hole in
+  the data, and `render` branches on it rather than re-deriving that per
+  variant.
+- **End-to-end verification found a real trap:** `git show` reports no diff at
+  all for a **merge commit**, so running this on a merge read as "this change
+  touched nothing". An entirely empty diff is now its own message naming the
+  merge-commit cause and suggesting a parent or a `base..head` range.
+- 12 new tests (5 in `repowise-git` for diff parsing, 7 in `repowise-cli` for
+  selection and every output state).
+
+---
+
 ## PR #251 — Parity: test-coverage ingest (`repowise coverage add|status`)
 **2026-07-28** · closes [#241](https://github.com/baileyrd/rusty_repo_wise/issues/241)
 

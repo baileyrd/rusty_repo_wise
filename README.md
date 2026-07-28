@@ -310,6 +310,7 @@ repowise health [PATH]             # code-health KPIs and lowest-scoring files
 repowise coverage add <REPORTS...> # ingest LCOV report(s), merging into existing coverage
                                     #   --replace to discard prior coverage, --path <DIR>
 repowise coverage status [PATH]    # per-file coverage summary + per-test map stats
+repowise impacted-tests [REVSPEC] [PATH]  # tests a change provably exercises (needs coverage + per-test map)
 repowise doctor [PATH]             # setup diagnostics: git, history depth, index, optional env vars
 repowise hook install|uninstall|status [PATH]  # post-commit hook that refreshes the index after each commit
 repowise status [PATH]             # index freshness: stale/missing files, wiki + dashboard state
@@ -1166,6 +1167,37 @@ Two distinctions the implementation is careful about:
   `/builds/proj/src/lib.rs` still finds the local `src/lib.rs`. Anything that
   still doesn't resolve is warned about by count and by name, because coverage
   that silently matched nothing looks identical to coverage that worked.
+
+## Impacted tests
+
+`repowise impacted-tests [REVSPEC] [PATH]` intersects a diff's changed lines
+with the per-test coverage map, printing the tests that provably execute those
+lines. Needs a prior `repowise coverage add` with reports carrying `TN:`
+records.
+
+**An empty list is never presented as reassurance.** Four distinct situations
+produce no tests, and only one of them means "no test is affected":
+
+| Status | Meaning |
+| --- | --- |
+| `per-test map consulted` | genuine — no test executes the changed lines |
+| `no coverage data ingested` | can't answer; nothing was ever measured |
+| `coverage present, but no per-test map` | can't answer; reports had no `TN:` records |
+| `no changed lines in any measured file` | can't answer; diff touched only unmeasured files |
+
+The three "can't answer" states print `CANNOT ANSWER` and say so in words. This
+matters more than it might look: a developer who reads "no impacted tests" as
+"safe to skip testing", when the real cause was that no coverage was ever
+ingested, has been actively misled into shipping untested code. Even the
+genuine empty result says it means untested *by the ingested suite*, not safe.
+
+An entirely empty diff is called out separately, naming the likely cause:
+`git show` reports no diff for a **merge commit**, which otherwise reads as
+"this change touched nothing".
+
+Line ranges come from `git diff -U0` hunk headers. Deletion-only hunks
+contribute nothing, which is correct — a coverage map records lines that exist
+and ran, and a deleted line does neither.
 
 ## Doctor
 

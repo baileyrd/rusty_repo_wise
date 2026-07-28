@@ -1,3 +1,5 @@
+mod hook;
+
 use clap::{Parser, Subcommand};
 use repowise_core::RepoIndex;
 use repowise_graph::RepoGraph;
@@ -79,6 +81,12 @@ enum Command {
         /// count is still reported.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    /// Manage the post-commit git hook that refreshes the index after
+    /// each commit.
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
     },
     /// Report index freshness: whether an index exists, when it was
     /// written, and how much of it the working tree has moved past.
@@ -254,6 +262,29 @@ enum Command {
     },
 }
 
+/// `repowise hook <action>`. Split from `Command` so the three actions
+/// share one `hook` namespace rather than three top-level commands.
+#[derive(Subcommand)]
+enum HookAction {
+    /// Install the post-commit hook. Refuses to overwrite a hook this
+    /// tool didn't write.
+    Install {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Remove the post-commit hook. Refuses to remove a hook this tool
+    /// didn't write.
+    Uninstall {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Report whether the hook is installed, absent, or foreign.
+    Status {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -272,6 +303,7 @@ fn main() -> anyhow::Result<()> {
             min_confidence,
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
+        Command::Hook { action } => cmd_hook(action),
         Command::Status { path, verbose } => cmd_status(&path, verbose),
         Command::Risk { revspec, path } => cmd_risk(revspec.as_deref(), &path),
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
@@ -735,6 +767,16 @@ fn render_status(report: &StatusReport, root: &Path, verbose: bool) -> String {
         }
     ));
     out
+}
+
+fn cmd_hook(action: HookAction) -> anyhow::Result<()> {
+    let message = match action {
+        HookAction::Install { path } => hook::install(&path.canonicalize()?)?,
+        HookAction::Uninstall { path } => hook::uninstall(&path.canonicalize()?)?,
+        HookAction::Status { path } => hook::status(&path.canonicalize()?)?,
+    };
+    println!("{message}");
+    Ok(())
 }
 
 fn cmd_status(path: &Path, verbose: bool) -> anyhow::Result<()> {

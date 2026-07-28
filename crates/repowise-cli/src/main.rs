@@ -85,17 +85,18 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Export generated wiki pages to a directory, preserving the tree.
-    ///
-    /// Markdown pages only. The reference's `export` also mentions an
-    /// "architecture model" export, whose interchange format is an open
-    /// design question -- see issue #244.
+    /// Export the generated wiki, or the dependency graph as an
+    /// architecture model.
     Export {
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Directory to write the exported page tree into.
+        /// Directory to write into.
         #[arg(long)]
         out: PathBuf,
+        /// `markdown` writes the wiki page tree; `json-graph` writes the
+        /// dependency graph as a single JSON Graph Format document.
+        #[arg(long, value_enum, default_value_t = ExportFormat::Markdown)]
+        format: ExportFormat,
         /// Write into a non-empty target directory anyway.
         #[arg(long)]
         force: bool,
@@ -305,6 +306,15 @@ enum Command {
     },
 }
 
+/// What `repowise export` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ExportFormat {
+    /// The generated wiki page tree, copied out verbatim.
+    Markdown,
+    /// The dependency graph as one JSON Graph Format document.
+    JsonGraph,
+}
+
 /// `repowise coverage <action>`.
 #[derive(Subcommand)]
 enum CoverageAction {
@@ -372,7 +382,12 @@ fn main() -> anyhow::Result<()> {
             min_confidence,
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
-        Command::Export { path, out, force } => cmd_export(&path, &out, force),
+        Command::Export {
+            path,
+            out,
+            format,
+            force,
+        } => cmd_export(&path, &out, format, force),
         Command::Coverage { action } => cmd_coverage(action),
         Command::ImpactedTests { revspec, path } => cmd_impacted_tests(revspec.as_deref(), &path),
         Command::Doctor { path } => cmd_doctor(&path),
@@ -850,16 +865,48 @@ fn render_status(report: &StatusReport, root: &Path, verbose: bool) -> String {
     out
 }
 
-fn cmd_export(path: &Path, out: &Path, force: bool) -> anyhow::Result<()> {
+fn cmd_export(path: &Path, out: &Path, format: ExportFormat, force: bool) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let wiki_root = repowise_docs::wiki_root(&root);
-    let plan = export::plan(&wiki_root, out, force)?;
-    let count = export::execute(&plan)?;
-    println!(
-        "exported {count} wiki page(s) from {} to {}",
-        wiki_root.display(),
-        out.display()
-    );
+    match format {
+        ExportFormat::Markdown => {
+            let wiki_root = repowise_docs::wiki_root(&root);
+            let plan = export::plan(&wiki_root, out, force)?;
+            let count = export::execute(&plan)?;
+            println!(
+                "exported {count} wiki page(s) from {} to {}",
+                wiki_root.display(),
+                out.display()
+            );
+        }
+        ExportFormat::JsonGraph => {
+            let index = RepoIndex::load(&root)?;
+            let graph = RepoGraph::build(&index);
+            let doc = graph.to_json_graph(&index);
+            let dest = export::json_graph_dest(out, force)?;
+            // Pretty-printed rather than compact: an architecture model
+            // is something people read and diff in review, and the size
+            // difference doesn't matter for a file written once.
+            std::fs::write(&dest, serde_json::to_string_pretty(&doc)?)?;
+            println!(
+                "exported {} node(s) and {} edge(s) to {}",
+                doc.graph.nodes.len(),
+                doc.graph.edges.len(),
+                dest.display()
+            );
+            let unresolved = &doc.graph.metadata.unresolved;
+            if unresolved.imports > 0 || unresolved.calls > 0 {
+                // Say it out loud, not just in the file's metadata: the
+                // graph is partial and a reader should know before they
+                // draw conclusions from it.
+                println!(
+                    "  note: {} unresolved import(s) and {} unresolved call(s) have no",
+                    unresolved.imports, unresolved.calls
+                );
+                println!("  edge (see graph.metadata.unresolved) -- absent edges do not");
+                println!("  imply absent dependencies");
+            }
+        }
+    }
     Ok(())
 }
 

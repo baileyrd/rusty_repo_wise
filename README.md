@@ -307,7 +307,8 @@ repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
-repowise export --out <DIR> [PATH] # copy generated wiki pages out, preserving the tree (--force for a non-empty target)
+repowise export --out <DIR> [PATH] # export the wiki tree, or the dependency graph as JSON Graph Format
+                                    #   --format <markdown|json-graph> (default markdown), --force for a non-empty target
 repowise coverage add <REPORTS...> # ingest LCOV report(s), merging into existing coverage
                                     #   --replace to discard prior coverage, --path <DIR>
 repowise coverage status [PATH]    # per-file coverage summary + per-test map stats
@@ -1153,10 +1154,34 @@ never run, or the wiki exists but holds no pages, `export` says so and exits
 non-zero — reporting "exported 0 pages" successfully would be
 indistinguishable from a real export of a repo that genuinely has no docs.
 
-Markdown only. The reference's `export` also mentions an "architecture model"
-export, but doesn't specify an interchange format (DOT? Mermaid? JSON Graph?).
-That half remains an open design question — see issue #244, which this
-deliberately does not close.
+### Architecture model (`--format json-graph`)
+
+`repowise export --out <DIR> --format json-graph` writes the dependency graph
+to `<DIR>/architecture.json` in [JSON Graph Format](https://jsongraphformat.info/).
+
+**Why JGF over DOT or Mermaid.** It's the only one of the three that carries
+per-node metadata losslessly. This graph's nodes know their language, line
+count, symbol kind, complexity, nesting depth, and parent type — DOT and
+Mermaid would have to discard all of it to render a picture. JGF keeps it, so
+the export is something a tool can consume rather than only something a human
+can look at.
+
+File nodes are `file:<repo-relative-path>`, symbol nodes are
+`symbol:<path>::<name>@<line>`, and edges carry `contains`/`imports`/`calls`
+relations. Paths are repo-relative with forward slashes, and symbol ids are
+rebuilt from the relative path rather than reusing `Symbol::id` (which embeds
+an absolute path) — so an export is portable between machines. Output is
+deterministic, so two exports of an unchanged repo are byte-identical and
+therefore diffable.
+
+**The graph is partial, and says so.** This port resolves imports and calls
+with directory-layout heuristics, not compiler-grade name resolution, and
+leaves ambiguous or external references unresolved rather than guessing. Those
+have no target node, so they have no edge. Rather than emit a graph that merely
+*looks* complete, `graph.metadata.unresolved` reports the counts and names the
+import stems that failed to resolve, and the command prints the same warning to
+the terminal. On this repo that's 381 unresolved imports and 7804 unresolved
+calls — a reader drawing conclusions from the edges needs to know that.
 
 ## Coverage health markers
 

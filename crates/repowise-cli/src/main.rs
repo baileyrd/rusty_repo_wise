@@ -1,3 +1,4 @@
+mod doctor;
 mod hook;
 
 use clap::{Parser, Subcommand};
@@ -81,6 +82,15 @@ enum Command {
         /// count is still reported.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    /// Run setup diagnostics: git availability, history depth, index
+    /// presence, and which optional env-var-gated features are active.
+    ///
+    /// Diagnostic only -- never mutates state. A degraded-but-working
+    /// setup reports `warn`, not `fail`.
+    Doctor {
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// Manage the post-commit git hook that refreshes the index after
     /// each commit.
@@ -303,6 +313,7 @@ fn main() -> anyhow::Result<()> {
             min_confidence,
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
+        Command::Doctor { path } => cmd_doctor(&path),
         Command::Hook { action } => cmd_hook(action),
         Command::Status { path, verbose } => cmd_status(&path, verbose),
         Command::Risk { revspec, path } => cmd_risk(revspec.as_deref(), &path),
@@ -767,6 +778,19 @@ fn render_status(report: &StatusReport, root: &Path, verbose: bool) -> String {
         }
     ));
     out
+}
+
+fn cmd_doctor(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let checks = doctor::run_checks(&root);
+    print!("{}", doctor::render(&checks, &root));
+    if doctor::any_failed(&checks) {
+        // Warnings deliberately don't reach here: a degraded setup is
+        // still a working one, and a nonzero exit would make `doctor`
+        // useless in a CI gate that only cares about hard breakage.
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn cmd_hook(action: HookAction) -> anyhow::Result<()> {

@@ -307,6 +307,9 @@ repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
+repowise coverage add <REPORTS...> # ingest LCOV report(s), merging into existing coverage
+                                    #   --replace to discard prior coverage, --path <DIR>
+repowise coverage status [PATH]    # per-file coverage summary + per-test map stats
 repowise doctor [PATH]             # setup diagnostics: git, history depth, index, optional env vars
 repowise hook install|uninstall|status [PATH]  # post-commit hook that refreshes the index after each commit
 repowise status [PATH]             # index freshness: stale/missing files, wiki + dashboard state
@@ -1129,6 +1132,40 @@ ML-calibrated organizational-signal markers (`churn_risk`,
 question, not a mechanical gap). Hotspots and bug-fix history are now
 implemented (see "Git analytics" below) but aren't yet folded into the
 health score itself — that's a natural follow-up, not done here.
+
+## Test coverage
+
+`repowise coverage add <REPORTS...>` ingests LCOV reports; `repowise coverage
+status` summarises them. This is the foundation of the test-intelligence layer
+— the reference's `impacted-tests` and its `untested_hotspot`/`coverage_gap`
+health markers both build on it (tracked in issues #242 and #243).
+
+Two data shapes are stored, matching the reference:
+
+- a **per-file aggregate** merged across every test, which drives coverage-gap
+  analysis; and
+- a **per-test map** (from LCOV's `TN:` records) of which test executed which
+  lines, which is what `impacted-tests` will need.
+
+**LCOV only, deliberately.** The reference also reads Cobertura XML, Clover
+XML, coverage.py's SQLite files, and its own normalized JSON. LCOV is the one
+format parseable with no new dependency; every other would pull in an XML or
+SQLite crate. The rest are follow-ups.
+
+**Reports merge rather than replace** (`--replace` opts out), so a suite split
+across CI shards can be ingested one report at a time.
+
+Two distinctions the implementation is careful about:
+
+- **"Never measured" is not "0% covered."** `line_coverage_of` returns `None`
+  for a file no report mentions and `Some(0.0)` for one that was measured and
+  had nothing run. Collapsing those would report unmeasured files as untested.
+- **Paths that match nothing are reported loudly, not dropped.** LCOV paths may
+  be absolute from whatever machine ran the suite, so ingest resolves them
+  against the repo root and retries by longest suffix — a CI path like
+  `/builds/proj/src/lib.rs` still finds the local `src/lib.rs`. Anything that
+  still doesn't resolve is warned about by count and by name, because coverage
+  that silently matched nothing looks identical to coverage that worked.
 
 ## Doctor
 

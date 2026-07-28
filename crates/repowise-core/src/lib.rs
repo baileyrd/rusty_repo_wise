@@ -3,6 +3,7 @@
 //! This crate defines the on-disk index format and the language-agnostic
 //! structures produced by `repowise-parser` and consumed by `repowise-graph`.
 
+pub mod coverage;
 mod walk;
 
 pub use walk::{discover_files, DiscoveredFile};

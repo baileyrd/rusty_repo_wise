@@ -83,6 +83,11 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Ingest and inspect test-coverage reports (LCOV).
+    Coverage {
+        #[command(subcommand)]
+        action: CoverageAction,
+    },
     /// Run setup diagnostics: git availability, history depth, index
     /// presence, and which optional env-var-gated features are active.
     ///
@@ -272,6 +277,32 @@ enum Command {
     },
 }
 
+/// `repowise coverage <action>`.
+#[derive(Subcommand)]
+enum CoverageAction {
+    /// Ingest one or more LCOV reports, merging them into any coverage
+    /// already recorded.
+    Add {
+        /// LCOV files to ingest.
+        #[arg(required = true)]
+        reports: Vec<PathBuf>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Discard previously ingested coverage instead of merging into
+        /// it.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Show the per-file coverage summary and per-test map statistics.
+    Status {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many of the least-covered files to list.
+        #[arg(long, default_value_t = 10)]
+        worst: usize,
+    },
+}
+
 /// `repowise hook <action>`. Split from `Command` so the three actions
 /// share one `hook` namespace rather than three top-level commands.
 #[derive(Subcommand)]
@@ -313,6 +344,7 @@ fn main() -> anyhow::Result<()> {
             min_confidence,
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
+        Command::Coverage { action } => cmd_coverage(action),
         Command::Doctor { path } => cmd_doctor(&path),
         Command::Hook { action } => cmd_hook(action),
         Command::Status { path, verbose } => cmd_status(&path, verbose),
@@ -778,6 +810,120 @@ fn render_status(report: &StatusReport, root: &Path, verbose: bool) -> String {
         }
     ));
     out
+}
+
+fn cmd_coverage(action: CoverageAction) -> anyhow::Result<()> {
+    match action {
+        CoverageAction::Add {
+            reports,
+            path,
+            replace,
+        } => cmd_coverage_add(&reports, &path, replace),
+        CoverageAction::Status { path, worst } => cmd_coverage_status(&path, worst),
+    }
+}
+
+fn cmd_coverage_add(reports: &[PathBuf], path: &Path, replace: bool) -> anyhow::Result<()> {
+    use repowise_core::coverage::{self, CoverageData};
+
+    let root = path.canonicalize()?;
+    // Merge into existing coverage by default: the reference
+    // auto-discovers and merges multiple sources, and a suite split
+    // across CI shards produces one report per shard.
+    let mut data = if replace {
+        CoverageData::default()
+    } else {
+        CoverageData::load(&root).unwrap_or_default()
+    };
+
+    let mut total_unmatched = Vec::new();
+    for report in reports {
+        let text = std::fs::read_to_string(report)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", report.display()))?;
+        let (parsed, summary) = coverage::ingest(&text, &root)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", report.display()))?;
+        println!(
+            "  {}: {} file(s), {} test context(s)",
+            report.display(),
+            summary.files_ingested,
+            summary.tests_seen
+        );
+        total_unmatched.extend(summary.unmatched_paths);
+        data.merge(parsed);
+    }
+
+    let saved = data.save(&root)?;
+    println!(
+        "ingested {} report(s) -> {} file(s) covered, {} test context(s) ({})",
+        reports.len(),
+        data.files.len(),
+        data.per_test.len(),
+        saved.display()
+    );
+
+    // Loud on purpose. Coverage whose paths don't line up with the repo
+    // produces a clean-looking but empty result, which is the most
+    // likely way this whole layer silently does nothing.
+    if !total_unmatched.is_empty() {
+        total_unmatched.sort();
+        total_unmatched.dedup();
+        println!(
+            "  warning: {} path(s) in the report(s) matched no file under {}:",
+            total_unmatched.len(),
+            root.display()
+        );
+        for p in total_unmatched.iter().take(10) {
+            println!("    {}", p.display());
+        }
+        if total_unmatched.len() > 10 {
+            println!("    ... {} more", total_unmatched.len() - 10);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_coverage_status(path: &Path, worst: usize) -> anyhow::Result<()> {
+    use repowise_core::coverage::CoverageData;
+
+    let root = path.canonicalize()?;
+    let Ok(data) = CoverageData::load(&root) else {
+        println!("no coverage data -- run `repowise coverage add <REPORT>`");
+        return Ok(());
+    };
+
+    let mut scored: Vec<(PathBuf, f64)> = data
+        .files
+        .keys()
+        .filter_map(|p| data.line_coverage_of(p).map(|pct| (p.clone(), pct)))
+        .collect();
+
+    println!("Repowise coverage for {}", root.display());
+    if scored.is_empty() {
+        println!("  coverage recorded, but no file has any known lines");
+        return Ok(());
+    }
+
+    let mean = scored.iter().map(|(_, p)| p).sum::<f64>() / scored.len() as f64;
+    println!(
+        "  {} file(s) measured, {:.1}% mean line coverage",
+        scored.len(),
+        mean
+    );
+    println!(
+        "  per-test map: {}",
+        if data.has_per_test_map() {
+            format!("{} test context(s)", data.per_test.len())
+        } else {
+            "none -- reports carried no TN: records, so `impacted-tests` can't run".to_string()
+        }
+    );
+
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    println!("  least-covered files:");
+    for (file, pct) in scored.iter().take(worst) {
+        println!("    {pct:>5.1}%  {}", display_path(file, &root));
+    }
+    Ok(())
 }
 
 fn cmd_doctor(path: &Path) -> anyhow::Result<()> {

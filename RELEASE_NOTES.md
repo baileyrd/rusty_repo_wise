@@ -6,6 +6,45 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #251 — Parity: test-coverage ingest (`repowise coverage add|status`)
+**2026-07-28** · closes [#241](https://github.com/baileyrd/rusty_repo_wise/issues/241)
+
+- **Added:** `repowise_core::coverage` (LCOV parser + `CoverageData` store) and
+  `repowise coverage add|status`. Seventh issue of the parity round, and the
+  first slice of a layer this port had **nothing** for — before this, the
+  string `coverage` appeared once in the whole crate tree, in an unrelated
+  comment.
+- **Stays deterministic.** The reference describes test intelligence as
+  index-lookup based with no LLM and no network, so this lands entirely inside
+  the port's existing design — it doesn't touch #61's open LLM question.
+- **Stores both shapes the reference defines:** a per-file aggregate merged
+  across tests, and a per-test map (from LCOV `TN:` records) of which test
+  executed which lines. The per-test map has no consumer until #242, but it's
+  recorded now — re-ingesting every report later just to add it would be
+  wasted work, and LCOV supplies it for free.
+- **LCOV only, deliberately.** Cobertura XML, Clover XML, coverage.py SQLite,
+  and the reference's normalized JSON would each pull in an XML or SQLite
+  dependency. LCOV is the one format parseable with nothing new.
+- **Reports merge rather than replace** (`--replace` opts out), so a suite
+  sharded across CI jobs can be ingested one report at a time.
+- **"Never measured" is kept distinct from "0% covered."**
+  `line_coverage_of` returns `None` for a file no report mentions and
+  `Some(0.0)` for one measured with nothing executed. Collapsing them would
+  make unmeasured files indistinguishable from untested ones — the exact error
+  that would poison #243's `untested_hotspot` marker.
+- **Unmatched paths are reported loudly, not dropped.** LCOV records paths from
+  whatever machine ran the suite, so ingest resolves against the repo root and
+  retries by longest suffix (`/builds/proj/src/lib.rs` still finds the local
+  `src/lib.rs`). Anything still unresolved is warned about by count and by
+  name: coverage that silently matched nothing looks exactly like coverage that
+  worked.
+- **Malformed input errors rather than panicking** — a bad `DA:` record, or one
+  appearing before any `SF:`, is a clear error; `LF:`/`LH:`/`FN*`/`BR*` summary
+  records are ignored rather than rejected, since older writers vary.
+- 11 new tests in `repowise-core`.
+
+---
+
 ## PR #250 — Parity: add `repowise doctor` (setup diagnostics)
 **2026-07-28** · closes [#240](https://github.com/baileyrd/rusty_repo_wise/issues/240)
 

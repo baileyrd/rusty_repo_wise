@@ -1134,6 +1134,38 @@ question, not a mechanical gap). Hotspots and bug-fix history are now
 implemented (see "Git analytics" below) but aren't yet folded into the
 health score itself — that's a natural follow-up, not done here.
 
+## Coverage health markers
+
+Once coverage is ingested, `repowise health` reports two more markers:
+
+| Marker | Fires when | Penalty |
+| --- | --- | --- |
+| `coverage-gap` | a measured file is under 50% line coverage | −0.4 |
+| `untested-hotspot` | a churn hotspot **and** ≥4 dependents **and** <40% coverage | −1.0 |
+
+`untested_hotspot` is the heavier of the two because it needs **three
+independent signals to agree**. Each alone is unremarkable — a well-tested
+hotspot is fine, an untested leaf nobody imports is fine — but the
+intersection is where risk actually concentrates. That's the same reasoning
+behind `hot_path_sync_io`, and it's why this can carry a real weight without
+flooding scores with false positives. A file that earns `untested_hotspot`
+does **not** also get charged `coverage_gap`; stacking both would
+double-penalize one underlying fact.
+
+**Without ingested coverage, neither marker ever fires** — a repo that never
+ran `coverage add` is not reported as untested. That guarantee runs all the
+way down to `line_coverage_of`, which returns `None` for an unmeasured file
+and `Some(0.0)` only for one measured with nothing executed.
+
+Coverage reaches `repowise-health` through a new `analyze_with_context` entry
+point, following the precedent `analyze_with_hotspots` set for git data: the
+crate stays a pure function of its inputs, and `analyze`/`analyze_with_weights`
+behave exactly as before. Both penalties are configurable via `--weights` like
+every other marker.
+
+These are ordinary **fixed-penalty** markers — nothing here presumes an answer
+to the ML-calibrated-weights question in issue #62, which stays open.
+
 ## Test coverage
 
 `repowise coverage add <REPORTS...>` ingests LCOV reports; `repowise coverage

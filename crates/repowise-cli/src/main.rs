@@ -562,7 +562,16 @@ fn cmd_health(path: &Path, worst: usize, weights_path: Option<&Path>) -> anyhow:
         None => repowise_health::HealthWeights::default(),
     };
     let hot_files = hot_path_files(&root, &index);
-    let report = repowise_health::analyze_with_hotspots(&index, &graph, &weights, &hot_files);
+    // Coverage is optional: without it the two coverage markers simply
+    // never fire, rather than every file scoring as untested.
+    let coverage = repowise_core::coverage::CoverageData::load(&root).ok();
+    let report = repowise_health::analyze_with_context(
+        &index,
+        &graph,
+        &weights,
+        &hot_files,
+        coverage.as_ref(),
+    );
 
     println!("Repowise code health for {}", index.root.display());
     println!(

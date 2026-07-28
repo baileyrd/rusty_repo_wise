@@ -485,7 +485,8 @@ mod tests {
 
     #[test]
     fn computes_primitive_param_count() {
-        let rec = extract_str("fun process(id: Int, name: String, flag: Boolean, config: Config) {}\n");
+        let rec =
+            extract_str("fun process(id: Int, name: String, flag: Boolean, config: Config) {}\n");
         let process = rec.symbols.iter().find(|s| s.name == "process").unwrap();
         assert_eq!(process.param_count, 4);
         assert_eq!(process.primitive_param_count, 3);

@@ -1,19 +1,42 @@
 # Release Notes
 
 Notable changes to this repo, newest first. No tagged releases yet, so entries
-are keyed by PR (or by commit, for the two prior changes that predate this
-repo routing work through PRs).
+are keyed by PR — or by commit, for the two early changes that predate this
+repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
-## PR #233 — Parity Loop: Extend primitive parameter extraction to Java, Kotlin, Go, C++, C#; add WASM CI step; add MCP mtime caching
-**2026-07-25** · [#233](https://github.com/baileyrd/rusty_repo_wise/pull/233)
+## Restore green CI: fix `cargo fmt` violations on `main`
+**2026-07-28**
+
+- **Fixed:** two `cargo fmt` violations in `repowise-parser` (`go.rs`
+  `param_type`, `kotlin.rs` `computes_primitive_param_count`) that landed with
+  the direct push below and turned `main` red. The CI `check` job runs Format
+  first and gates the rest on it, so Clippy, Test, and the WASM check were all
+  **skipped** — the break masked the entire suite rather than just one step.
+  With formatting restored, all four run and pass (411 tests, Clippy clean,
+  `repowise-web` builds for `wasm32-unknown-unknown`).
+- **Fixed:** the entry below was keyed to **PR #233**, but #233 was the
+  release-notes PR for #231/#232. The change it describes was pushed directly
+  to `main` and had no PR, so it is now keyed by commit like the other two
+  pre-PR entries.
+- **Fixed:** a `file:///c:/dev/...` absolute Windows path in that entry,
+  replaced with a repo-relative path.
+- **Added:** the `web/` React frontend to that entry — the commit's own subject
+  names it, but the notes omitted it entirely.
+
+---
+
+## 2026-07-26 — Extend primitive parameter extraction to Java, Kotlin, Go, C++, C#; add WASM CI step; add MCP mtime caching; add web frontend
+[`894d0a6`](https://github.com/baileyrd/rusty_repo_wise/commit/894d0a6b7cc91acb9ff1e187c412900bbbb9d4b7)
 
 - **Added:** primitive parameter type extraction (`primitive_param_count`) in `repowise-parser` for **Java**, **Kotlin**, **Go**, **C++**, and **C#** (`java.rs`, `kotlin.rs`, `go.rs`, `cpp.rs`, `csharp.rs`), extending `primitive_obsession` health marker detection in `repowise-health` across all major statically-typed languages.
 - **Added:** 5 new `repowise-parser` unit tests verifying primitive parameter count extraction across Java, Kotlin, Go, C++, and C#.
 - **Added:** CI verification step in `.github/workflows/ci-rust.yml` to compile and validate `crates/repowise-web` against target `wasm32-unknown-unknown`.
-- **Added:** Thread-safe `mtime`-validated in-memory index and dependency graph caching in `RepowiseServer` ([repowise-mcp/src/lib.rs](file:///c:/dev/rusty_repo_wise/crates/repowise-mcp/src/lib.rs)), avoiding redundant disk reads and petgraph construction across sequential MCP tool calls when `.repowise/index.json` is unchanged.
+- **Added:** Thread-safe `mtime`-validated in-memory index and dependency graph caching in `RepowiseServer` (`crates/repowise-mcp/src/lib.rs`), avoiding redundant disk reads and petgraph construction across sequential MCP tool calls when `.repowise/index.json` is unchanged.
 - **Added:** `repowise-mcp` unit test verifying `mtime` caching behavior across `load()` calls.
+- **Added:** a React/Vite frontend under `web/` (sidebar plus Overview, Architecture, Graph, Health, Hotspots, Commits, Decisions, Docs, Wiki, Usage, Dead Code, Workspace, Chat, and Settings tabs). Note this is a **second, separate** web surface from the Leptos/WASM `crates/repowise-web` crate that the new CI step checks.
+- **Note:** this change was pushed directly to `main` rather than landing through a PR, contrary to the workflow in CLAUDE.md and CONTRIBUTING.md, and it left `main` failing CI on formatting until the fix above.
 
 ---
 

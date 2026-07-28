@@ -277,6 +277,50 @@ pub fn ownership_of(root: &Path, file: &Path) -> anyhow::Result<Vec<Ownership>> 
     blame::blame_file(root, file)
 }
 
+/// Share of a file's lines that the smallest owning group must hold
+/// before `bus_factor` stops counting authors into it.
+///
+/// 50% — a simple majority. The reference repowise documents "bus
+/// factor" in its computed glossary but doesn't publish the threshold it
+/// uses, so this picks the most defensible round number rather than
+/// inventing a tuned one: the smallest set of people who between them
+/// wrote most of the file. Anything higher (say 80%) measures "who wrote
+/// nearly all of it", which is a different and less actionable question.
+const BUS_FACTOR_SHARE: f64 = 50.0;
+
+/// The smallest number of authors whose combined line share reaches
+/// [`BUS_FACTOR_SHARE`] — i.e. how many people would have to leave
+/// before most of this file has no author left who has touched it.
+///
+/// `1` means a single author wrote the majority of the file. A higher
+/// number means the knowledge is spread wider.
+///
+/// Takes the same `Ownership` slice [`ownership_of`] already returns, so
+/// this adds no git invocation of its own. Expects that slice ordered
+/// highest-share-first (as `ownership_of` returns it) and sorts
+/// defensively rather than assuming it.
+///
+/// Returns `0` for an empty slice: a file with no blameable lines has no
+/// bus factor, which is distinct from a file whose bus factor is 1.
+pub fn bus_factor(ownership: &[Ownership]) -> usize {
+    if ownership.is_empty() {
+        return 0;
+    }
+    let mut shares: Vec<f64> = ownership.iter().map(|o| o.percentage).collect();
+    shares.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut cumulative = 0.0;
+    for (i, share) in shares.iter().enumerate() {
+        cumulative += share;
+        if cumulative >= BUS_FACTOR_SHARE {
+            return i + 1;
+        }
+    }
+    // Percentages that never reach the threshold (rounding loss, or a
+    // blame that didn't attribute every line) — every author is needed.
+    shares.len()
+}
+
 /// A file's hotspot score: churn × total cyclomatic complexity of its
 /// symbols. A simple, legible starting point matching the original
 /// repowise's "hotspots = churn × complexity" framing. See `decayed_score`
@@ -425,5 +469,50 @@ mod tests {
             git_remote_url(&root),
             Some("https://github.com/owner/repo.git".to_string())
         );
+    }
+
+    fn owners(shares: &[f64]) -> Vec<Ownership> {
+        shares
+            .iter()
+            .enumerate()
+            .map(|(i, pct)| Ownership {
+                author: format!("author{i}"),
+                lines: *pct as usize,
+                percentage: *pct,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bus_factor_is_one_when_a_single_author_owns_the_majority() {
+        assert_eq!(bus_factor(&owners(&[95.0, 5.0])), 1);
+        assert_eq!(bus_factor(&owners(&[100.0])), 1);
+        // Exactly at the threshold still counts as reached.
+        assert_eq!(bus_factor(&owners(&[50.0, 30.0, 20.0])), 1);
+    }
+
+    #[test]
+    fn bus_factor_grows_as_ownership_spreads() {
+        // 25 each: needs two to clear 50%.
+        assert_eq!(bus_factor(&owners(&[25.0, 25.0, 25.0, 25.0])), 2);
+        // 20 each: needs three.
+        assert_eq!(bus_factor(&owners(&[20.0, 20.0, 20.0, 20.0, 20.0])), 3);
+    }
+
+    #[test]
+    fn bus_factor_does_not_assume_the_input_is_sorted() {
+        assert_eq!(bus_factor(&owners(&[5.0, 95.0])), 1);
+        assert_eq!(bus_factor(&owners(&[20.0, 25.0, 30.0, 25.0])), 2);
+    }
+
+    #[test]
+    fn bus_factor_of_an_unblameable_file_is_zero_not_one() {
+        assert_eq!(bus_factor(&[]), 0);
+    }
+
+    #[test]
+    fn bus_factor_falls_back_to_every_author_when_shares_never_reach_the_threshold() {
+        // Partial attribution: shares sum to 30%, never crossing 50%.
+        assert_eq!(bus_factor(&owners(&[10.0, 10.0, 10.0])), 3);
     }
 }

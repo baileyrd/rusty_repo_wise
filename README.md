@@ -1219,6 +1219,18 @@ time against the repo's real history:
   every touched file's coupling list with noise).
 - **Ownership**: per-author share of a file's lines from `git blame
   --line-porcelain`.
+- **Bus factor**: the smallest number of authors whose combined share
+  reaches 50% of a file's lines — how many people would have to leave
+  before most of the file has no author left who has touched it. Derived
+  from the ownership shares above, so it costs no extra `git` invocation.
+  The reference repowise documents a bus factor but doesn't publish its
+  threshold; 50% is chosen here as the most defensible round number (a
+  simple majority), and a higher bar like 80% would answer the different,
+  less actionable question "who wrote nearly all of it". `repowise
+  ownership` reports it in words rather than as a bare number, since
+  "bus factor: 1" reads to some as "one tidy owner" — the opposite of
+  what it means. A file with no blameable lines reports `n/a`, which is
+  distinct from a bus factor of 1.
 
 ### Structural-tier languages
 

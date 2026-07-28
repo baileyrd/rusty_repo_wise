@@ -6,6 +6,34 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #250 — Parity: add `repowise doctor` (setup diagnostics)
+**2026-07-28** · closes [#240](https://github.com/baileyrd/rusty_repo_wise/issues/240)
+
+- **Added:** a `repowise-cli::doctor` module and `repowise doctor [PATH]`,
+  reporting each check as `pass`/`warn`/`FAIL` with a remedy line. Sixth issue
+  of the parity round.
+- **Why it's worth having here:** this port has many environment-dependent,
+  degrade-softly paths, and each previously surfaced only when you happened to
+  run the command that needed it. Checks the `git` binary, whether the
+  directory is a git repo, clone depth, index presence, and both optional env
+  vars — naming exactly what each one degrades to when unset.
+- **A degraded setup warns, it never fails**, and only a hard failure exits
+  nonzero. Missing an optional token is not an error; reporting it as one would
+  train people to ignore `doctor` and make it useless in a CI gate that only
+  cares about real breakage.
+- **The shallow-clone check is the most valuable one.** A shallow clone doesn't
+  make `hotspots`/`coupled`/`risk` *fail* — it makes them quietly under-report,
+  which is much harder to notice. It's skipped entirely outside a git repo,
+  since reporting "full history" for a directory with no git at all would be a
+  misleading pass.
+- **This caught a real condition on first run:** the checkout it was verified
+  against is itself a shallow clone, so its git-history numbers had been
+  under-reporting unnoticed.
+- Diagnostic only — no state is mutated.
+- 6 new tests (28 total in `repowise-cli`).
+
+---
+
 ## PR #249 — Parity: add `repowise hook install|uninstall|status`
 **2026-07-28** · closes [#238](https://github.com/baileyrd/rusty_repo_wise/issues/238)
 

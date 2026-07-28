@@ -307,6 +307,7 @@ repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
+repowise doctor [PATH]             # setup diagnostics: git, history depth, index, optional env vars
 repowise hook install|uninstall|status [PATH]  # post-commit hook that refreshes the index after each commit
 repowise status [PATH]             # index freshness: stale/missing files, wiki + dashboard state
                                     #   --verbose to list the individual stale/missing files
@@ -1128,6 +1129,29 @@ ML-calibrated organizational-signal markers (`churn_risk`,
 question, not a mechanical gap). Hotspots and bug-fix history are now
 implemented (see "Git analytics" below) but aren't yet folded into the
 health score itself — that's a natural follow-up, not done here.
+
+## Doctor
+
+`repowise doctor [PATH]` runs setup diagnostics and reports each as
+`pass`/`warn`/`FAIL` with a one-line remedy for anything not passing. It's
+**diagnostic only** — it never mutates state.
+
+It exists because this port has many environment-dependent, degrade-softly
+paths, and each one previously only revealed itself when you happened to run
+the command that needed it. Checked: the `git` binary, whether the directory
+is a git repo, **whether the clone is shallow**, index presence, and the two
+optional env vars (`REPOWISE_GITHUB_TOKEN`, `REPOWISE_LLM_BASE_URL`) along
+with exactly what each degrades to when unset.
+
+**A degraded-but-working setup is a `warn`, never a `FAIL`,** and only a
+hard failure produces a nonzero exit. Missing an optional token is not an
+error; reporting it as one would train people to ignore the command — and
+make `doctor` useless in a CI gate that only cares about real breakage.
+
+The shallow-clone check is the one most worth having: a shallow clone doesn't
+make `hotspots`/`coupled` fail, it makes them *quietly under-report*, which is
+far harder to notice. That check is skipped entirely outside a git repo rather
+than reporting a misleading "full history".
 
 ## Auto-sync (post-commit hook)
 

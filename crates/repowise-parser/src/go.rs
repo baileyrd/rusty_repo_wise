@@ -442,7 +442,10 @@ fn is_nested_function(n: Node) -> bool {
 }
 
 fn param_type(n: Node, source: &str) -> Option<String> {
-    if !matches!(n.kind(), "parameter_declaration" | "variadic_parameter_declaration") {
+    if !matches!(
+        n.kind(),
+        "parameter_declaration" | "variadic_parameter_declaration"
+    ) {
         return None;
     }
     let type_node = n.child_by_field_name("type")?;

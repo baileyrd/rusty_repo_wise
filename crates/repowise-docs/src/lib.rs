@@ -31,6 +31,14 @@ const HASH_MARKER: &str = "<!-- content-hash: ";
 /// than replace) this crate's deterministic pages, e.g. `repowise-llm`,
 /// can locate them without duplicating the `.repowise/wiki/<rel>.md`
 /// convention.
+/// The directory `generate` writes wiki pages into. Exposed for the
+/// same reason as [`wiki_page_path`] -- so consumers (e.g. `repowise
+/// export`) can find the tree without re-deriving the
+/// `.repowise/wiki` convention.
+pub fn wiki_root(root: &Path) -> PathBuf {
+    root.join(RepoIndex::INDEX_DIR).join(WIKI_DIR)
+}
+
 pub fn wiki_page_path(root: &Path, file: &Path) -> PathBuf {
     let rel = file.strip_prefix(root).unwrap_or(file);
     root.join(RepoIndex::INDEX_DIR)

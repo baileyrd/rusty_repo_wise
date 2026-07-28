@@ -1,4 +1,5 @@
 mod doctor;
+mod export;
 mod hook;
 mod impacted;
 
@@ -83,6 +84,21 @@ enum Command {
         /// count is still reported.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    /// Export generated wiki pages to a directory, preserving the tree.
+    ///
+    /// Markdown pages only. The reference's `export` also mentions an
+    /// "architecture model" export, whose interchange format is an open
+    /// design question -- see issue #244.
+    Export {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Directory to write the exported page tree into.
+        #[arg(long)]
+        out: PathBuf,
+        /// Write into a non-empty target directory anyway.
+        #[arg(long)]
+        force: bool,
     },
     /// Ingest and inspect test-coverage reports (LCOV).
     Coverage {
@@ -356,6 +372,7 @@ fn main() -> anyhow::Result<()> {
             min_confidence,
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
+        Command::Export { path, out, force } => cmd_export(&path, &out, force),
         Command::Coverage { action } => cmd_coverage(action),
         Command::ImpactedTests { revspec, path } => cmd_impacted_tests(revspec.as_deref(), &path),
         Command::Doctor { path } => cmd_doctor(&path),
@@ -766,15 +783,14 @@ fn mtime_of(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+/// Count generated wiki pages.
+///
+/// Must recurse: `repowise docs` mirrors the repo's own tree under
+/// `.repowise/wiki/`, so a repo whose sources live in subdirectories has
+/// no pages at the wiki root at all. Shares `export`'s walk so the two
+/// can't disagree about what counts as a page.
 fn count_wiki_pages(root: &Path) -> usize {
-    let wiki = root.join(RepoIndex::INDEX_DIR).join("wiki");
-    let Ok(entries) = std::fs::read_dir(&wiki) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
-        .count()
+    export::collect_pages(&repowise_docs::wiki_root(root)).len()
 }
 
 /// Render an index-freshness report. Pure, so every branch (no index,
@@ -832,6 +848,19 @@ fn render_status(report: &StatusReport, root: &Path, verbose: bool) -> String {
         }
     ));
     out
+}
+
+fn cmd_export(path: &Path, out: &Path, force: bool) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let wiki_root = repowise_docs::wiki_root(&root);
+    let plan = export::plan(&wiki_root, out, force)?;
+    let count = export::execute(&plan)?;
+    println!(
+        "exported {count} wiki page(s) from {} to {}",
+        wiki_root.display(),
+        out.display()
+    );
+    Ok(())
 }
 
 fn cmd_coverage(action: CoverageAction) -> anyhow::Result<()> {

@@ -80,6 +80,18 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Score the diff-shape risk of a commit or commit range.
+    ///
+    /// A documented fixed-weight heuristic over the shape of the diff
+    /// (files, lines, subsystems, concentration, author experience) --
+    /// NOT the reference repowise's ML-calibrated model. Treat the score
+    /// as a rough approximation, not a calibrated probability.
+    Risk {
+        /// A single commit or a `base..head` range. Defaults to `HEAD`.
+        revspec: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Rank files by hotspot score (git churn × cyclomatic complexity).
     Hotspots {
         #[arg(default_value = ".")]
@@ -246,6 +258,7 @@ fn main() -> anyhow::Result<()> {
             min_confidence,
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
+        Command::Risk { revspec, path } => cmd_risk(revspec.as_deref(), &path),
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
@@ -566,6 +579,54 @@ fn cmd_dead_code(path: &Path, min_confidence: &str, limit: usize) -> anyhow::Res
         "{}",
         render_dead_code(candidates, &index.root, threshold, limit)
     );
+    Ok(())
+}
+
+/// Bucket a 0-10 change-risk score into a word. Purely presentational --
+/// the underlying score is a documented heuristic, not a calibrated
+/// probability, so the bands are round numbers rather than thresholds
+/// derived from any corpus.
+fn risk_band(score: f64) -> &'static str {
+    match score {
+        s if s >= 7.0 => "high",
+        s if s >= 4.0 => "moderate",
+        _ => "low",
+    }
+}
+
+/// Render a change-risk assessment. Split out from `cmd_risk` so the
+/// formatting and banding are testable without a git repo present.
+fn render_risk(risk: &repowise_git::ChangeRisk) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Repowise change risk for {}\n", risk.revspec));
+    out.push_str(&format!(
+        "  score: {:.1}/10 ({})\n",
+        risk.score,
+        risk_band(risk.score)
+    ));
+    out.push_str(&format!(
+        "  diff shape: {} file(s), +{} / -{} line(s), {} subsystem(s)\n",
+        risk.files_touched, risk.lines_added, risk.lines_deleted, risk.subsystems_touched
+    ));
+    out.push_str(&format!(
+        "  concentration: {:.2} (0.00 = all in one file, 1.00 = spread evenly)\n",
+        risk.concentration
+    ));
+    out.push_str(&format!(
+        "  author: {} ({} prior commit(s) in this repo)\n",
+        risk.author, risk.author_prior_commits
+    ));
+    out.push_str(
+        "  Note: a fixed-weight diff-shape heuristic, not a calibrated\n\
+         \x20 probability -- see repowise-git's change_risk docs for the formula.\n",
+    );
+    out
+}
+
+fn cmd_risk(revspec: Option<&str>, path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let risk = repowise_git::change_risk(&root, revspec)?;
+    print!("{}", render_risk(&risk));
     Ok(())
 }
 
@@ -1123,5 +1184,53 @@ mod tests {
     fn empty_result_is_reported_as_a_clean_bill_not_an_error() {
         let out = render_dead_code(vec![], Path::new("/repo"), DeadCodeConfidence::High, 50);
         assert!(out.contains("no candidates"), "{out}");
+    }
+
+    fn risk(score: f64, files: usize) -> repowise_git::ChangeRisk {
+        repowise_git::ChangeRisk {
+            revspec: "HEAD".to_string(),
+            lines_added: 40,
+            lines_deleted: 5,
+            files_touched: files,
+            subsystems_touched: 2,
+            concentration: 0.75,
+            author: "Ada".to_string(),
+            author_prior_commits: 12,
+            score,
+        }
+    }
+
+    #[test]
+    fn bands_risk_scores_into_words() {
+        assert_eq!(risk_band(9.0), "high");
+        assert_eq!(risk_band(7.0), "high");
+        assert_eq!(risk_band(5.5), "moderate");
+        assert_eq!(risk_band(4.0), "moderate");
+        assert_eq!(risk_band(1.2), "low");
+    }
+
+    #[test]
+    fn renders_the_diff_shape_and_author_experience() {
+        let out = render_risk(&risk(5.5, 3));
+        assert!(out.contains("5.5/10"), "{out}");
+        assert!(out.contains("moderate"), "{out}");
+        assert!(out.contains("3 file(s)"), "{out}");
+        assert!(out.contains("+40 / -5 line(s)"), "{out}");
+        assert!(out.contains("Ada"), "{out}");
+        assert!(out.contains("12 prior commit(s)"), "{out}");
+    }
+
+    #[test]
+    fn states_that_the_score_is_a_heuristic_not_a_probability() {
+        let out = render_risk(&risk(2.0, 1));
+        assert!(out.contains("heuristic"), "{out}");
+    }
+
+    #[test]
+    fn reports_the_revspec_it_actually_scored() {
+        let mut r = risk(3.0, 1);
+        r.revspec = "main..feature".to_string();
+        let out = render_risk(&r);
+        assert!(out.contains("main..feature"), "{out}");
     }
 }

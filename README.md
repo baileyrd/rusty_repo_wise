@@ -309,6 +309,7 @@ repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
 repowise dead-code [PATH]          # confidence-tiered dead-code candidates
                                     #   --min-confidence <low|medium|high> (default low), --limit <N> (default 50)
+repowise risk [REVSPEC] [PATH]     # diff-shape risk score for a commit or `base..head` range (default HEAD)
 repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
@@ -1124,6 +1125,25 @@ ML-calibrated organizational-signal markers (`churn_risk`,
 question, not a mechanical gap). Hotspots and bug-fix history are now
 implemented (see "Git analytics" below) but aren't yet folded into the
 health score itself — that's a natural follow-up, not done here.
+
+## Change risk
+
+`repowise risk [REVSPEC] [PATH]` scores the diff shape of one commit or a
+`base..head` range, defaulting to `HEAD`. It's a CLI surface over the same
+`repowise_git::change_risk` that backs the `get_change_risk` MCP tool — one
+scoring path, not two.
+
+Reported: the 0–10 score with a `low`/`moderate`/`high` band, the diff shape
+(files, lines added/deleted, subsystems touched), the concentration entropy
+(0.00 = the change sits in one file, 1.00 = spread evenly across all of
+them), and the head commit's author with their prior-commit count in the repo.
+
+**The band is presentational only.** The underlying score is a documented
+fixed-weight heuristic over diff shape — deliberately *not* the reference
+repowise's ML-calibrated model (see issue #62 for why that stays an open
+question here). Treat it as a rough approximation, not a calibrated
+probability, and read `repowise-git`'s `change_risk` docs for the formula and
+its saturation points.
 
 ## Dead-code detection
 

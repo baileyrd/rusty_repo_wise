@@ -6,6 +6,31 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #246 — Parity: expose change-risk scoring as `repowise risk`
+**2026-07-28** · closes [#236](https://github.com/baileyrd/rusty_repo_wise/issues/236)
+
+- **Added:** `repowise risk [REVSPEC] [PATH]`, scoring a single commit or a
+  `base..head` range (default `HEAD`). Second issue of the parity round.
+- **Same shape as #235:** `repowise_git::change_risk` was already public and
+  already drove the `get_change_risk` MCP tool (#42). An agent could ask for a
+  change-risk score over MCP; a human at a terminal couldn't — despite this
+  being one of the reference's headline pre-commit workflows. One scoring
+  path, now with two surfaces.
+- **Reports the full diff shape, not just the number:** files, lines
+  added/deleted, subsystems touched, concentration entropy (with its 0.00/1.00
+  endpoints spelled out inline), and the head commit's author plus their prior
+  commit count — the inputs the score is built from, so a surprising score can
+  be traced rather than just trusted.
+- **Added a `low`/`moderate`/`high` band** at 4.0 and 7.0. Explicitly
+  presentational: the note printed under every result restates that the score
+  is a fixed-weight heuristic, not a calibrated probability. The bands are
+  round numbers, not corpus-derived thresholds, and that's documented at the
+  function.
+- **`render_risk` and `risk_band` are pure functions**, tested without a git
+  repo present (4 new tests, 10 total in `repowise-cli`).
+
+---
+
 ## PR #245 — Parity: expose dead-code detection as `repowise dead-code`
 **2026-07-28** · closes [#235](https://github.com/baileyrd/rusty_repo_wise/issues/235)
 

@@ -307,6 +307,8 @@ repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
+repowise dead-code [PATH]          # confidence-tiered dead-code candidates
+                                    #   --min-confidence <low|medium|high> (default low), --limit <N> (default 50)
 repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
@@ -1122,6 +1124,27 @@ ML-calibrated organizational-signal markers (`churn_risk`,
 question, not a mechanical gap). Hotspots and bug-fix history are now
 implemented (see "Git analytics" below) but aren't yet folded into the
 health score itself — that's a natural follow-up, not done here.
+
+## Dead-code detection
+
+`repowise dead-code [PATH]` lists confidence-tiered dead-code candidates:
+functions/methods with zero resolved in-repo callers. It's the same
+analysis (`repowise_health::find_dead_code`) that backs the
+`get_dead_code` MCP tool and the dashboard's dead-code view — this is a
+CLI surface over it, not a second implementation, so the tiers and risk
+factors are exactly the ones documented under "MCP server" below.
+
+- `--min-confidence <low|medium|high>` (default `low`) filters to that
+  tier and above, mirroring the MCP tool's argument of the same name.
+- `--limit <N>` (default 50) caps the listing; the full matching count is
+  still reported, so a truncated list never reads as a complete one.
+
+**Confidence is a claim about this port's static call graph, not about
+runtime safety** — and in particular the analysis does not exclude
+`#[test]` functions, which have no in-repo callers by construction and so
+dominate the `high` tier on a well-tested codebase. Treat the output as a
+list to review, not a list to delete. Excluding test functions would
+change `get_dead_code`'s results too, so it's deliberately not done here.
 
 ## Git analytics
 

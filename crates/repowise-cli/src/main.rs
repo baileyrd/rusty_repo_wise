@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use repowise_core::RepoIndex;
 use repowise_graph::RepoGraph;
+use repowise_health::{DeadCodeCandidate, DeadCodeConfidence};
 use std::path::{Path, PathBuf};
 
 /// A Rust-native, self-hosted codebase intelligence CLI, inspired by
@@ -59,6 +60,25 @@ enum Command {
         /// See `repowise_health::HealthWeights` for the field names.
         #[arg(long)]
         weights: Option<PathBuf>,
+    },
+    /// List confidence-tiered dead-code candidates: functions/methods
+    /// with zero resolved in-repo callers.
+    ///
+    /// Even a `high`-confidence candidate is a claim about this port's
+    /// own static call graph, not a runtime-safety guarantee --
+    /// reflection, dynamic dispatch, and entry points are invisible to
+    /// it. Review before deleting anything.
+    DeadCode {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Minimum confidence tier to include: `low`, `medium`, or
+        /// `high`. Mirrors the `get_dead_code` MCP tool's filter.
+        #[arg(long, default_value = "low")]
+        min_confidence: String,
+        /// Cap the number of candidates listed; the total matching
+        /// count is still reported.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
     },
     /// Rank files by hotspot score (git churn × cyclomatic complexity).
     Hotspots {
@@ -221,6 +241,11 @@ fn main() -> anyhow::Result<()> {
             worst,
             weights,
         } => cmd_health(&path, worst, weights.as_deref()),
+        Command::DeadCode {
+            path,
+            min_confidence,
+            limit,
+        } => cmd_dead_code(&path, &min_confidence, limit),
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
@@ -456,6 +481,91 @@ fn cmd_health(path: &Path, worst: usize, weights_path: Option<&Path>) -> anyhow:
             );
         }
     }
+    Ok(())
+}
+
+/// Parse the `--min-confidence` flag, mirroring the `get_dead_code` MCP
+/// tool's accepted values so the two surfaces can't drift apart.
+fn parse_min_confidence(raw: &str) -> anyhow::Result<DeadCodeConfidence> {
+    match raw.to_ascii_lowercase().as_str() {
+        "low" => Ok(DeadCodeConfidence::Low),
+        "medium" => Ok(DeadCodeConfidence::Medium),
+        "high" => Ok(DeadCodeConfidence::High),
+        other => Err(anyhow::anyhow!(
+            "min-confidence must be low/medium/high, got {other:?}"
+        )),
+    }
+}
+
+/// Render the dead-code listing. Split out from `cmd_dead_code` so the
+/// filtering/truncation behaviour is testable without a real index on
+/// disk -- the rest of the CLI's commands print inline, but this one has
+/// enough logic between the analysis and the output to be worth pinning.
+fn render_dead_code(
+    candidates: Vec<DeadCodeCandidate>,
+    root: &Path,
+    threshold: DeadCodeConfidence,
+    limit: usize,
+) -> String {
+    let matching: Vec<_> = candidates
+        .into_iter()
+        .filter(|c| c.confidence >= threshold)
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Repowise dead-code candidates for {}\n",
+        root.display()
+    ));
+
+    if matching.is_empty() {
+        out.push_str("  no candidates at or above the requested confidence tier\n");
+        return out;
+    }
+
+    out.push_str(&format!(
+        "  {} candidate(s) at or above `{}` confidence\n",
+        matching.len(),
+        threshold.label()
+    ));
+
+    for c in matching.iter().take(limit) {
+        out.push_str(&format!(
+            "    {:<7} {}:{}  {}\n",
+            c.confidence.label(),
+            display_path(&c.file, root),
+            c.line,
+            c.symbol
+        ));
+        for factor in &c.risk_factors {
+            out.push_str(&format!("            - {factor}\n"));
+        }
+    }
+
+    if matching.len() > limit {
+        out.push_str(&format!(
+            "  ... {} more not shown (raise --limit to see them)\n",
+            matching.len() - limit
+        ));
+    }
+
+    out.push_str("  Note: confidence describes this port's static call graph, not runtime\n");
+    out.push_str("  safety. Reflection, dynamic dispatch, entry points, and #[test]\n");
+    out.push_str("  functions are invisible to it -- review before deleting anything.\n");
+    out
+}
+
+fn cmd_dead_code(path: &Path, min_confidence: &str, limit: usize) -> anyhow::Result<()> {
+    let threshold = parse_min_confidence(min_confidence)?;
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let graph = RepoGraph::build(&index);
+    let candidates = repowise_health::find_dead_code(&index, &graph);
+
+    print!(
+        "{}",
+        render_dead_code(candidates, &index.root, threshold, limit)
+    );
     Ok(())
 }
 
@@ -913,4 +1023,105 @@ fn display_path(path: &Path, root: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(
+        name: &str,
+        line: usize,
+        confidence: DeadCodeConfidence,
+        risk_factors: Vec<String>,
+    ) -> DeadCodeCandidate {
+        DeadCodeCandidate {
+            file: PathBuf::from("/repo/src/lib.rs"),
+            symbol: name.to_string(),
+            line,
+            confidence,
+            risk_factors,
+        }
+    }
+
+    #[test]
+    fn parses_confidence_flag_case_insensitively() {
+        assert_eq!(
+            parse_min_confidence("HIGH").unwrap(),
+            DeadCodeConfidence::High
+        );
+        assert_eq!(
+            parse_min_confidence("medium").unwrap(),
+            DeadCodeConfidence::Medium
+        );
+        assert!(parse_min_confidence("bogus").is_err());
+    }
+
+    #[test]
+    fn renders_candidates_with_paths_relative_to_the_repo_root() {
+        let out = render_dead_code(
+            vec![candidate("unused_fn", 12, DeadCodeConfidence::High, vec![])],
+            Path::new("/repo"),
+            DeadCodeConfidence::Low,
+            50,
+        );
+        assert!(out.contains("src/lib.rs:12"), "{out}");
+        assert!(out.contains("unused_fn"), "{out}");
+        assert!(out.contains("high"), "{out}");
+    }
+
+    #[test]
+    fn filters_out_candidates_below_the_requested_tier() {
+        let out = render_dead_code(
+            vec![
+                candidate(
+                    "low_one",
+                    1,
+                    DeadCodeConfidence::Low,
+                    vec!["ambiguous".into()],
+                ),
+                candidate("high_one", 2, DeadCodeConfidence::High, vec![]),
+            ],
+            Path::new("/repo"),
+            DeadCodeConfidence::High,
+            50,
+        );
+        assert!(out.contains("high_one"), "{out}");
+        assert!(!out.contains("low_one"), "{out}");
+        assert!(out.contains("1 candidate(s)"), "{out}");
+    }
+
+    #[test]
+    fn reports_risk_factors_for_sub_high_candidates() {
+        let out = render_dead_code(
+            vec![candidate(
+                "maybe_dead",
+                3,
+                DeadCodeConfidence::Medium,
+                vec!["another symbol shares this name".into()],
+            )],
+            Path::new("/repo"),
+            DeadCodeConfidence::Low,
+            50,
+        );
+        assert!(out.contains("another symbol shares this name"), "{out}");
+    }
+
+    #[test]
+    fn truncates_to_the_limit_but_still_reports_the_full_count() {
+        let candidates: Vec<_> = (0..5)
+            .map(|i| candidate(&format!("fn_{i}"), i, DeadCodeConfidence::High, vec![]))
+            .collect();
+        let out = render_dead_code(candidates, Path::new("/repo"), DeadCodeConfidence::Low, 2);
+        assert!(out.contains("5 candidate(s)"), "{out}");
+        assert!(out.contains("3 more not shown"), "{out}");
+        assert!(out.contains("fn_1"), "{out}");
+        assert!(!out.contains("fn_4"), "{out}");
+    }
+
+    #[test]
+    fn empty_result_is_reported_as_a_clean_bill_not_an_error() {
+        let out = render_dead_code(vec![], Path::new("/repo"), DeadCodeConfidence::High, 50);
+        assert!(out.contains("no candidates"), "{out}");
+    }
 }

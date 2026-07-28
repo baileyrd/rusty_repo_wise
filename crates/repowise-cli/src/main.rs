@@ -80,6 +80,20 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Report index freshness: whether an index exists, when it was
+    /// written, and how much of it the working tree has moved past.
+    ///
+    /// Deliberately distinct from `overview`, which reports what's *in*
+    /// the index -- this reports whether the index still describes the
+    /// tree on disk.
+    Status {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// List the individual stale/missing files rather than only
+        /// counting them.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Score the diff-shape risk of a commit or commit range.
     ///
     /// A documented fixed-weight heuristic over the shape of the diff
@@ -258,6 +272,7 @@ fn main() -> anyhow::Result<()> {
             min_confidence,
             limit,
         } => cmd_dead_code(&path, &min_confidence, limit),
+        Command::Status { path, verbose } => cmd_status(&path, verbose),
         Command::Risk { revspec, path } => cmd_risk(revspec.as_deref(), &path),
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
@@ -579,6 +594,153 @@ fn cmd_dead_code(path: &Path, min_confidence: &str, limit: usize) -> anyhow::Res
         "{}",
         render_dead_code(candidates, &index.root, threshold, limit)
     );
+    Ok(())
+}
+
+/// Index freshness, as reported by `repowise status`. Deliberately says
+/// nothing about what the index *contains* -- that's `repowise
+/// overview`'s job -- only about whether it still describes the tree on
+/// disk.
+#[derive(Debug, Default)]
+struct StatusReport {
+    /// `None` when no index exists yet: a valid state to report, not an
+    /// error.
+    indexed: Option<IndexedStatus>,
+    /// Count of generated wiki pages under `.repowise/wiki`, if any.
+    wiki_pages: usize,
+    dashboard_present: bool,
+}
+
+#[derive(Debug)]
+struct IndexedStatus {
+    file_count: usize,
+    /// Indexed files whose on-disk mtime is newer than the index itself.
+    stale: Vec<PathBuf>,
+    /// Indexed files that no longer exist on disk.
+    missing: Vec<PathBuf>,
+}
+
+/// Compare each indexed file's mtime against the index's own mtime.
+///
+/// Deliberately filesystem-based rather than git-based: it works in a
+/// repo with no git history, a shallow clone, or no git at all, and it
+/// catches uncommitted edits that a `git diff` against the indexed
+/// commit would miss. The tradeoff is that it can't see files that are
+/// *new* since indexing -- finding those needs a full re-walk, which is
+/// what `repowise update` does anyway.
+fn collect_status(root: &Path) -> StatusReport {
+    let mut report = StatusReport {
+        wiki_pages: count_wiki_pages(root),
+        dashboard_present: root
+            .join(RepoIndex::INDEX_DIR)
+            .join("dashboard")
+            .join("index.html")
+            .exists(),
+        ..Default::default()
+    };
+
+    let index_path = RepoIndex::index_path(root);
+    let Ok(index) = RepoIndex::load(root) else {
+        return report;
+    };
+    let Some(index_mtime) = mtime_of(&index_path) else {
+        return report;
+    };
+
+    let mut stale = Vec::new();
+    let mut missing = Vec::new();
+    for file in &index.files {
+        match mtime_of(&file.path) {
+            None => missing.push(file.path.clone()),
+            Some(m) if m > index_mtime => stale.push(file.path.clone()),
+            Some(_) => {}
+        }
+    }
+
+    report.indexed = Some(IndexedStatus {
+        file_count: index.files.len(),
+        stale,
+        missing,
+    });
+    report
+}
+
+fn mtime_of(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+fn count_wiki_pages(root: &Path) -> usize {
+    let wiki = root.join(RepoIndex::INDEX_DIR).join("wiki");
+    let Ok(entries) = std::fs::read_dir(&wiki) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+        .count()
+}
+
+/// Render an index-freshness report. Pure, so every branch (no index,
+/// clean, stale, missing files) is testable without touching disk.
+fn render_status(report: &StatusReport, root: &Path, verbose: bool) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Repowise status for {}\n", root.display()));
+
+    match &report.indexed {
+        None => {
+            out.push_str("  index: none -- run `repowise init` to build one\n");
+        }
+        Some(idx) => {
+            out.push_str(&format!("  index: {} file(s) indexed\n", idx.file_count));
+            if idx.stale.is_empty() && idx.missing.is_empty() {
+                out.push_str("  freshness: up to date\n");
+            } else {
+                out.push_str(&format!(
+                    "  freshness: stale -- {} modified, {} missing since indexing\n",
+                    idx.stale.len(),
+                    idx.missing.len()
+                ));
+                if verbose {
+                    for p in &idx.stale {
+                        out.push_str(&format!("    modified  {}\n", display_path(p, root)));
+                    }
+                    for p in &idx.missing {
+                        out.push_str(&format!("    missing   {}\n", display_path(p, root)));
+                    }
+                } else if idx.stale.len() + idx.missing.len() > 0 {
+                    out.push_str("    (pass --verbose to list them)\n");
+                }
+                out.push_str("  run `repowise update` to re-index\n");
+            }
+            out.push_str(
+                "  note: files created since indexing aren't detected here --\n\
+                 \x20 finding those needs the full re-walk `repowise update` does.\n",
+            );
+        }
+    }
+
+    out.push_str(&format!(
+        "  wiki: {}\n",
+        match report.wiki_pages {
+            0 => "no pages -- run `repowise docs`".to_string(),
+            n => format!("{n} page(s) under .repowise/wiki"),
+        }
+    ));
+    out.push_str(&format!(
+        "  dashboard: {}\n",
+        if report.dashboard_present {
+            "generated"
+        } else {
+            "not generated -- run `repowise dashboard`"
+        }
+    ));
+    out
+}
+
+fn cmd_status(path: &Path, verbose: bool) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let report = collect_status(&root);
+    print!("{}", render_status(&report, &root, verbose));
     Ok(())
 }
 
@@ -1232,5 +1394,82 @@ mod tests {
         r.revspec = "main..feature".to_string();
         let out = render_risk(&r);
         assert!(out.contains("main..feature"), "{out}");
+    }
+
+    #[test]
+    fn status_reports_a_missing_index_as_a_state_not_an_error() {
+        let report = StatusReport::default();
+        let out = render_status(&report, Path::new("/repo"), false);
+        assert!(out.contains("index: none"), "{out}");
+        assert!(out.contains("repowise init"), "{out}");
+    }
+
+    #[test]
+    fn status_reports_a_clean_index_as_up_to_date() {
+        let report = StatusReport {
+            indexed: Some(IndexedStatus {
+                file_count: 7,
+                stale: vec![],
+                missing: vec![],
+            }),
+            wiki_pages: 3,
+            dashboard_present: true,
+        };
+        let out = render_status(&report, Path::new("/repo"), false);
+        assert!(out.contains("7 file(s) indexed"), "{out}");
+        assert!(out.contains("up to date"), "{out}");
+        assert!(out.contains("3 page(s)"), "{out}");
+        assert!(out.contains("dashboard: generated"), "{out}");
+    }
+
+    #[test]
+    fn status_counts_stale_and_missing_separately() {
+        let report = StatusReport {
+            indexed: Some(IndexedStatus {
+                file_count: 5,
+                stale: vec![PathBuf::from("/repo/a.rs"), PathBuf::from("/repo/b.rs")],
+                missing: vec![PathBuf::from("/repo/gone.rs")],
+            }),
+            ..Default::default()
+        };
+        let out = render_status(&report, Path::new("/repo"), false);
+        assert!(out.contains("2 modified, 1 missing"), "{out}");
+        assert!(out.contains("repowise update"), "{out}");
+        assert!(
+            !out.contains("a.rs"),
+            "non-verbose should not list files: {out}"
+        );
+    }
+
+    #[test]
+    fn status_verbose_lists_the_individual_files() {
+        let report = StatusReport {
+            indexed: Some(IndexedStatus {
+                file_count: 5,
+                stale: vec![PathBuf::from("/repo/a.rs")],
+                missing: vec![PathBuf::from("/repo/gone.rs")],
+            }),
+            ..Default::default()
+        };
+        let out = render_status(&report, Path::new("/repo"), true);
+        assert!(out.contains("modified  a.rs"), "{out}");
+        assert!(out.contains("missing   gone.rs"), "{out}");
+    }
+
+    #[test]
+    fn status_states_the_new_file_blind_spot() {
+        let report = StatusReport {
+            indexed: Some(IndexedStatus {
+                file_count: 1,
+                stale: vec![],
+                missing: vec![],
+            }),
+            ..Default::default()
+        };
+        let out = render_status(&report, Path::new("/repo"), false);
+        assert!(
+            out.contains("created since indexing aren't detected"),
+            "{out}"
+        );
     }
 }

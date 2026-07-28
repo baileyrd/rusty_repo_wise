@@ -6,6 +6,35 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #247 — Parity: add `repowise status` (index freshness)
+**2026-07-28** · closes [#237](https://github.com/baileyrd/rusty_repo_wise/issues/237)
+
+- **Added:** `repowise status [PATH]` with `--verbose`. Third issue of the
+  parity round.
+- **Scoped deliberately against `overview`.** The reference's `status` reports
+  "wiki sync state, page statistics, and coverage" — but `repowise overview`
+  already covers file/symbol/language counts here, so duplicating them would
+  have made two commands that mostly agree. This reports the half `overview`
+  can't: whether the index still *describes* the tree on disk.
+- **Reports:** indexed file count, how many indexed files were modified or
+  deleted since indexing, and whether wiki pages and a dashboard exist.
+- **Staleness is filesystem-based, not git-based** — each indexed file's mtime
+  against the index's own. That works with no git history, a shallow clone, or
+  no git at all, and it catches uncommitted edits a diff against the indexed
+  commit would miss.
+- **The blind spot is printed, not hidden.** This approach can't see files
+  *created* since indexing (that needs the full re-walk `repowise update`
+  does), so the command says so in its own output. A freshness check that
+  quietly missed new files would be worse than one that admits the limit.
+- **No index is a state, not an error** — "index: none, run `repowise init`",
+  exit 0.
+- Coverage stats, which the reference folds into `status`, are deliberately
+  left out until the coverage layer (#241) lands.
+- 5 new tests (15 total in `repowise-cli`); `render_status` is pure, so every
+  branch is testable without touching disk.
+
+---
+
 ## PR #246 — Parity: expose change-risk scoring as `repowise risk`
 **2026-07-28** · closes [#236](https://github.com/baileyrd/rusty_repo_wise/issues/236)
 

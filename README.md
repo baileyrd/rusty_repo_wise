@@ -307,6 +307,8 @@ repowise search "<query>"  [PATH]  # substring search over symbol names
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
+repowise status [PATH]             # index freshness: stale/missing files, wiki + dashboard state
+                                    #   --verbose to list the individual stale/missing files
 repowise dead-code [PATH]          # confidence-tiered dead-code candidates
                                     #   --min-confidence <low|medium|high> (default low), --limit <N> (default 50)
 repowise risk [REVSPEC] [PATH]     # diff-shape risk score for a commit or `base..head` range (default HEAD)
@@ -1125,6 +1127,24 @@ ML-calibrated organizational-signal markers (`churn_risk`,
 question, not a mechanical gap). Hotspots and bug-fix history are now
 implemented (see "Git analytics" below) but aren't yet folded into the
 health score itself — that's a natural follow-up, not done here.
+
+## Index status
+
+`repowise status [PATH]` reports whether the index still describes the tree
+on disk — deliberately distinct from `repowise overview`, which reports what's
+*in* the index. Shows how many indexed files have been modified or deleted
+since indexing, plus whether wiki pages and a dashboard have been generated.
+`--verbose` lists the individual files instead of only counting them.
+
+Staleness is checked by comparing each indexed file's mtime against the
+index's own, **not** by diffing against git. That works in a repo with no git
+history, a shallow clone, or no git at all, and it catches uncommitted edits
+that a diff against the indexed commit would miss.
+
+The tradeoff is stated in the command's own output rather than left implicit:
+files *created* since indexing aren't detected, because finding those needs
+the full re-walk `repowise update` already does. A freshness check that
+quietly missed new files would be worse than one that says so.
 
 ## Change risk
 

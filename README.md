@@ -1805,6 +1805,22 @@ FastAPI-backend architecture, minus the Node.js dependency.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+- **Detail views** (issue #263) for symbols and decisions, deep-linkable at
+  `#/symbols?id=<file>@<line>` and `#/decisions?id=<id>`, reached by clicking a
+  row in either index.
+
+  Symbol detail shows kind, parent, location, complexity and nesting, plus
+  resolved callers and callees — and **states how many calls it couldn't
+  resolve**, so an empty callee list is never read as "this calls nothing".
+  For the same reason, "no resolved callers" says explicitly that heuristic
+  resolution makes that not proof of disuse.
+
+  Decision detail shows the full mined text, linked files, and **both
+  directions of supersession lineage**. A superseded decision leads with a
+  loud marker and a link to what replaced it: displaying one silently would
+  read as current guidance, which is the one way this view could actively
+  mislead. An unknown id renders a not-found state rather than an error.
+
 - **One view per section, addressable** (issue #259). Every section used to
   render stacked on a single scrolling page; each now has its own route at
   `#/<view>` (`#/health`, `#/coverage`, `#/files`, …), with a nav to switch

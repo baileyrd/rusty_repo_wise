@@ -308,6 +308,7 @@ repowise search "<query>"  [PATH]  # substring search: --mode symbol|path|hybrid
 repowise generate-claude-md [PATH] [-o FILE] [--stdout]  # managed codebase-intelligence block in CLAUDE.md/AGENTS.md
 repowise distill <command>...      # run a command, print a compact rendering; dropped output stored and reversible
 repowise expand <ref> [-q PAT]     # restore the output behind a [repowise#<ref>] marker
+repowise hook rewrite install|uninstall|status  # route recognized commands through distill automatically
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)

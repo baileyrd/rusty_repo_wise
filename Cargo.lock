@@ -1230,6 +1230,7 @@ dependencies = [
  "anyhow",
  "repowise-adr",
  "repowise-core",
+ "repowise-distill",
  "repowise-git",
  "repowise-graph",
  "repowise-health",

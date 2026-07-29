@@ -11,13 +11,14 @@ repowise-health = { path = "../repowise-health" }
 repowise-git = { path = "../repowise-git" }
 repowise-adr = { path = "../repowise-adr" }
 repowise-workspace = { path = "../repowise-workspace" }
+repowise-distill = { path = "../repowise-distill" }
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 schemars = "1"
+serde_json.workspace = true
 rmcp = { version = "2", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 
 [dev-dependencies]
 repowise-parser = { path = "../repowise-parser" }
-serde_json.workspace = true
 tempfile = "3"

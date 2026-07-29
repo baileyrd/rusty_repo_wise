@@ -6,6 +6,39 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #299 — CLI: labelled MCP savings estimate in `saved`
+**2026-07-29** · follow-up to [#282](https://github.com/baileyrd/rusty_repo_wise/issues/282)
+
+- **`repowise saved` now reports MCP tool responses**, in a separate block headed
+  `ESTIMATED, not measured`. #282 deliberately omitted this because the figure is
+  a counterfactual; it's now included with the model stated inline, so it can be
+  argued with rather than merely believed.
+- **The model is grounded, not invented**: baseline = the total on-disk size of
+  the files an answer covered — what reading them instead would have cost. Real
+  file sizes, but still a counterfactual, and the report says so and calls the
+  result an **upper bound** rather than a saving.
+- **The two totals can never merge.** `Record::is_measured()` is the single
+  decision point, so a future record kind cannot silently start inflating a
+  figure that claims to be measured — the match has to be updated first. A test
+  asserts a 900 KB modelled baseline never appears in the measured section.
+- **Only tools with an unambiguous covered-file set are recorded**
+  (`get_context`, `get_symbol`). `get_overview` and `search_codebase` answer
+  *about* the repo rather than about knowable files, so no baseline is claimed —
+  an estimate with an arbitrary denominator would be worse than none.
+- **Responses larger than their baseline are reported as a cost.** `saved_bytes`
+  saturates at zero, which would have quietly rounded a loss up to "saved
+  nothing". Verified live, and it happens: `get_context` on a 300-symbol,
+  8479-byte file returned **115252 bytes** — 13× the file it described.
+- An MCP-only ledger still reports its estimate rather than being swallowed by
+  the no-distillations empty state, and an empty block says nothing was
+  *recorded*, not that nothing was saved.
+- 12 new tests. Verified end to end over real MCP stdio: baseline recorded as
+  8479 bytes against a file measuring exactly 8479, a genuine saving
+  (33158 → 245 bytes) on a large file with a small symbol, and the measured
+  total staying at 3209 bytes while 32913 modelled bytes sat beside it.
+
+---
+
 ## PR #297 — CLI: `watch`
 **2026-07-29** · closes [#284](https://github.com/baileyrd/rusty_repo_wise/issues/284)
 

@@ -1,21 +1,25 @@
 //! An append-only record of what distillation actually saved.
 //!
-//! # Measured, not modelled
+//! # Measured and modelled, kept apart
 //!
-//! Every number in this ledger is **observed**: bytes that went into a
+//! Most records here are **observed**: bytes that went into a
 //! distillation and bytes that came out, for a command that actually
-//! ran. Nothing here is a counterfactual.
+//! ran.
 //!
-//! That matters because the obvious way to inflate a savings report is
-//! to estimate what someone *would* have done otherwise. The reference
-//! also counts MCP tool responses "against the raw file exploration
-//! they replaced" -- a genuinely useful idea, and a genuinely
-//! unmeasurable one, since nobody knows what the agent would have read
-//! instead. This port does not model that number. Reporting a total
-//! that silently mixed measured bytes with a guess would be the same
-//! failure this repo has avoided everywhere else (`Option<f64>` for
-//! never-measured coverage, `CANNOT ANSWER` in impacted-tests,
-//! `UNVERIFIED` in conformance).
+//! [`Kind::McpResponse`] is the exception, and it is deliberately the
+//! only one. Its baseline is the size of the files an answer covered --
+//! what reading them instead would have cost. That is a counterfactual:
+//! nobody knows what the caller would actually have read. It is
+//! grounded in real file sizes rather than invented, but it is still a
+//! model.
+//!
+//! The two are never summed. [`Record::is_measured`] is the single
+//! decision point, so a new record kind cannot silently start inflating
+//! a figure that claims to be measured -- the match there has to be
+//! updated first. A total that mixed observed bytes with a guess would
+//! be the same failure this repo has avoided everywhere else
+//! (`Option<f64>` for never-measured coverage, `CANNOT ANSWER` in
+//! impacted-tests, `UNVERIFIED` in conformance).
 //!
 //! # Tokens are an approximation, and say so
 //!
@@ -59,6 +63,15 @@ pub enum Kind {
     /// Carries an exit code, so it counts for fumble detection while
     /// staying out of the savings totals.
     Ran,
+    /// An MCP tool response, with a **modelled** baseline rather than a
+    /// measured one.
+    ///
+    /// `raw_bytes` here is not something that happened -- it's the size
+    /// of the files the answer covered, i.e. what reading them instead
+    /// would have cost. See [`Record::is_measured`]: this kind is
+    /// structurally excluded from the measured totals so the two can
+    /// never be summed together by accident.
+    McpResponse,
 }
 
 impl Kind {
@@ -67,6 +80,7 @@ impl Kind {
             Kind::Distilled => "distilled",
             Kind::Skipped => "skipped",
             Kind::Ran => "ran",
+            Kind::McpResponse => "mcp",
         }
     }
 
@@ -75,6 +89,7 @@ impl Kind {
             "distilled" => Some(Kind::Distilled),
             "skipped" => Some(Kind::Skipped),
             "ran" => Some(Kind::Ran),
+            "mcp" => Some(Kind::McpResponse),
             _ => None,
         }
     }
@@ -109,6 +124,22 @@ impl Record {
     /// one elsewhere in the total.
     pub fn saved_bytes(&self) -> usize {
         self.raw_bytes.saturating_sub(self.kept_bytes)
+    }
+
+    /// Is this record's saving **observed**, rather than modelled?
+    ///
+    /// The one guard that keeps the two kinds of number apart. Every
+    /// measured total goes through this, so adding a new modelled record
+    /// kind can't silently start inflating a figure that claims to be
+    /// measured -- the compiler forces a decision here first.
+    pub fn is_measured(&self) -> bool {
+        match self.kind {
+            Kind::Distilled | Kind::Ran => true,
+            // Modelled: a counterfactual baseline, not bytes anyone saw.
+            Kind::McpResponse => false,
+            // No saving either way.
+            Kind::Skipped => false,
+        }
     }
 }
 
@@ -193,6 +224,33 @@ pub fn record_ran(store_dir: &Path, program: &str, raw_bytes: usize, exit_code: 
             kept_bytes: raw_bytes,
             detail: String::new(),
             exit_code: Some(exit_code),
+        },
+    );
+}
+
+/// Record an MCP tool response against a **modelled** baseline.
+///
+/// `baseline_bytes` is the total size of the files the answer covered --
+/// what reading them instead would have cost. That is a counterfactual:
+/// the caller might have read only part of them, or might have read
+/// more. It is grounded in real file sizes rather than invented, but it
+/// is still a model, and every surface that reports it says so.
+pub fn record_mcp_response(
+    store_dir: &Path,
+    tool: &str,
+    baseline_bytes: usize,
+    response_bytes: usize,
+) {
+    let _ = append(
+        store_dir,
+        &Record {
+            at: now_secs(),
+            kind: Kind::McpResponse,
+            program: tool.to_string(),
+            raw_bytes: baseline_bytes,
+            kept_bytes: response_bytes,
+            detail: String::new(),
+            exit_code: None,
         },
     );
 }
@@ -329,5 +387,55 @@ mod tests {
     fn token_counts_are_a_byte_ratio() {
         assert_eq!(approx_tokens(4000), 1000);
         assert_eq!(approx_tokens(3), 0);
+    }
+
+    /// The structural guard. A modelled baseline must never be counted
+    /// as an observed saving, and this is the single place that decides
+    /// it -- so a future record kind has to make the choice explicitly.
+    #[test]
+    fn mcp_records_are_not_measured() {
+        let d = dir();
+        record_distilled(d.path(), "cargo", 4000, 400, 0);
+        record_mcp_response(d.path(), "get_context", 9000, 900);
+
+        let records = read(d.path());
+        assert_eq!(records.len(), 2);
+
+        let measured: usize = records
+            .iter()
+            .filter(|r| r.is_measured())
+            .map(|r| r.saved_bytes())
+            .sum();
+        assert_eq!(
+            measured, 3600,
+            "the modelled 8100 must not appear in a measured total"
+        );
+
+        let modelled: usize = records
+            .iter()
+            .filter(|r| r.kind == Kind::McpResponse)
+            .map(|r| r.saved_bytes())
+            .sum();
+        assert_eq!(modelled, 8100);
+    }
+
+    #[test]
+    fn mcp_records_round_trip_and_carry_no_exit_code() {
+        let d = dir();
+        record_mcp_response(d.path(), "get_symbol", 5000, 250);
+        let r = &read(d.path())[0];
+        assert_eq!(r.kind, Kind::McpResponse);
+        assert_eq!(r.program, "get_symbol");
+        assert_eq!(r.raw_bytes, 5000);
+        assert_eq!(r.kept_bytes, 250);
+        assert_eq!(r.exit_code, None, "no command ran, so there is no status");
+        assert!(!r.is_measured());
+    }
+
+    #[test]
+    fn skipped_records_are_not_measured_either() {
+        let d = dir();
+        record_skipped(d.path(), "git", "not-rewritable");
+        assert!(!read(d.path())[0].is_measured());
     }
 }

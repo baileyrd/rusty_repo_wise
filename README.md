@@ -342,6 +342,7 @@ repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  
 repowise workspace-conformance --workspace <FILE>  # circular cross-repo dependencies (repo A imports B imports A)
 repowise workspace-contracts --workspace <FILE>  # regex-based HTTP producer/consumer route matching across repos
 repowise workspace-diagnostics --workspace <FILE> # why that contract count is what it is (unmatched-by-reason, orphan routes, unread repos)
+repowise workspace-metrics --workspace <FILE>    # propagation cost, cyclic core, 1-10 architecture-complexity score
 ```
 
 ## Health scoring
@@ -2214,6 +2215,28 @@ route-shaped string that isn't actually a route) are both expected.
 
   Both commands share one scan, so they can never disagree about what was
   found; a test asserts their match counts stay equal.
+- `repowise workspace-metrics --workspace <path> [--json]` aggregates the
+  same repo-level edges into architecture-complexity metrics:
+  - **Propagation cost** — the share of ordered repo pairs where one can
+    reach the other, counting each repo as reaching itself (the standard
+    visibility-matrix diagonal). It answers "how far can a change reach",
+    which the cycle check alone can't.
+  - **Cyclic core** — the strongly connected components, reusing exactly
+    the cycles `workspace-conformance` already finds.
+  - **A 1–10 score**, weighted 0.7 propagation / 0.3 cyclic share, with
+    the scale printed alongside it (`1 = loosely coupled, 10 = highly
+    coupled`) so a number is never read as a grade.
+  - **Co-change is excluded deliberately.** It's a behavioral signal that
+    moves with how a team happened to work that quarter; this score
+    describes structure, and mixing them makes the number drift for
+    reasons that aren't architectural.
+  - **The score is withheld — not zeroed, not maxed — when nothing was
+    measurable.** Cross-repo resolution here is Rust-only, so a workspace
+    of Python services resolves zero edges, finds no cycles, and would
+    otherwise be handed the *best possible* score for never having been
+    measured. When no Rust exists to resolve from, the report says so and
+    reports no score at all. Every run also states the Rust-only limit,
+    so the numbers read as a lower bound on real coupling.
 - `repowise serve-dashboard --workspace <path>` gains `GET
   /api/workspace-contracts` and the dashboard gets a **Contracts
   section**.

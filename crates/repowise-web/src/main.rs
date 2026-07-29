@@ -120,6 +120,18 @@ struct Health {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+struct Stats {
+    available: bool,
+    shallow: bool,
+    commit_count: usize,
+    punch_card: Vec<Vec<usize>>,
+    weekly_trend: Vec<usize>,
+    timezone: String,
+}
+
+const DAY_LABELS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+#[derive(Deserialize, Clone, Debug)]
 struct FileEntry {
     path: String,
     language: String,
@@ -709,6 +721,159 @@ fn HealthSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                             }}
                         }
                         .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Commit activity (issue #262): a day×hour punch card and a weekly
+/// trend, both as inline SVG.
+///
+/// Both charts are drawn by hand rather than via a charting crate, for
+/// the same reason as the treemap: a WASM binary shouldn't grow one for
+/// a grid of rects and a polyline.
+#[component]
+fn StatsSection() -> impl IntoView {
+    let stats = LocalResource::new(|| fetch_json::<Stats>("/api/stats"));
+    const CELL: f64 = 22.0;
+    const LEFT: f64 = 40.0;
+    const TOP: f64 = 18.0;
+
+    view! {
+        <h2>"Activity"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                stats
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(s) if !s.available => view! {
+                            <p class="empty">
+                                "No commit history -- needs a git repository with commits."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(s) => {
+                            let peak = s
+                                .punch_card
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .max()
+                                .unwrap_or(0)
+                                .max(1);
+                            let trend_max = s.weekly_trend.iter().copied().max().unwrap_or(0).max(1);
+                            let tw = 640.0f64;
+                            let th = 120.0f64;
+                            let step = if s.weekly_trend.len() > 1 {
+                                tw / (s.weekly_trend.len() - 1) as f64
+                            } else {
+                                tw
+                            };
+                            let points = s
+                                .weekly_trend
+                                .iter()
+                                .enumerate()
+                                .map(|(i, c)| {
+                                    let x = i as f64 * step;
+                                    let y = th - (*c as f64 / trend_max as f64) * th;
+                                    format!("{x:.1},{y:.1}")
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            view! {
+                                <p>
+                                    {format!(
+                                        "{} commit(s). All times {} -- git stores an author \
+                                         timezone offset this port does not carry, so bucketing \
+                                         in anything else would be guesswork.",
+                                        s.commit_count, s.timezone,
+                                    )}
+                                </p>
+                                // A shallow clone doesn't make these charts
+                                // fail, it makes them under-report. Saying so
+                                // is the difference between a caveat and a
+                                // wrong answer.
+                                {s.shallow
+                                    .then(|| view! {
+                                        <p class="empty">
+                                            "Shallow clone -- history is truncated, so both \
+                                             charts under-report. `git fetch --unshallow` for \
+                                             the full picture."
+                                        </p>
+                                    })}
+                                <h3>{format!("Punch card ({})", s.timezone)}</h3>
+                                <svg
+                                    viewBox=format!("0 0 {} {}", LEFT + 24.0 * CELL, TOP + 7.0 * CELL)
+                                    style="width: 100%; height: auto;"
+                                    role="img"
+                                >
+                                    {(0..24).step_by(3).map(|h| view! {
+                                        <text
+                                            x=LEFT + h as f64 * CELL
+                                            y=TOP - 5.0
+                                            font-size="10"
+                                            fill="currentColor"
+                                        >{format!("{h:02}")}</text>
+                                    }).collect::<Vec<_>>()}
+                                    {s.punch_card.iter().enumerate().map(|(d, hours)| {
+                                        let row = hours.iter().enumerate().map(|(h, count)| {
+                                            // Opacity carries magnitude; the
+                                            // <title> carries the number, so
+                                            // the value is never colour-only.
+                                            let o = *count as f64 / peak as f64;
+                                            view! {
+                                                <g>
+                                                    <title>
+                                                        {format!(
+                                                            "{} {:02}:00 {} -- {} commit(s)",
+                                                            DAY_LABELS[d], h, s.timezone, count,
+                                                        )}
+                                                    </title>
+                                                    <rect
+                                                        x=LEFT + h as f64 * CELL
+                                                        y=TOP + d as f64 * CELL
+                                                        width=CELL - 2.0
+                                                        height=CELL - 2.0
+                                                        fill="#1565c0"
+                                                        fill-opacity=format!("{:.3}", 0.08 + o * 0.92)
+                                                    />
+                                                </g>
+                                            }
+                                        }).collect::<Vec<_>>();
+                                        view! {
+                                            <g>
+                                                <text
+                                                    x="0"
+                                                    y=TOP + d as f64 * CELL + CELL / 1.6
+                                                    font-size="10"
+                                                    fill="currentColor"
+                                                >{DAY_LABELS[d]}</text>
+                                                {row}
+                                            </g>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </svg>
+                                <h3>{format!("Weekly commits (last {} weeks)", s.weekly_trend.len())}</h3>
+                                <svg
+                                    viewBox=format!("0 0 {tw} {th}")
+                                    style="width: 100%; height: auto;"
+                                    role="img"
+                                >
+                                    <title>
+                                        {format!("Peak {trend_max} commit(s) in a week")}
+                                    </title>
+                                    <polyline
+                                        points=points
+                                        fill="none"
+                                        stroke="#1565c0"
+                                        stroke-width="2"
+                                    />
+                                </svg>
+                            }
+                            .into_any()
+                        }
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
                     })
             }}
@@ -2510,6 +2675,7 @@ fn App() -> impl IntoView {
         <HotspotsSection selected=selected />
         <ContributorsSection />
         <FilesSection selected=selected />
+        <StatsSection />
         <DecisionsSection />
         <SymbolsSection selected=selected />
         <GraphSection selected=selected />

@@ -35,14 +35,23 @@
 //! [`cosine_similarity`] as the pure-function ranking step --
 //! `repowise-server`'s chat view embeds the question and each indexed
 //! file's symbol list, then ranks by similarity, instead of the
-//! keyword-substring grounding it used before. No vector index or
-//! persistence: every chat call re-embeds the whole corpus in one
-//! batched request, an honest cost/latency tradeoff for a first slice
-//! (see `repowise-server`'s own module doc for the fallback behavior
-//! when an endpoint doesn't support embeddings at all).
+//! keyword-substring grounding it used before (see `repowise-server`'s
+//! own module doc for the fallback behavior when an endpoint doesn't
+//! support embeddings at all).
+//!
+//! [`embedding_index`] adds the persistence that was missing, so
+//! `repowise search --mode semantic` and the `search_codebase` MCP tool
+//! embed only the query rather than the whole corpus. It is a *separate*
+//! path from [`retrieval`]: chat retrieval still re-embeds per call.
+//! Pointing it at the stored index isn't a wire-up, because the stored
+//! index can be partially covered, and grounding an answer in a subset
+//! of the repo while its citations look complete is exactly the failure
+//! [`retrieval`] exists to avoid. That decision is a follow-up.
 
+pub mod embedding_index;
 pub mod retrieval;
 
+pub use embedding_index::{EmbeddingIndex, Unavailable};
 pub use retrieval::{retrieve, Retrieval, RetrievalMode};
 
 use serde::{Deserialize, Serialize};
@@ -64,6 +73,25 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
 }
 
+/// The env var that switches every LLM feature on.
+///
+/// Named as a constant so error messages that tell someone to set it are
+/// spelled from the same source that reads it. A message naming a var
+/// that doesn't exist is worse than no message: it sends someone to fix
+/// something that was never broken.
+pub const BASE_URL_VAR: &str = "REPOWISE_LLM_BASE_URL";
+
+/// Chat model/route alias. See [`BASE_URL_VAR`] for why it's a constant.
+pub const MODEL_VAR: &str = "REPOWISE_LLM_MODEL";
+
+/// Embedding model/route alias. Note the spelling: no `LLM_` infix,
+/// unlike its siblings. Exactly the kind of asymmetry a hand-written
+/// error message gets wrong.
+pub const EMBEDDING_MODEL_VAR: &str = "REPOWISE_EMBEDDING_MODEL";
+
+/// Optional bearer token. See [`BASE_URL_VAR`].
+pub const API_KEY_VAR: &str = "REPOWISE_LLM_API_KEY";
+
 impl LlmConfig {
     /// `None` when `REPOWISE_LLM_BASE_URL` isn't set — the single on/off
     /// switch for every LLM feature in this crate. `REPOWISE_LLM_MODEL`
@@ -74,20 +102,16 @@ impl LlmConfig {
     /// `REPOWISE_LLM_API_KEY` is optional — omit it for an endpoint that
     /// doesn't require one.
     pub fn from_env() -> Option<Self> {
-        let base_url = std::env::var("REPOWISE_LLM_BASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())?;
-        let model = std::env::var("REPOWISE_LLM_MODEL")
+        let base_url = std::env::var(BASE_URL_VAR).ok().filter(|s| !s.is_empty())?;
+        let model = std::env::var(MODEL_VAR)
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "smart".to_string());
-        let embedding_model = std::env::var("REPOWISE_EMBEDDING_MODEL")
+        let embedding_model = std::env::var(EMBEDDING_MODEL_VAR)
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "embed".to_string());
-        let api_key = std::env::var("REPOWISE_LLM_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
+        let api_key = std::env::var(API_KEY_VAR).ok().filter(|s| !s.is_empty());
         Some(LlmConfig {
             base_url,
             model,

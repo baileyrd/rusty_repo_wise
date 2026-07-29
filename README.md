@@ -303,7 +303,8 @@ cargo build --release
 repowise init [PATH]              # build a fresh index (default PATH: .)
 repowise update [PATH]             # re-index (currently a full re-index)
 repowise overview [PATH]           # summary stats: languages, symbols, edges
-repowise search "<query>"  [PATH]  # substring search: --mode symbol|path|hybrid, --kind, --symbol-kind, --limit
+repowise search "<query>"  [PATH]  # --mode symbol|path|hybrid (substring) or semantic (embeddings)
+                                    #   --kind, --symbol-kind, --limit
 repowise generate-claude-md [PATH] [-o FILE] [--stdout]  # managed codebase-intelligence block in CLAUDE.md/AGENTS.md
 repowise distill <command>...      # run a command, print a compact rendering; dropped output stored and reversible
 repowise expand <ref> [-q PAT]     # restore the output behind a [repowise#<ref>] marker
@@ -1532,6 +1533,63 @@ uses `ureq` (synchronous), the same HTTP-client choice `repowise-adr`/
 doesn't need to pull an async runtime into an otherwise-synchronous CLI
 the way `repowise serve` does.
 
+## Semantic search
+
+`repowise search "<query>" --mode semantic` (and `search_codebase` with
+`mode: "semantic"`) ranks whole files by embedding similarity instead of
+matching substrings, for questions phrased by meaning rather than by
+name — "where is retry logic handled" finds nothing under `--mode
+symbol` unless something is literally called `retry`.
+
+It reads a **persisted** embedding index, built by `repowise init` /
+`repowise update` when `REPOWISE_LLM_BASE_URL` is set, and stored at
+`.repowise/embeddings.json`. Building it is the expensive half and it
+happens once; a query costs one short call to embed the query itself.
+
+Four design decisions are worth stating, because each is a way this
+could have shipped subtly wrong:
+
+- **Staleness is prevented, not detected.** A stale vector is worse than
+  a missing one: it returns confident, wrong neighbours and nothing
+  about the result looks wrong. So entries aren't timestamped and
+  compared — they're **keyed by a hash of the exact text that was
+  embedded**. Change a file and its key changes, so its old vector is
+  simply not found. There is no comparison to get wrong and no window to
+  be stale in. (The same content-addressing `repowise distill`'s
+  omission store uses.) A refresh reports `N new, N reused, N evicted`,
+  and the `evicted` count is what makes the guarantee visible: editing
+  one file evicts exactly that file's vector.
+- **The embedding model is part of the index's identity.** Vectors from
+  different models aren't comparable — cosine similarity between them is
+  noise that looks like a score. The index records which model produced
+  it, and a mismatch invalidates the whole thing with an error naming
+  both models, rather than silently mixing.
+- **Unavailable is an error, never an empty ranking.** Four distinct
+  reasons, each naming its own fix: no endpoint configured, no index
+  built yet, model changed, or the endpoint is up but the query call
+  failed. The last two are separated deliberately — sending someone to
+  check an environment variable that is already correct is worse than
+  saying nothing.
+- **Partial coverage is reported, always.** An index built before some
+  files existed covers only what it covers, and a ranking over 75% of a
+  repo that presents itself as a ranking over the repo is the failure
+  this feature could most easily introduce. Both surfaces report
+  `embedded` of `total`, and say explicitly that unranked files are
+  *absent from the results*, not ranked low.
+
+Two honest limitations:
+
+- **It ranks per-file symbol summaries, not source.** This port's index
+  stores structure, not file contents, so the embedded document for a
+  file is its path plus its symbol names and kinds. That finds files
+  whose *API* is about the query; it will not find a concept that only
+  appears inside function bodies. Both surfaces say so in their output.
+- **`get_answer` / `POST /api/chat` don't use this index yet** — they
+  still re-embed the corpus per call. Wiring them up isn't a
+  wire-up: a partially covered index would ground an answer in a subset
+  of the repo while its citations looked complete, which needs a
+  decision about what to do with the uncovered files first.
+
 ## Architectural decision mining
 
 `repowise decisions` mines six of the original's eight decision sources:
@@ -1620,12 +1678,12 @@ below):
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
-- **`search_codebase(query, mode?, kind?, symbol_kind?)`** — the same
-  substring search as `repowise search`, with the same filters.
-  - `mode`: `symbol` (default, the historical behavior), `path`, or
-    `hybrid`. **Path search was previously impossible to express** — only
-    symbol names were searchable, so "which file is the config loader in"
-    had no query that answered it.
+- **`search_codebase(query, mode?, kind?, symbol_kind?, limit?)`** — the
+  same search as `repowise search`, with the same modes and filters.
+  - `mode`: `symbol` (default, the historical behavior), `path`,
+    `hybrid`, or `semantic`. **Path search was previously impossible to
+    express** — only symbol names were searchable, so "which file is the
+    config loader in" had no query that answered it.
   - `kind`: `implementation` / `test` / `config` / `doc` / `unknown`,
     inferred from path conventions. A file matching no convention lands
     in `unknown` as its own bucket rather than defaulting into
@@ -1634,15 +1692,25 @@ below):
   - The response echoes back the `filters` it applied, so an empty result
     is readable — "nothing matches" and "your filters excluded
     everything" are otherwise indistinguishable.
-  - **`semantic`/`concept` mode is rejected, not degraded.** A silent
-    fallback to substring matching would answer a different question than
-    the one asked, so the error names the real limitation instead of
-    reporting an unknown mode.
-    - The limitation is **persistence, not capability**. `repowise-llm`
-      computes embeddings and `POST /api/chat` already uses them for real
-      semantic retrieval; what's missing is a *stored* index, since that
-      endpoint re-embeds the whole corpus per call. Fine for an occasional
-      chat message, far too expensive for search. Tracked as #302.
+  - **`semantic`/`concept` ranks whole files by embedding similarity**
+    against the stored index (see "Semantic search" below), for questions
+    phrased by meaning rather than by name. Three things it deliberately
+    does *not* do:
+    - **Degrade.** Without an endpoint or an index it errors naming the
+      missing piece. A silent fallback to substring matching would answer
+      a different question than the one asked.
+    - **Return an empty list when unavailable.** Zero results reads as
+      "the repo has nothing matching" — a false negative an agent will
+      act on — when the truth is that no search ran.
+    - **Ignore filters it can't honour.** `kind`/`symbol_kind` filter
+      symbols, and semantic mode ranks files, so passing them is rejected
+      rather than dropped: a result must never look filtered when it
+      isn't.
+  - Semantic responses carry `coverage` (`embedded` of `total` indexed
+    files, plus a `note` when partial) and `semantic_matches_total`.
+    `limit` (default 20, max 200) applies to semantic mode only, since
+    it scores *every* embedded file rather than producing match/no-match
+    — unlimited, the response would be the whole repo sorted.
 - **`get_context(file, limit?)`** — a file's symbols, resolved
   dependencies/dependents, and health score/findings in one call.
   - **Both lists are capped** (default 50, max 500), with
@@ -1689,9 +1757,14 @@ below):
     retrieval failure rather than as evidence the codebase lacks the
     thing. The healthy path carries no caveat, so the caveat stays worth
     reading.
-  - **Retrieval re-embeds the whole index on every call** (no persisted
-    vector index yet — #302). This is a considered-question tool, not a
-    cheap lookup; use `search_codebase` to find things by name.
+  - **Retrieval re-embeds the whole index on every call.** A persisted
+    embedding index now exists (see "Semantic search" below), but
+    `get_answer`'s retrieval doesn't read from it yet — a partially
+    covered index would quietly ground an answer in a *subset* of the
+    repo while its citations looked complete, which needs deciding
+    before wiring, not after. Until then this is a considered-question
+    tool, not a cheap lookup; use `search_codebase` to find things by
+    name.
 - **`get_health(targets?, limit?)`** — the same deterministic markers as
   `repowise health`, for agents. With no `targets`, repo mode: the
   lowest-scoring files (capped by `limit`, default 20, max 50, with

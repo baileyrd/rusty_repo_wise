@@ -3,12 +3,20 @@
 //!
 //! # What's deliberately absent
 //!
-//! The reference also offers a `semantic`/`concept` mode. That needs
-//! embeddings and a vector store, neither of which exists in this port
-//! (see issue #61). It is **not** stubbed here: a `--mode semantic`
-//! that quietly fell back to substring matching would be worse than not
-//! offering the flag, because the caller would believe they had asked
-//! a different question and got an answer to it.
+//! The reference also offers a `semantic`/`concept` mode, and this
+//! doesn't. It is **not** stubbed: a `--mode semantic` that quietly
+//! fell back to substring matching would be worse than not offering the
+//! flag, because the caller would believe they had asked a different
+//! question and got an answer to it.
+//!
+//! The reason is **persistence, not capability** -- a distinction an
+//! earlier version of this module got wrong. `repowise_llm::embed` and
+//! `cosine_similarity` exist, and `POST /api/chat` uses them for real
+//! semantic retrieval today. What's missing is a stored embedding
+//! index: that endpoint re-embeds the entire corpus on every call,
+//! which is a defensible tradeoff for an occasional chat message and an
+//! indefensible one for `search`, which is meant to be cheap and
+//! frequent. See issue #302.
 
 use repowise_core::{FileRecord, Language, SymbolKind};
 use std::path::Path;
@@ -39,9 +47,12 @@ impl SearchMode {
             // and "unknown mode" would read as a spelling mistake when
             // the real answer is that this port can't do it at all.
             "semantic" | "concept" => Err(
-                "semantic/concept search needs embeddings, which this port doesn't have \
-                 (see issue #61). It is deliberately not offered rather than silently \
-                 falling back to substring matching."
+                "semantic/concept search isn't available: this port computes embeddings \
+                 (see `repowise-llm`) but doesn't persist an index of them, and \
+                 re-embedding the corpus per query would make search far too expensive \
+                 to be worth it (see issue #302). It is deliberately not offered rather \
+                 than silently falling back to substring matching, which would answer a \
+                 different question than the one asked."
                     .to_string(),
             ),
             other => Err(format!(
@@ -273,9 +284,13 @@ mod tests {
         assert_eq!(SearchMode::parse("PATH"), Ok(SearchMode::Path));
         let err = SearchMode::parse("semantic").unwrap_err();
         assert!(
-            err.contains("embeddings"),
-            "a caller asking for semantic search deserves the real reason, not \
-             'unknown mode': {err}"
+            err.contains("doesn't persist an index"),
+            "a caller asking for semantic search deserves the real reason -- the gap is \
+             persistence, not capability -- and not 'unknown mode': {err}"
+        );
+        assert!(
+            !err.contains("doesn't have"),
+            "must not repeat the earlier claim that this port lacks embeddings: {err}"
         );
         assert!(SearchMode::parse("nonsense")
             .unwrap_err()

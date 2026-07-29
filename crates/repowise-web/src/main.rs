@@ -120,6 +120,25 @@ struct Health {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+struct Contributor {
+    author: String,
+    lines_owned: usize,
+    percent: f64,
+    files_touched: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Contributors {
+    available: bool,
+    contributors: Vec<Contributor>,
+    bus_factor_distribution: Vec<(usize, usize)>,
+    files_sampled: usize,
+    files_total: usize,
+    limit_applied: bool,
+    files_unblameable: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
 struct FileCoverage {
     path: String,
     percent: f64,
@@ -546,6 +565,105 @@ fn HealthSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                                 }
                                 .into_any()
                             }}
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Contributor directory and bus-factor distribution (issue #258).
+///
+/// Bus factor is rendered in words, not as a bare number: "1" reads to
+/// some as "one clear owner, tidy" -- the opposite of its meaning. The
+/// CLI's `repowise ownership` spells it out for the same reason, and
+/// this must not regress that.
+#[component]
+fn ContributorsSection() -> impl IntoView {
+    let contributors = LocalResource::new(|| fetch_json::<Contributors>("/api/contributors"));
+
+    view! {
+        <h2>"Contributors"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                contributors
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(c) if !c.available => view! {
+                            <p class="empty">
+                                "No ownership data -- needs a git repository with history."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(c) => view! {
+                            // Say when the sweep was bounded. Otherwise the
+                            // shares read as repo-wide when they aren't.
+                            <p>
+                                {format!(
+                                    "Ownership across {} of {} indexed file(s).",
+                                    c.files_sampled, c.files_total,
+                                )}
+                            </p>
+                            // Two different reasons the sample can fall
+                            // short of the repo, reported separately --
+                            // "bounded sample" on a repo where the bound
+                            // never applied would be plain wrong.
+                            {c.limit_applied
+                                .then(|| view! {
+                                    <p class="empty">
+                                        "Bounded to the largest files -- this is a sample, not \
+                                         the whole repo."
+                                    </p>
+                                })}
+                            {(c.files_unblameable > 0)
+                                .then(|| view! {
+                                    <p class="empty">
+                                        {format!(
+                                            "{} file(s) could not be blamed (untracked or never \
+                                             committed) and contributed nothing.",
+                                            c.files_unblameable,
+                                        )}
+                                    </p>
+                                })}
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"Author"</th>
+                                        <th>"Share"</th>
+                                        <th>"Lines"</th>
+                                        <th>"Files"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {c.contributors.into_iter().map(|a| view! {
+                                        <tr>
+                                            <td>{a.author}</td>
+                                            <td>{format!("{:.1}%", a.percent)}</td>
+                                            <td>{a.lines_owned}</td>
+                                            <td>{a.files_touched}</td>
+                                        </tr>
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
+                            <h3>"Bus factor"</h3>
+                            <p class="empty">
+                                "How many authors would have to leave before most of a file has \
+                                 no author left who has touched it. Lower is riskier."
+                            </p>
+                            <table>
+                                <thead><tr><th>"Bus factor"</th><th>"Files"</th></tr></thead>
+                                <tbody>
+                                    {c.bus_factor_distribution.into_iter().map(|(bf, count)| {
+                                        let label = match bf {
+                                            1 => "1 -- one author wrote most of the file".to_string(),
+                                            n => format!("{n} -- {n} authors between them"),
+                                        };
+                                        view! { <tr><td>{label}</td><td>{count}</td></tr> }
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
                         }
                         .into_any(),
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
@@ -2100,6 +2218,7 @@ fn App() -> impl IntoView {
         <HealthSection selected=selected />
         <CoverageSection selected=selected />
         <HotspotsSection selected=selected />
+        <ContributorsSection />
         <DecisionsSection />
         <SymbolsSection selected=selected />
         <GraphSection selected=selected />

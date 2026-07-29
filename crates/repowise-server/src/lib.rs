@@ -434,6 +434,55 @@ struct DeadCodeDto {
 /// Matches the `get_dead_code` MCP tool's own default `limit`.
 const DEAD_CODE_LIMIT: usize = 50;
 
+/// How many files `GET /api/contributors` blames before stopping.
+///
+/// `ownership_of` shells out to `git blame --line-porcelain` **once per
+/// file**, so an unbounded sweep is one subprocess per indexed file --
+/// fine at 85 files, not fine at several thousand, and a dashboard
+/// endpoint that takes 30s is not usable.
+///
+/// Bounding rather than caching is deliberate: a cache would need an
+/// invalidation story (the index has one, git history doesn't), whereas
+/// a bound is stateless and its cost is knowable up front. Files are
+/// taken largest-first, since they carry most of the repo's lines and so
+/// dominate any ownership share; the response reports how many were
+/// sampled so the UI can say so rather than implying a full sweep.
+const CONTRIBUTORS_FILE_LIMIT: usize = 200;
+
+#[derive(Serialize)]
+struct ContributorDto {
+    author: String,
+    lines_owned: usize,
+    /// Share of all sampled lines, `0.0..=100.0`.
+    percent: f64,
+    /// Files where this author owns at least one line.
+    files_touched: usize,
+}
+
+#[derive(Serialize)]
+struct ContributorsDto {
+    available: bool,
+    contributors: Vec<ContributorDto>,
+    /// How many sampled files have each bus factor, as `(bus_factor,
+    /// file_count)` ascending. Bus factor 1 first, since that's the
+    /// concentration risk worth seeing.
+    bus_factor_distribution: Vec<(usize, usize)>,
+    files_sampled: usize,
+    files_total: usize,
+    /// True only when `CONTRIBUTORS_FILE_LIMIT` actually truncated the
+    /// sweep.
+    ///
+    /// Kept separate from `files_sampled < files_total` because those
+    /// are different facts: files are also skipped when they cannot be
+    /// blamed at all (untracked, or never committed). Conflating them
+    /// would report "bounded sample" on a repo where the bound never
+    /// applied -- which is what a first cut of this endpoint did.
+    limit_applied: bool,
+    /// Indexed files that could not be blamed, and so contributed
+    /// nothing.
+    files_unblameable: usize,
+}
+
 /// Per-file coverage, for `GET /api/coverage` (issue #257).
 #[derive(Serialize)]
 struct FileCoverageDto {
@@ -978,6 +1027,76 @@ async fn get_ownership(
         },
     };
     Ok(Json(dto))
+}
+
+async fn get_contributors(
+    State(state): State<AppState>,
+) -> Result<Json<ContributorsDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let files_total = index.files.len();
+
+    // Largest files first: they hold most of the repo's lines, so when
+    // the limit bites, the sample retains the shares that matter most.
+    let mut by_size: Vec<_> = index.files.iter().collect();
+    by_size.sort_by_key(|f| std::cmp::Reverse(f.lines));
+    let limit_applied = by_size.len() > CONTRIBUTORS_FILE_LIMIT;
+    by_size.truncate(CONTRIBUTORS_FILE_LIMIT);
+    let considered = by_size.len();
+
+    let mut lines_by_author: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut files_by_author: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut bus_factors: std::collections::BTreeMap<usize, usize> = Default::default();
+    let mut files_sampled = 0usize;
+
+    for file in by_size {
+        // A file that can't be blamed (untracked, or no git at all) is
+        // skipped rather than failing the whole endpoint -- consistent
+        // with how every other git-backed surface here degrades.
+        let Ok(owners) = repowise_git::ownership_of(&state.root, &file.path) else {
+            continue;
+        };
+        if owners.is_empty() {
+            continue;
+        }
+        files_sampled += 1;
+        *bus_factors
+            .entry(repowise_git::bus_factor(&owners))
+            .or_insert(0) += 1;
+        for o in owners {
+            *lines_by_author.entry(o.author.clone()).or_insert(0) += o.lines;
+            *files_by_author.entry(o.author).or_insert(0) += 1;
+        }
+    }
+
+    let total_lines: usize = lines_by_author.values().sum();
+    let mut contributors: Vec<ContributorDto> = lines_by_author
+        .into_iter()
+        .map(|(author, lines_owned)| ContributorDto {
+            percent: if total_lines == 0 {
+                0.0
+            } else {
+                lines_owned as f64 / total_lines as f64 * 100.0
+            },
+            files_touched: files_by_author.get(&author).copied().unwrap_or(0),
+            author,
+            lines_owned,
+        })
+        .collect();
+    contributors.sort_by(|a, b| {
+        b.lines_owned
+            .cmp(&a.lines_owned)
+            .then_with(|| a.author.cmp(&b.author))
+    });
+
+    Ok(Json(ContributorsDto {
+        available: files_sampled > 0,
+        contributors,
+        bus_factor_distribution: bus_factors.into_iter().collect(),
+        files_sampled,
+        files_total,
+        limit_applied,
+        files_unblameable: considered.saturating_sub(files_sampled),
+    }))
 }
 
 async fn get_coverage(State(state): State<AppState>) -> Result<Json<CoverageDto>, ApiError> {
@@ -1543,6 +1662,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
         .route("/api/ownership", get(get_ownership))
+        .route("/api/contributors", get(get_contributors))
         .route("/api/coverage", get(get_coverage))
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/chat", post(post_chat))
@@ -2261,6 +2381,26 @@ mod tests {
         assert_eq!(json["git_available"], true);
         assert_eq!(json["llm_configured"], true);
         assert_eq!(json["llm_model"], "smart");
+    }
+
+    #[tokio::test]
+    async fn get_contributors_reports_unavailable_without_git_history() {
+        // A temp dir is not a git repo, so every blame fails. That must
+        // be an empty state, not a 500 -- consistent with the other
+        // git-backed endpoints.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/contributors").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["contributors"].as_array().unwrap().len(), 0);
+        // files_total still reports the real index size, so the UI can
+        // distinguish "no git" from "empty repo".
+        assert_eq!(json["files_total"], 1);
+        assert_eq!(json["files_sampled"], 0);
     }
 
     #[tokio::test]

@@ -1606,7 +1606,7 @@ Recency/confidence scoring on mined decisions is also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Eleven tools are implemented, and
+a prior `repowise init`/`update`. Twelve tools are implemented, and
 **every response carries a `_meta` block** (see "Response metadata"
 below):
 
@@ -1625,6 +1625,27 @@ below):
   by (recency-weighted) hotspot score. Degrades to zero/empty git data
   (rather than erroring) when the indexed root isn't a git repository —
   same tradeoff `repowise-dashboard`'s hotspots section already makes.
+- **`get_health(targets?, limit?)`** — the same deterministic markers as
+  `repowise health`, for agents. With no `targets`, repo mode: the
+  lowest-scoring files (capped by `limit`, default 20, max 50, with
+  `files_total` reporting the true count) plus findings by kind and **two
+  averages**. With `targets`, targeted mode: each named file's score and
+  its own findings.
+  - **Two averages, deliberately.** `average_score` is weighted by line
+    count; `average_score_unweighted` is the plain file mean;
+    `average_score_weighting` names which is which. The *gap* between
+    them is the actionable part — on this repo they read 0.70 weighted
+    against 1.54 unweighted, which says the low scores are concentrated
+    in the big files rather than spread across the long tail. One number
+    alone can't tell you that.
+  - **Repo-wide averages are omitted in targeted mode**, not zeroed —
+    next to a two-file answer they would read as *those files'* average.
+  - **Nothing is dropped silently.** A target that produced no score is
+    named in `unresolved` with a reason: `not_indexed` (it's on disk but
+    not in the index — run `repowise update`) or `no_such_path`. Those
+    need different fixes, and an absent row would look like neither. An
+    empty `files` list therefore means healthy, or it means we couldn't
+    look — and the response says which.
 - **`get_change_risk(revspec?)`** — a deterministic 0-10 risk score for a
   single commit or a `base..head` range (defaulting to `HEAD`), computed
   from diff-shape metrics via `git diff`/`git show`/`git rev-list`: lines

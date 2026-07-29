@@ -6,6 +6,36 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #289 — CLI: `workspace-conformance` gates CI
+**2026-07-29** · closes [#276](https://github.com/baileyrd/rusty_repo_wise/issues/276)
+
+- **`workspace-conformance` now exits non-zero on findings**, so it can sit in a
+  pipeline. It previously reported cycles and exited 0 — which meant the only
+  way to act on the finding was for a human to read the output, so the check ran
+  once when someone remembered rather than on every change. Added `--json` too.
+- **A third verdict, `UNVERIFIED`.** This is the substance of the change. "No
+  cycles found" and "no edges to check" produce the same empty list, and a
+  Rust-only resolver pointed at a Python workspace finds nothing *every time*.
+  A gate that greens on that is worse than no gate, because it looks like
+  coverage. `UNVERIFIED` exits non-zero by default; `--allow-unverified` opts
+  into treating it as success, making that an explicit, reviewable choice.
+- **A pass now says how much was checked** (`PASS: 4 cross-repo dependency
+  edge(s) checked, no cycles`) rather than just asserting cleanliness.
+- **Unread repos are called out** — a cycle running through one is invisible to
+  this check, so a clean result over a partially-indexed workspace shouldn't
+  read as clean.
+- **Behavior change, deliberately.** Exit-0-with-findings isn't something
+  anything could reasonably have depended on, so the gating is the default
+  rather than hidden behind a flag.
+- Reuses `workspace_metrics`, so this command and `workspace-metrics` can't
+  disagree about whether a workspace has cycles.
+- Also restored a doc comment on `cmd_workspace_contracts` that PR #287's
+  insertion had displaced onto the wrong function.
+- 5 new tests. Verified live across all four paths: cycle → exit 1, clean DAG →
+  exit 0, unresolvable → exit 1, `--allow-unverified` → exit 0.
+
+---
+
 ## PR #288 — CLI: `workspace-metrics`
 **2026-07-29** · closes [#275](https://github.com/baileyrd/rusty_repo_wise/issues/275)
 

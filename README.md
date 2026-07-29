@@ -1805,6 +1805,22 @@ FastAPI-backend architecture, minus the Node.js dependency.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+- **Activity view** (issue #262) renders `GET /api/stats`: a day×hour commit
+  punch card and a weekly-commit trend, both hand-drawn as inline SVG (no
+  charting dependency in a WASM binary).
+
+  **Everything is bucketed in UTC, and the view says so.** Git stores an author
+  timezone offset that this port doesn't carry, so a local-time punch card
+  isn't derivable — and silently bucketing in whatever timezone the server
+  happens to run in would make the chart's meaning shift with the host's `TZ`.
+
+  **A shallow clone is surfaced as a caveat in the view**, not silently
+  under-reported. Truncated history doesn't make these charts fail, it makes
+  them wrong in a way that looks fine — on a shallow clone of this repo, every
+  commit lands in the current week, which is an artifact rather than a finding.
+  Cell opacity carries magnitude while the `<title>` carries the count, so the
+  value is never colour-only.
+
 - **Search** (issue #260) is a Ctrl/Cmd+K box over `GET /api/search`, already
   PageRank-biased (#63). Requests are **debounced by 200ms**: previously every
   keystroke issued one, so typing "parser" fired six requests, five of them

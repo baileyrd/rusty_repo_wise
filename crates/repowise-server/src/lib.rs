@@ -434,6 +434,24 @@ struct DeadCodeDto {
 /// Matches the `get_dead_code` MCP tool's own default `limit`.
 const DEAD_CODE_LIMIT: usize = 50;
 
+/// Commit-activity stats, for `GET /api/stats` (issue #262).
+#[derive(Serialize)]
+struct StatsDto {
+    available: bool,
+    /// True when the clone is shallow. Surfaced because truncated
+    /// history doesn't make a trend chart *fail*, it makes it quietly
+    /// under-report -- which is exactly where a chart misleads.
+    shallow: bool,
+    commit_count: usize,
+    /// `[day][hour]`, day 0 = Sunday, hour 0 = midnight, both UTC.
+    punch_card: Vec<Vec<usize>>,
+    /// Commits per week, oldest first; the last entry is the current week.
+    weekly_trend: Vec<usize>,
+    /// Named explicitly so the client can state it. A punch card whose
+    /// timezone is implied is a punch card that can be misread.
+    timezone: &'static str,
+}
+
 /// One indexed file, for `GET /api/files` (issue #261).
 #[derive(Serialize)]
 struct FileEntryDto {
@@ -1051,6 +1069,38 @@ async fn get_ownership(
         },
     };
     Ok(Json(dto))
+}
+
+async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsDto>, ApiError> {
+    let shallow = repowise_git::is_shallow(&state.root);
+    // No git history is an empty state, not an error -- same as every
+    // other git-backed endpoint here.
+    let Ok(commits) = repowise_git::collect_commits(&state.root) else {
+        return Ok(Json(StatsDto {
+            available: false,
+            shallow,
+            commit_count: 0,
+            punch_card: vec![vec![0; 24]; 7],
+            weekly_trend: Vec::new(),
+            timezone: "UTC",
+        }));
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let timestamps: Vec<i64> = commits.iter().map(|c| c.timestamp).collect();
+    let activity = repowise_git::commit_activity(&timestamps, now);
+
+    Ok(Json(StatsDto {
+        available: activity.commit_count > 0,
+        shallow,
+        commit_count: activity.commit_count,
+        punch_card: activity.punch_card,
+        weekly_trend: activity.weekly_trend,
+        timezone: "UTC",
+    }))
 }
 
 async fn get_files(State(state): State<AppState>) -> Result<Json<FilesDto>, ApiError> {
@@ -1724,6 +1774,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
         .route("/api/ownership", get(get_ownership))
+        .route("/api/stats", get(get_stats))
         .route("/api/files", get(get_files))
         .route("/api/contributors", get(get_contributors))
         .route("/api/coverage", get(get_coverage))
@@ -2464,6 +2515,24 @@ mod tests {
         // distinguish "no git" from "empty repo".
         assert_eq!(json["files_total"], 1);
         assert_eq!(json["files_sampled"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_stats_reports_unavailable_without_git_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/stats").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["commit_count"], 0);
+        // The punch card is still well-formed so the client can render
+        // an empty grid rather than special-casing a missing field.
+        assert_eq!(json["punch_card"].as_array().unwrap().len(), 7);
+        // Timezone is always stated, even with no data.
+        assert_eq!(json["timezone"], "UTC");
     }
 
     #[tokio::test]

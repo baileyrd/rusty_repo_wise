@@ -279,6 +279,72 @@ pub fn ownership_of(root: &Path, file: &Path) -> anyhow::Result<Vec<Ownership>> 
     blame::blame_file(root, file)
 }
 
+/// How many weeks of history the activity trend covers.
+const TREND_WEEKS: usize = 26;
+
+/// Commit activity aggregates for `GET /api/stats` (issue #262).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitActivity {
+    /// `[day][hour]` commit counts. Day 0 is Sunday, hour 0 is midnight,
+    /// **both in UTC** -- see [`commit_activity`].
+    pub punch_card: Vec<Vec<usize>>,
+    /// Commits per week for the last [`TREND_WEEKS`] weeks, oldest
+    /// first. The final entry is the week containing `now`.
+    pub weekly_trend: Vec<usize>,
+    pub commit_count: usize,
+}
+
+/// Bucket commit timestamps into a day×hour punch card and a weekly
+/// trend.
+///
+/// **Everything is UTC.** Git stores an author timestamp plus a separate
+/// offset; this port only carries the timestamp, so a local-time punch
+/// card isn't derivable without data we don't have. Bucketing silently
+/// in whatever timezone the *server* happens to run in would be worse
+/// than picking one and saying so -- a punch card whose meaning shifts
+/// with the host's `TZ` is actively misleading. Callers surface "UTC" in
+/// the UI.
+///
+/// Pure, so it needs no repo and no clock of its own: `now` is passed
+/// in, which also keeps it deterministically testable.
+pub fn commit_activity(timestamps: &[i64], now: i64) -> CommitActivity {
+    let mut punch_card = vec![vec![0usize; 24]; 7];
+    let mut weekly_trend = vec![0usize; TREND_WEEKS];
+
+    for &ts in timestamps {
+        if ts < 0 {
+            continue;
+        }
+        let days = ts / SECONDS_PER_DAY as i64;
+        // 1970-01-01 was a Thursday; +4 shifts the epoch so 0 = Sunday.
+        let dow = (((days + 4) % 7) + 7) % 7;
+        let hour = (ts % SECONDS_PER_DAY as i64) / 3600;
+        punch_card[dow as usize][hour as usize] += 1;
+
+        let weeks_ago = (now - ts).max(0) / (SECONDS_PER_DAY as i64 * 7);
+        if (weeks_ago as usize) < TREND_WEEKS {
+            // Oldest first, so the last element is the current week.
+            let idx = TREND_WEEKS - 1 - weeks_ago as usize;
+            weekly_trend[idx] += 1;
+        }
+    }
+
+    CommitActivity {
+        punch_card,
+        weekly_trend,
+        commit_count: timestamps.len(),
+    }
+}
+
+/// Whether the repo containing `root` is a shallow clone.
+///
+/// Worth exposing because a shallow clone doesn't make history-derived
+/// numbers *fail*, it makes them quietly under-report -- and an activity
+/// trend is exactly where truncated history misleads most.
+pub fn is_shallow(root: &Path) -> bool {
+    root.join(".git").join("shallow").exists()
+}
+
 /// Share of a file's lines that the smallest owning group must hold
 /// before `bus_factor` stops counting authors into it.
 ///
@@ -516,5 +582,70 @@ mod tests {
     fn bus_factor_falls_back_to_every_author_when_shares_never_reach_the_threshold() {
         // Partial attribution: shares sum to 30%, never crossing 50%.
         assert_eq!(bus_factor(&owners(&[10.0, 10.0, 10.0])), 3);
+    }
+
+    /// 2024-01-07 00:00:00 UTC was a Sunday.
+    const SUNDAY_MIDNIGHT: i64 = 1_704_585_600;
+
+    #[test]
+    fn punch_card_buckets_by_utc_day_and_hour() {
+        let a = commit_activity(&[SUNDAY_MIDNIGHT], SUNDAY_MIDNIGHT);
+        assert_eq!(a.punch_card[0][0], 1, "Sunday midnight");
+
+        // +14h same day, and +1 day.
+        let b = commit_activity(
+            &[SUNDAY_MIDNIGHT + 14 * 3600, SUNDAY_MIDNIGHT + 86_400],
+            SUNDAY_MIDNIGHT + 86_400,
+        );
+        assert_eq!(b.punch_card[0][14], 1, "Sunday 14:00");
+        assert_eq!(b.punch_card[1][0], 1, "Monday midnight");
+    }
+
+    #[test]
+    fn punch_card_covers_a_full_week_and_day() {
+        let a = commit_activity(&[], 0);
+        assert_eq!(a.punch_card.len(), 7);
+        assert!(a.punch_card.iter().all(|d| d.len() == 24));
+    }
+
+    #[test]
+    fn weekly_trend_puts_the_current_week_last() {
+        let now = SUNDAY_MIDNIGHT + 100 * 86_400;
+        let week = 7 * 86_400;
+        let a = commit_activity(&[now, now - week, now - 2 * week], now);
+        let n = a.weekly_trend.len();
+        assert_eq!(a.weekly_trend[n - 1], 1, "this week");
+        assert_eq!(a.weekly_trend[n - 2], 1, "last week");
+        assert_eq!(a.weekly_trend[n - 3], 1, "two weeks ago");
+        assert_eq!(a.weekly_trend.iter().sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn commits_older_than_the_trend_window_are_dropped_from_it_but_still_counted() {
+        // They still belong on the punch card -- the window bounds the
+        // trend chart, not the history.
+        let now = SUNDAY_MIDNIGHT + 1_000 * 86_400;
+        let ancient = SUNDAY_MIDNIGHT;
+        let a = commit_activity(&[ancient], now);
+        assert_eq!(a.weekly_trend.iter().sum::<usize>(), 0);
+        assert_eq!(a.commit_count, 1);
+        assert_eq!(a.punch_card[0][0], 1);
+    }
+
+    #[test]
+    fn no_commits_yields_an_empty_but_well_formed_activity() {
+        let a = commit_activity(&[], 12_345);
+        assert_eq!(a.commit_count, 0);
+        assert_eq!(a.weekly_trend.len(), TREND_WEEKS);
+        assert!(a.punch_card.iter().flatten().all(|c| *c == 0));
+    }
+
+    #[test]
+    fn a_future_or_negative_timestamp_does_not_panic() {
+        let now = SUNDAY_MIDNIGHT;
+        let a = commit_activity(&[-1, now + 86_400 * 999], now);
+        assert_eq!(a.commit_count, 2, "still counted");
+        // The future commit lands in the current week, not out of bounds.
+        assert_eq!(a.weekly_trend[TREND_WEEKS - 1], 1);
     }
 }

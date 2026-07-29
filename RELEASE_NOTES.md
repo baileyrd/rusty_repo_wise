@@ -6,6 +6,34 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #262 — UI: activity view (punch card + weekly trend)
+**2026-07-28** · closes [#262](https://github.com/baileyrd/rusty_repo_wise/issues/262)
+
+- **Added:** `repowise_git::commit_activity`, `GET /api/stats`, and a
+  `StatsSection` drawing a day×hour punch card and a weekly trend as inline
+  SVG. Fifth issue of the UI parity round.
+- **No date dependency.** Day-of-week and hour come from integer arithmetic on
+  epoch seconds (1970-01-01 was a Thursday, hence the `+4` shift to make day 0
+  Sunday) rather than pulling in `chrono` for two divisions.
+- **UTC, stated explicitly.** Git stores an author timezone offset this port
+  doesn't carry, so a local-time punch card isn't derivable — and bucketing in
+  whatever timezone the *server* runs in would make the chart's meaning shift
+  with the host's `TZ`. The endpoint returns the timezone as a field so the UI
+  can't imply otherwise.
+- **Shallow clones are surfaced as a caveat**, not silently under-reported.
+  Verified live on this repo, which *is* a shallow clone: all 133 commits land
+  in the current week — an artifact of truncated history, not a finding. That's
+  precisely the case where a trend chart looks fine and is wrong.
+- **`commit_activity` is pure and takes `now` as a parameter**, so it needs no
+  repo and no clock and is deterministically testable.
+- Cell opacity carries magnitude while each cell's `<title>` carries the count,
+  so the value is never colour-only.
+- 7 new tests (6 in `repowise-git` — UTC bucketing, week ordering, commits
+  outside the trend window still counted on the card, empty input, negative and
+  far-future timestamps; 1 server test for the no-history empty state).
+
+---
+
 ## PR #260 — UI: debounce search, prompt on empty, clickable symbol results
 **2026-07-28** · closes [#260](https://github.com/baileyrd/rusty_repo_wise/issues/260)
 

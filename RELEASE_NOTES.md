@@ -6,6 +6,42 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #272 — MCP: `_meta` response envelope (staleness, timing, provenance)
+**2026-07-29** · closes [#272](https://github.com/baileyrd/rusty_repo_wise/issues/272)
+
+- **Added a `_meta` block to every MCP tool response**: `timing_ms`,
+  `index_age_days`, `indexed_commit`, `live_head`, `stale_warning`, `cached`.
+  Before this, an answer built from a months-old index was indistinguishable at
+  the protocol level from one built against `HEAD` — the one way this server
+  could mislead a caller while appearing to work perfectly.
+- **`RepoIndex` gained `indexed_commit`**, stamped by `init`/`update` and
+  `#[serde(default)]` so older indexes still load. Stamping happens in the CLI,
+  not `repowise-parser` — the parser has no git dependency by design, and both
+  commands go through one helper so they can't disagree about whether an index
+  gets stamped.
+- **Quiet by default.** `live_head`, `stale_warning` and `cached` are omitted
+  rather than sent as `null`/`false`. A `stale_warning: null` on every healthy
+  response teaches a caller to stop reading the field.
+- **Unknown is not "fine".** An index with no recorded commit produces no
+  staleness claim in either direction. When it's also old, the warning says
+  freshness *could not be verified* — a different statement from "it is stale".
+- **Tools that don't read the index report timing only.** `get_change_risk` is
+  git-only and the workspace tools read other repos; attaching this index's age
+  to them would make a current answer look doubtful.
+- **`Envelope<T>` uses `#[serde(flatten)]`**, so every field existing callers
+  already read stays exactly where it was.
+- **Three stale docs corrected while in here**: the crate doc said "8 of ~10
+  tools" (it serves 11), the `serve` help text named 3 tools, and the README
+  claimed "no caching across calls" when an mtime cache has been in place.
+- The pre-existing cache test asserted only that two loads returned equal
+  data — which proves nothing, since a full re-read returns the same index. It
+  now asserts the cache-hit flag.
+- 12 new tests (8 unit, 3 wiring against real git repos, 1 strengthened).
+  Verified over real MCP stdio: `_meta` on the wire, `stale_warning` firing
+  after a commit, and `cached` on a second call.
+
+---
+
 ## PR #271 — Docs: CI and branch protection
 **2026-07-29**
 

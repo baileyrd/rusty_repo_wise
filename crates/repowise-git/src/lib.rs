@@ -265,6 +265,45 @@ fn short_hash(hash: &str) -> String {
     hash.chars().take(7).collect()
 }
 
+/// Length of the SHA prefix [`head_sha`] returns.
+///
+/// 12, not the 7 [`short_hash`] uses for display. These two are for
+/// different jobs: 7 characters is plenty to eyeball a commit in a list,
+/// but this one gets *stored in an index and compared for equality
+/// later*, and a prefix collision there would silently report a stale
+/// index as current -- the exact failure the comparison exists to catch.
+/// 12 matches the reference repowise's `indexed_commit`/`live_head`.
+const HEAD_SHA_LEN: usize = 12;
+
+/// The commit `HEAD` currently points at, as a 12-character prefix.
+///
+/// `None` -- never an error and never a placeholder string -- when git
+/// isn't available, `root` isn't a repository, or the repository has no
+/// commits yet. Every one of those is a legitimate state for a repo this
+/// tool indexes, and callers need to be able to tell "no commit to
+/// record" apart from "recorded a commit", because reporting an unknown
+/// commit as a mismatch would flag every index in a non-git directory as
+/// stale.
+pub fn head_sha(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.len() < HEAD_SHA_LEN {
+        // A short-but-nonempty answer means something other than a SHA
+        // came back; truncating it would fabricate a plausible-looking
+        // commit id out of whatever it actually was.
+        return None;
+    }
+    Some(sha.chars().take(HEAD_SHA_LEN).collect())
+}
+
 /// Per-author share of a file's lines, from `git blame`.
 #[derive(Debug, Clone)]
 pub struct Ownership {

@@ -272,6 +272,7 @@ fn hotspot_score_multiplies_churn_by_complexity() {
             field_accesses: Vec::new(),
         }],
         other_files: 0,
+        indexed_commit: None,
     };
 
     let analytics = GitAnalytics::collect(&root).unwrap();
@@ -318,6 +319,7 @@ fn hotspots_includes_a_structural_tier_file_with_a_zero_score() {
             field_accesses: Vec::new(),
         }],
         other_files: 0,
+        indexed_commit: None,
     };
 
     let analytics = GitAnalytics::collect(&root).unwrap();
@@ -414,6 +416,7 @@ fn decayed_score_ranks_recent_churn_above_equally_old_churn() {
             },
         ],
         other_files: 0,
+        indexed_commit: None,
     };
 
     let analytics = GitAnalytics::collect(&root).unwrap();

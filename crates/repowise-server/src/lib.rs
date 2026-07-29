@@ -2033,6 +2033,7 @@ mod tests {
             root: root.clone(),
             files,
             other_files,
+            indexed_commit: None,
         };
         index.save(&root).unwrap();
 
@@ -2124,6 +2125,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -2166,6 +2168,7 @@ mod tests {
                 },
             ],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -2237,6 +2240,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -2544,6 +2548,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -2893,6 +2898,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
 
         let context = build_chat_context(&root, &index, "What does busy do?");
@@ -2907,6 +2913,7 @@ mod tests {
             root: root.clone(),
             files: vec![],
             other_files: 0,
+            indexed_commit: None,
         };
 
         let context = build_chat_context(&root, &index, "hello there");
@@ -3280,6 +3287,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -3315,6 +3323,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -3417,6 +3426,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -3570,6 +3580,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index
@@ -3592,6 +3603,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         index.save(root).unwrap();
         index

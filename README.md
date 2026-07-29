@@ -208,8 +208,9 @@ generate`, see "LLM-assisted wiki summaries" below) — a first, narrow slice
 of what was previously a fully-deferred LLM tier; RAG chat and refactor-plan
 codegen remain deferred. ADR mining is also not fully ported (only 6 of the
 original's 8 decision sources are implemented —
-see "Architectural decision mining" below). The MCP server covers 8 of
-the original's ~10 tools — see "MCP server" below for which and why. The
+see "Architectural decision mining" below). The MCP server covers all but one of
+the original's ten flagship tools (`get_answer` needs an LLM), and adds
+three the original doesn't have — see "MCP server" below. The
 dashboard is one static page with no per-file drill-down or live search
 — see "Dashboard" below for what a richer version would need.
 
@@ -326,7 +327,7 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code/list_repos/get_architecture/get_blast_radius)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
@@ -1605,7 +1606,9 @@ Recency/confidence scoring on mined decisions is also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Eight tools are implemented:
+a prior `repowise init`/`update`. Eleven tools are implemented, and
+**every response carries a `_meta` block** (see "Response metadata"
+below):
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
@@ -1680,14 +1683,54 @@ a prior `repowise init`/`update`. Eight tools are implemented:
   runtime-load risk factor this port has no way to assess) — see
   `repowise_health::find_dead_code` for the exact tiering logic.
 
-Every call re-loads `.repowise/index.json` and rebuilds the dependency
-graph fresh — no caching across calls, consistent with how `hotspots`/
-`ownership`/`coupled`/`decisions` already work in this port.
-(`get_change_risk` doesn't touch the index at all — it's pure `git`
-plumbing, same as `repowise-git`'s other functions.)
+A call re-reads `.repowise/index.json` and rebuilds the dependency graph
+only when the index file's mtime has changed; otherwise it reuses the
+previous load. (`get_change_risk` doesn't touch the index at all — it's
+pure `git` plumbing, same as `repowise-git`'s other functions.)
 
-Not implemented from the original's ~10 tools: the rest of the original's
-tool surface beyond what this port's other layers currently support.
+Not implemented from the original's ten flagship tools: **`get_answer`**
+(one-call RAG Q&A), which needs an LLM provider this port deliberately
+doesn't have — see issue #61.
+
+### Response metadata (`_meta`)
+
+Every tool response carries a `_meta` block. The point is that an answer
+built from a months-old index should not be indistinguishable from one
+built against `HEAD`:
+
+| Field | Meaning |
+| --- | --- |
+| `timing_ms` | Wall-time for the call. Always present. |
+| `index_age_days` | Whole days since the index was written. |
+| `indexed_commit` | The commit the index was built against (12-char prefix). |
+| `live_head` | The repo's current `HEAD` — **only when it differs**. |
+| `stale_warning` | **Only on a real signal**: a `HEAD` mismatch, or an index older than ~90 days with no commit to compare against. |
+| `cached` | **Only when `true`**: the call reused the previous load. |
+
+Three deliberate choices here:
+
+- **Quiet by default.** `live_head`, `stale_warning` and `cached` are
+  omitted rather than sent as `null`/`false`. A `stale_warning: null` on
+  every healthy response trains a caller to stop reading the field, so
+  the one time it matters it's just another key in the noise. Absence
+  means "nothing to report"; presence always means something.
+- **Unknown is not "fine".** `indexed_commit` is absent when the repo has
+  no git, no commits, or the index predates the field. That produces *no*
+  staleness claim in either direction — not a warning (which would fire
+  on every non-git directory), and not silence implying freshness (which
+  would let every older index claim to be current forever). When there's
+  no commit to compare and the index is old, the warning says its
+  freshness *could not be verified*, which is a different statement from
+  "it is stale".
+- **Tools that don't read the index report timing only.** `get_change_risk`
+  answers from git, and the workspace tools read other repos entirely.
+  Attaching this index's age to those answers would be misleading in the
+  opposite direction — a caller would discount a perfectly current
+  result because an unrelated index happened to be old.
+
+`repowise init`/`update` stamp the index with the commit they built it
+from; an index written before this existed loads fine and simply reports
+its commit as unknown until the next re-index.
 
 ## Dashboard
 

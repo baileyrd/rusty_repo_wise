@@ -268,6 +268,7 @@ mod tests {
             root: PathBuf::from("/fixture"),
             files: vec![file],
             other_files: 0,
+            indexed_commit: None,
         }
     }
 

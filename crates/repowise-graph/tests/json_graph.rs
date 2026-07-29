@@ -27,6 +27,7 @@ fn index_dir(root: &Path) -> RepoIndex {
         root: root.to_path_buf(),
         files,
         other_files,
+        indexed_commit: None,
     }
 }
 

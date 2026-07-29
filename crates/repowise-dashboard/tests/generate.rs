@@ -25,6 +25,7 @@ fn build_and_save_index(root: &std::path::Path) {
         root: root.to_path_buf(),
         files,
         other_files,
+        indexed_commit: None,
     };
     index.save(root).unwrap();
 }

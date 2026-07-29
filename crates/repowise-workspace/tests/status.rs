@@ -14,6 +14,7 @@ fn index_with_one_file(root: &std::path::Path) -> RepoIndex {
             field_accesses: vec![],
         }],
         other_files: 3,
+        indexed_commit: None,
     };
     index.save(root).unwrap();
     index

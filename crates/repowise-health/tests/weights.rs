@@ -61,6 +61,7 @@ fn index_with(symbols: Vec<Symbol>) -> RepoIndex {
             field_accesses: Vec::new(),
         }],
         other_files: 0,
+        indexed_commit: None,
     }
 }
 

@@ -606,6 +606,7 @@ mod tests {
                 },
             ],
             other_files: 0,
+            indexed_commit: None,
         };
 
         let response =

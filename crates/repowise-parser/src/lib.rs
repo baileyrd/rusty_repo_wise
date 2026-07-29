@@ -126,6 +126,12 @@ pub fn build_index(root: &Path) -> anyhow::Result<RepoIndex> {
         root,
         files,
         other_files,
+        // Left unset here on purpose: this crate parses source and knows
+        // nothing about git, and adding a dependency on `repowise-git`
+        // just to stamp a SHA would put version control in the parsing
+        // boundary. Whoever *persists* an index stamps it -- see
+        // `repowise-cli`'s init/update.
+        indexed_commit: None,
     })
 }
 

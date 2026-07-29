@@ -6,6 +6,35 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #290 — CLI + MCP: `search` filters
+**2026-07-29** · closes [#277](https://github.com/baileyrd/rusty_repo_wise/issues/277)
+
+- **`--mode symbol|path|hybrid`, `--kind`, `--symbol-kind`, `--limit`** on
+  `repowise search`, and the same parameters on the `search_codebase` MCP tool.
+  Both go through one shared module in `repowise-graph`, so the two surfaces
+  can't drift.
+- **Path search was previously impossible to express.** Only symbol names were
+  searchable, so "which file is the config loader in" had no query that
+  answered it.
+- **`semantic`/`concept` mode is rejected with the real reason**, not lumped in
+  with typos and not silently degraded to substring matching. A fallback would
+  answer a different question than the one asked, and the caller would never
+  know. The error names embeddings and #61.
+- **`unknown` is a real `kind` bucket.** Classification is path-convention
+  guesswork; a file matching no convention is visible as unclassified rather
+  than defaulting into `implementation`, where a filter would wrongly include or
+  exclude it. Tests-under-`src/` are classified as tests, since the reverse
+  mistake is what makes `--kind implementation` quietly wrong.
+- **Empty results say what was filtered.** With flags in play, "nothing matches"
+  and "your filters excluded everything" are indistinguishable — both surfaces
+  now echo the active filters back.
+- Path matching is repo-relative, so a query can't accidentally match the
+  producing machine's directory layout above the repo root.
+- 16 new tests (11 unit over classification and parsing, 5 over the MCP tool).
+  Verified live against this repo across every mode and filter.
+
+---
+
 ## PR #289 — CLI: `workspace-conformance` gates CI
 **2026-07-29** · closes [#276](https://github.com/baileyrd/rusty_repo_wise/issues/276)
 

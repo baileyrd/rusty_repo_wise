@@ -304,7 +304,7 @@ cargo build --release
 repowise init [PATH]              # build a fresh index (default PATH: .)
 repowise update [PATH]             # re-index (currently a full re-index)
 repowise overview [PATH]           # summary stats: languages, symbols, edges
-repowise search "<query>"  [PATH]  # substring search over symbol names
+repowise search "<query>"  [PATH]  # substring search: --mode symbol|path|hybrid, --kind, --symbol-kind, --limit
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
@@ -1614,7 +1614,25 @@ below):
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
-- **`search_codebase`** — the same substring search as `repowise search`.
+- **`search_codebase(query, mode?, kind?, symbol_kind?)`** — the same
+  substring search as `repowise search`, with the same filters.
+  - `mode`: `symbol` (default, the historical behavior), `path`, or
+    `hybrid`. **Path search was previously impossible to express** — only
+    symbol names were searchable, so "which file is the config loader in"
+    had no query that answered it.
+  - `kind`: `implementation` / `test` / `config` / `doc` / `unknown`,
+    inferred from path conventions. A file matching no convention lands
+    in `unknown` as its own bucket rather than defaulting into
+    `implementation` and being wrongly included or excluded.
+  - `symbol_kind`: restrict symbol hits to one kind.
+  - The response echoes back the `filters` it applied, so an empty result
+    is readable — "nothing matches" and "your filters excluded
+    everything" are otherwise indistinguishable.
+  - **`semantic`/`concept` mode is rejected, not degraded.** It needs
+    embeddings this port doesn't have (#61). A silent fallback to
+    substring matching would answer a different question than the one
+    asked, so the error names the real limitation instead of reporting an
+    unknown mode.
 - **`get_context`** — a file's symbols, resolved dependencies/dependents,
   and health score/findings in one call. This is the tool that matters
   most for the original's stated goal (cutting an agent's token spend on

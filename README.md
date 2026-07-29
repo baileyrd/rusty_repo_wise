@@ -1805,6 +1805,16 @@ FastAPI-backend architecture, minus the Node.js dependency.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+- **Search** (issue #260) is a Ctrl/Cmd+K box over `GET /api/search`, already
+  PageRank-biased (#63). Requests are **debounced by 200ms**: previously every
+  keystroke issued one, so typing "parser" fired six requests, five of them
+  obsolete before they returned. A further keystroke re-runs the resource and
+  drops the in-flight future before the delay elapses, so only a pause in
+  typing actually queries. An empty box shows a prompt rather than nothing —
+  an empty panel reads as "no matches" when you simply haven't typed yet — and
+  symbol results are links like file results, since a result you can't act on
+  is half a result.
+
 - **Files view** (issue #261) renders `GET /api/files` as a treemap: area
   proportional to a file's line count, fill by health band. It answers what the
   ranked tables can't — where the mass of the codebase sits, and whether the

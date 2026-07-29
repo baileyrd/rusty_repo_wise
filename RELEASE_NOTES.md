@@ -6,6 +6,38 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #260 — UI: debounce search, prompt on empty, clickable symbol results
+**2026-07-28** · closes [#260](https://github.com/baileyrd/rusty_repo_wise/issues/260)
+
+- **Smaller than the issue described, and the issue was wrong.** #260 assumed
+  no search UI existed. A `SearchBox` was already there with Ctrl/Cmd+K focus
+  and live results, so this fixes what it actually lacked rather than building
+  a second one.
+- **Debounced by 200ms.** Every keystroke previously issued an HTTP request —
+  typing "parser" fired six, five obsolete before they returned. A further
+  keystroke re-runs the resource and drops the in-flight future before the
+  delay elapses, so only a pause in typing queries. `gloo-timers` was already
+  a dependency, so no new crate.
+- **An empty box now prompts** instead of rendering nothing. Silence reads as
+  "no matches" when you haven't typed yet — a different and discouraging
+  message. `should_query` guards the request explicitly rather than relying on
+  the server returning an empty result for an empty needle.
+- **Symbol results are links**, matching file results. They were plain text,
+  and a result you can't act on is half a result.
+- **Result counts** are shown, so a truncated-looking list isn't mistaken for
+  the whole answer.
+- 2 new tests (10 total in the WASM crate). The debounce bound is enforced by a
+  **compile-time** `const _: () = assert!(...)` rather than a test — clippy
+  flagged asserting on a constant and its suggestion was the better design: the
+  constraint is on the constant, so raising it into perceptible-lag territory
+  should fail the build, not a test run. Verified it bites by setting it to
+  5000ms and watching `cargo check` fail.
+- **Correction to an earlier claim:** the UI gap analysis said this port had no
+  ⌘K command palette. Ctrl/Cmd+K focus already existed — what's still missing
+  is a palette that *navigates*, which needs routing (#259).
+
+---
+
 ## PR #261 — UI: files treemap, and the WASM crate's first tests
 **2026-07-28** · closes [#261](https://github.com/baileyrd/rusty_repo_wise/issues/261)
 

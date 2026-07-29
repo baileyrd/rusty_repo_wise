@@ -1296,6 +1296,29 @@ fn FileDetailPanel(wiki_pages: WikiPages, selected: RwSignal<Option<String>>) ->
     }
 }
 
+/// How long typing must pause before a search request is issued.
+///
+/// Without this every keystroke was one HTTP request: typing "parser"
+/// fired six, five of which were obsolete before they returned. 200ms is
+/// short enough to feel instant and long enough to collapse a burst of
+/// typing into a single request.
+const SEARCH_DEBOUNCE_MS: u32 = 200;
+
+/// Enforced at compile time rather than in a test: the constraint is on
+/// the constant itself, so a future "fix" that raises it into
+/// perceptible-lag territory should fail the build, not a test run.
+const _: () = assert!(SEARCH_DEBOUNCE_MS > 0 && SEARCH_DEBOUNCE_MS <= 300);
+
+/// Whether a query is worth sending to the server.
+///
+/// Guards the "empty query" case explicitly: `/api/search` returns
+/// nothing for an empty needle anyway, so issuing the request would be
+/// pure waste, and rendering its empty result would look like "no
+/// matches" rather than "you haven't typed anything".
+fn should_query(q: &str) -> bool {
+    !q.trim().is_empty()
+}
+
 /// A Ctrl/Cmd+K instant search box over files and symbols. Results are
 /// live-fetched from `/api/search` as you type; clicking a file result
 /// opens its file-detail panel the same way a drill-down link does.
@@ -1318,14 +1341,17 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
     let results = LocalResource::new(move || {
         let q = query.get();
         async move {
-            if q.trim().is_empty() {
-                Ok(SearchResults {
+            if !should_query(&q) {
+                return Ok(SearchResults {
                     files: Vec::new(),
                     symbols: Vec::new(),
-                })
-            } else {
-                fetch_json_with_query::<SearchResults>("/api/search", &[("q", &q)]).await
+                });
             }
+            // Debounce. A further keystroke re-runs this resource and
+            // drops the in-flight future before the delay elapses, so
+            // only a pause in typing actually issues a request.
+            gloo_timers::future::TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
+            fetch_json_with_query::<SearchResults>("/api/search", &[("q", &q)]).await
         }
     });
 
@@ -1340,14 +1366,29 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
             />
             <Suspense fallback=|| ()>
                 {move || {
-                    if query.get().trim().is_empty() {
-                        return None;
+                    // A prompt, not silence -- an empty panel reads as
+                    // "no matches" when nothing has been typed yet.
+                    if !should_query(&query.get()) {
+                        return Some(
+                            view! {
+                                <p class="empty">
+                                    "Type to search files and symbols."
+                                </p>
+                            }
+                            .into_any(),
+                        );
                     }
                     results.get().map(|result| match result.take() {
                         Ok(res) if res.files.is_empty() && res.symbols.is_empty() => {
                             view! { <p class="empty">"No matches."</p> }.into_any()
                         }
                         Ok(res) => view! {
+                            <p class="empty">
+                                {format!(
+                                    "{} file(s), {} symbol(s).",
+                                    res.files.len(), res.symbols.len(),
+                                )}
+                            </p>
                             <ul class="search-results">
                                 {res.files.into_iter().map(|f| {
                                     let target = f.clone();
@@ -1360,10 +1401,22 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
                                         </li>
                                     }
                                 }).collect::<Vec<_>>()}
-                                {res.symbols.into_iter().map(|s| view! {
-                                    <li class="mono">
-                                        {format!("{} ({}) — {}:{}", s.name, s.kind, s.file, s.start_line)}
-                                    </li>
+                                // Symbols were plain text while files were
+                                // links; a symbol result you can't act on is
+                                // half a result. Clicking selects its file.
+                                {res.symbols.into_iter().map(|s| {
+                                    let target = s.file.clone();
+                                    let label = format!(
+                                        "{} ({}) — {}:{}", s.name, s.kind, s.file, s.start_line,
+                                    );
+                                    view! {
+                                        <li class="mono">
+                                            <a href="#" on:click=move |ev| {
+                                                ev.prevent_default();
+                                                selected.set(Some(target.clone()));
+                                            }>{label}</a>
+                                        </li>
+                                    }
                                 }).collect::<Vec<_>>()}
                             </ul>
                         }
@@ -2572,5 +2625,21 @@ mod tests {
         assert_eq!(health_band(Some(5.0)).0, "fair");
         assert_eq!(health_band(Some(4.99)).0, "poor");
         assert_eq!(health_band(Some(0.0)).0, "poor");
+    }
+
+    #[test]
+    fn an_empty_or_blank_query_is_never_sent() {
+        // `/api/search` returns nothing for an empty needle, so sending
+        // one is pure waste -- and its empty result would render as "no
+        // matches" rather than "you haven't typed anything yet".
+        assert!(!should_query(""));
+        assert!(!should_query("   "));
+        assert!(!should_query("\t\n"));
+    }
+
+    #[test]
+    fn a_real_query_is_sent_even_with_surrounding_whitespace() {
+        assert!(should_query("parser"));
+        assert!(should_query("  parser  "));
     }
 }

@@ -6,6 +6,39 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #288 — CLI: `workspace-metrics`
+**2026-07-29** · closes [#275](https://github.com/baileyrd/rusty_repo_wise/issues/275)
+
+- **Added `repowise workspace-metrics --workspace <path> [--json]`**:
+  propagation cost, the cyclic core, and a single deterministic 1–10 score
+  over the repo-level dependency graph. Every input already existed — this is
+  the aggregate. Previously you could ask "is there a cycle?" (yes/no) but not
+  "how coupled is this system?".
+- **The score is withheld when nothing was measurable.** This is the design
+  decision the feature turns on. Cross-repo resolution in this port is
+  Rust-only, so a workspace of Python services resolves zero edges, finds no
+  cycles, and would be handed the **best possible score for never having been
+  measured**. `Confidence` distinguishes `resolved`, `no-edges-found`
+  (resolution ran over real Rust and found nothing — plausibly a real finding)
+  and `no-resolvable-language` (there was no Rust to resolve from at all), and
+  the score is `None` in the last case rather than a flattering 1.0.
+- **Co-change is excluded deliberately**, and every run says so. It's a
+  behavioral signal that moves with how a team worked that quarter; this score
+  describes structure, and mixing them makes the number drift for
+  non-architectural reasons.
+- **The scale is printed with the number** (`1 = loosely coupled, 10 = highly
+  coupled`) so `3.9/10` is never read as a grade, and the Rust-only caveat
+  prints on *every* run — including clean ones, since a reader who only sees
+  healthy output would otherwise never learn the limit.
+- Unindexed repos are named, and the report states that every number is a
+  floor while any repo is unread.
+- 13 new tests (5 integration against real Cargo workspaces on disk, 3 unit
+  over the closure, 5 over the rendering). Verified end to end: a 4-repo Rust
+  workspace with one dependency and one cycle reports 43.8% propagation and
+  3.9/10 — both confirmed by hand.
+
+---
+
 ## PR #287 — CLI: `workspace-diagnostics`
 **2026-07-29** · closes [#274](https://github.com/baileyrd/rusty_repo_wise/issues/274)
 

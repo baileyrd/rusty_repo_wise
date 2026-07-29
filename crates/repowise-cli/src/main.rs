@@ -305,6 +305,18 @@ enum Command {
     /// OTHER repos. Coarse and heuristic by design -- no cross-repo
     /// symbol resolution involved, just a fixed pattern table over raw
     /// source text. See `repowise-workspace`'s own docs for the caveat.
+    /// Architecture-complexity metrics over the workspace's repo-level
+    /// dependency graph: propagation cost (how far a change can reach),
+    /// the cyclic core (which repos form circular dependencies), and a
+    /// single deterministic 1-10 score. Structural edges only --
+    /// co-change is excluded deliberately.
+    WorkspaceMetrics {
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Emit the raw metrics as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Explain the cross-repo contract link count that
     /// `workspace-contracts` reports: per-repo producer/consumer
     /// counts, every unmatched consumer classified by WHY it didn't
@@ -426,6 +438,7 @@ fn main() -> anyhow::Result<()> {
             static_dir,
             workspace,
         } => cmd_serve_dashboard(&path, addr, static_dir, workspace),
+        Command::WorkspaceMetrics { workspace, json } => cmd_workspace_metrics(&workspace, json),
         Command::WorkspaceDiagnostics { workspace, json } => {
             cmd_workspace_diagnostics(&workspace, json)
         }
@@ -1535,6 +1548,124 @@ fn cmd_workspace_conformance(workspace: &Path) -> anyhow::Result<()> {
 }
 
 /// See `repowise-workspace`'s own docs for the workspace TOML format.
+/// Render the architecture-metrics report.
+///
+/// Split from `cmd_workspace_metrics` so the wording is testable
+/// without a workspace on disk.
+///
+/// Leads with the confidence caveat whenever the graph wasn't fully
+/// resolvable. Cross-repo resolution here is Rust-only, so a workspace
+/// of Python services resolves zero edges and would otherwise be
+/// reported as perfectly decoupled -- the best possible score for a
+/// system nobody measured. That warning has to come before the numbers
+/// it invalidates, not after.
+fn render_metrics(m: &repowise_workspace::WorkspaceMetrics) -> String {
+    use repowise_workspace::Confidence;
+    let mut out = String::new();
+
+    if m.confidence != Confidence::Resolved {
+        out.push_str(&format!(
+            "WARNING [{}]: {}\n\n",
+            m.confidence.label(),
+            m.confidence.explanation()
+        ));
+    }
+
+    if !m.unindexed_repos.is_empty() {
+        out.push_str(&format!(
+            "{} repo(s) could not be read and contributed no edges in either\n\
+             direction -- every number below is a floor, not a finding:\n",
+            m.unindexed_repos.len()
+        ));
+        for name in &m.unindexed_repos {
+            out.push_str(&format!("  {name} -- run `repowise update` in it\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "Workspace architecture metrics\n  repos: {}\n  cross-repo dependency edges: {}\n",
+        m.repo_count, m.edge_count
+    ));
+    out.push_str(&format!(
+        "  propagation cost: {:.1}% (share of repo pairs where one can reach the other)\n",
+        m.propagation_cost * 100.0
+    ));
+
+    match m.complexity_score {
+        Some(score) => out.push_str(&format!(
+            "  complexity score: {:.1}/10 ({})\n",
+            score,
+            repowise_workspace::WorkspaceMetrics::SCALE
+        )),
+        None => out.push_str(
+            "  complexity score: not reported -- nothing measurable to score.\n\
+             \x20   A score here would be the best possible number, earned by being\n\
+             \x20   unmeasurable rather than by being well-structured.\n",
+        ),
+    }
+
+    if m.cyclic_core.is_empty() {
+        out.push_str("\nNo circular dependencies between repos.\n");
+    } else {
+        out.push_str(&format!(
+            "\nCyclic core -- {} repo(s) in {} cycle(s):\n",
+            m.repos_in_cyclic_core,
+            m.cyclic_core.len()
+        ));
+        for cycle in &m.cyclic_core {
+            let mut names = cycle.clone();
+            names.sort();
+            out.push_str(&format!("  {}\n", names.join(" <-> ")));
+        }
+    }
+
+    out.push_str(
+        "\nStructural edges only; co-change is excluded deliberately -- it moves with\n\
+         how a team worked that quarter, and this score describes structure.\n\
+         Cross-repo resolution is Rust-only: every other language's imports are\n\
+         left unresolved, so these numbers are a lower bound on real coupling.\n",
+    );
+
+    out
+}
+
+fn metrics_json(m: &repowise_workspace::WorkspaceMetrics) -> serde_json::Value {
+    serde_json::json!({
+        "repo_count": m.repo_count,
+        "edge_count": m.edge_count,
+        "propagation_cost": m.propagation_cost,
+        "complexity_score": m.complexity_score,
+        "complexity_scale": repowise_workspace::WorkspaceMetrics::SCALE,
+        "cyclic_core": m.cyclic_core,
+        "repos_in_cyclic_core": m.repos_in_cyclic_core,
+        "unindexed_repos": m.unindexed_repos,
+        "confidence": {
+            "level": m.confidence.label(),
+            "explanation": m.confidence.explanation(),
+        },
+        "excludes": ["co-change (behavioral, not structural)"],
+        "resolution_caveat":
+            "cross-repo import resolution is Rust-only; other languages' imports are \
+             unresolved, so these numbers are a lower bound on real coupling",
+    })
+}
+
+fn cmd_workspace_metrics(workspace: &Path, json: bool) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    if repos.is_empty() {
+        println!("No repos configured in {}", workspace.display());
+        return Ok(());
+    }
+    let metrics = repowise_workspace::workspace_metrics(&repos);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&metrics_json(&metrics))?);
+    } else {
+        print!("{}", render_metrics(&metrics));
+    }
+    Ok(())
+}
+
 /// Render the contract diagnostics report.
 ///
 /// Split from `cmd_workspace_diagnostics` so the wording -- which is
@@ -2144,5 +2275,108 @@ mod tests {
             .unwrap()
             .contains("external"));
         assert_eq!(v["unmatched_consumers"][0]["path"], "/api/gone");
+    }
+
+    fn metrics(
+        confidence: repowise_workspace::Confidence,
+        score: Option<f64>,
+        cyclic: Vec<Vec<String>>,
+    ) -> repowise_workspace::WorkspaceMetrics {
+        repowise_workspace::WorkspaceMetrics {
+            repo_count: 3,
+            edge_count: 2,
+            propagation_cost: 0.55,
+            repos_in_cyclic_core: cyclic.iter().flatten().count(),
+            cyclic_core: cyclic,
+            complexity_score: score,
+            unindexed_repos: Vec::new(),
+            confidence,
+        }
+    }
+
+    /// The whole reason the score is an Option. A workspace this port
+    /// can't resolve must not be handed the best possible number for
+    /// having been unmeasurable.
+    #[test]
+    fn metrics_withholds_the_score_when_nothing_was_measurable() {
+        let out = render_metrics(&metrics(
+            repowise_workspace::Confidence::NoResolvableLanguage,
+            None,
+            Vec::new(),
+        ));
+        assert!(out.contains("not reported"), "{out}");
+        assert!(
+            out.contains("unmeasurable rather than by being well-structured"),
+            "{out}"
+        );
+        let warn = out.find("WARNING").expect("must warn");
+        let numbers = out.find("Workspace architecture metrics").unwrap();
+        assert!(
+            warn < numbers,
+            "the caveat must precede the numbers:\n{out}"
+        );
+    }
+
+    #[test]
+    fn metrics_states_the_scale_so_a_number_is_not_read_as_a_grade() {
+        let out = render_metrics(&metrics(
+            repowise_workspace::Confidence::Resolved,
+            Some(4.2),
+            Vec::new(),
+        ));
+        assert!(out.contains("4.2/10"), "{out}");
+        assert!(out.contains("lower is better"), "{out}");
+        assert!(
+            !out.contains("WARNING"),
+            "a resolved graph needs no caveat banner:\n{out}"
+        );
+    }
+
+    #[test]
+    fn metrics_always_states_what_was_excluded_and_what_could_not_resolve() {
+        let out = render_metrics(&metrics(
+            repowise_workspace::Confidence::Resolved,
+            Some(2.0),
+            Vec::new(),
+        ));
+        // Present even on the happy path: these bound what the number
+        // means, and a reader who only ever sees clean output would
+        // otherwise never learn the limits.
+        assert!(out.contains("co-change is excluded"), "{out}");
+        assert!(out.contains("Rust-only"), "{out}");
+        assert!(out.contains("lower bound on real coupling"), "{out}");
+    }
+
+    #[test]
+    fn metrics_lists_each_cycle() {
+        let out = render_metrics(&metrics(
+            repowise_workspace::Confidence::Resolved,
+            Some(8.0),
+            vec![vec!["b".to_string(), "a".to_string()]],
+        ));
+        assert!(out.contains("Cyclic core"), "{out}");
+        assert!(
+            out.contains("a <-> b"),
+            "cycle members are sorted for stable output:\n{out}"
+        );
+    }
+
+    #[test]
+    fn metrics_json_carries_the_confidence_and_the_caveat() {
+        let v = metrics_json(&metrics(
+            repowise_workspace::Confidence::NoResolvableLanguage,
+            None,
+            Vec::new(),
+        ));
+        assert_eq!(v["confidence"]["level"], "no-resolvable-language");
+        assert!(v["complexity_score"].is_null(), "withheld, not zero or ten");
+        assert!(v["resolution_caveat"]
+            .as_str()
+            .unwrap()
+            .contains("Rust-only"));
+        assert_eq!(
+            v["complexity_scale"],
+            repowise_workspace::WorkspaceMetrics::SCALE
+        );
     }
 }

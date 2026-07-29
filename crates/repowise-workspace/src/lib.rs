@@ -43,6 +43,9 @@
 //! invariant the rest of this port relies on.
 
 mod contracts;
+mod metrics;
+
+pub use metrics::{workspace_metrics, Confidence, WorkspaceMetrics};
 
 pub use contracts::{
     workspace_contracts, workspace_diagnostics, ConsumerCall, ContractDiagnostics, ContractMatch,

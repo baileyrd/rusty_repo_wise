@@ -1805,6 +1805,21 @@ FastAPI-backend architecture, minus the Node.js dependency.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+- **Contributors view** (issue #258) renders `GET /api/contributors`:
+  per-author owned lines and share, files touched, and the repo's
+  distribution of per-file bus factors. Bus factor is shown in words, not as
+  a bare number — "1" reads to some as "one clear owner", the opposite of what
+  it means.
+
+  `ownership_of` shells out to `git blame` **once per file**, so the sweep is
+  bounded to the 200 largest files rather than cached (a cache would need an
+  invalidation story that git history doesn't have; a bound is stateless and
+  its cost is knowable). The response reports **two different shortfalls
+  separately** — whether the bound truncated the sweep, and how many files
+  simply couldn't be blamed (untracked or never committed). They're distinct
+  facts, and reporting "bounded sample" on a repo where the bound never
+  applied would be wrong.
+
 - **Coverage view** (issue #257) renders `GET /api/coverage`: mean line
   coverage, the least-covered files, and whether a per-test map is present
   (without one, `repowise impacted-tests` can't run). It states the count of

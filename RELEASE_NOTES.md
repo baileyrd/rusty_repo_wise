@@ -6,6 +6,34 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #258 — UI: contributors view (`/api/contributors` + `ContributorsSection`)
+**2026-07-28** · closes [#258](https://github.com/baileyrd/rusty_repo_wise/issues/258)
+
+- **Added:** `GET /api/contributors` and a `ContributorsSection`. Second issue
+  of the UI parity round, surfacing `bus_factor` (#239), which until now was
+  CLI-only and one file at a time.
+- **Reports per-author owned lines, share, and files touched**, plus the repo's
+  distribution of per-file bus factors — the concentration question the
+  existing per-file `ownership` output couldn't answer at a glance.
+- **Bus factor rendered in words, not as a bare number.** "1" reads to some as
+  "one clear owner, tidy" — the opposite of its meaning. The CLI already spells
+  it out for this reason and the UI must not regress it.
+- **Bounded, not cached.** `ownership_of` shells out to `git blame` once per
+  file, so an unbounded sweep is one subprocess per indexed file. The sweep is
+  capped at the 200 largest files: a cache would need an invalidation story
+  (the index has one, git history doesn't), whereas a bound is stateless and
+  its cost is knowable up front.
+- **End-to-end verification caught a misleading message in the first cut.** The
+  response originally implied "bounded sample" whenever `files_sampled <
+  files_total` — but on this repo that gap is **21 unblameable files** (untracked
+  or never committed), with the 200-file bound never applying at 85 files. Those
+  are different facts, so `limit_applied` and `files_unblameable` are now
+  reported separately and the view phrases each correctly.
+- 1 server test (no-git-history reports unavailable while still reporting the
+  real index size, so the UI can tell "no git" from "empty repo").
+
+---
+
 ## PR #257 — UI: coverage view (`/api/coverage` + `CoverageSection`)
 **2026-07-28** · closes [#257](https://github.com/baileyrd/rusty_repo_wise/issues/257)
 

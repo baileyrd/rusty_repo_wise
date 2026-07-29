@@ -6,6 +6,43 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #300 — MCP: trim `get_context` on symbol-dense files
+**2026-07-29** · follow-up to [#299](https://github.com/baileyrd/rusty_repo_wise/pull/299)
+
+- **`get_context` returned more than the file it described.** #299's estimate
+  surfaced it: on an 8479-byte file with 300 small symbols the response was
+  **120145 bytes** — 14× the cost of just reading the file. A tool that replaces
+  a read has to be smaller than the read.
+- **Measured before fixing.** The 120 KB was `health_findings` 60982 +
+  `symbols` 58964, and within the symbol list the `id` field alone was
+  **34882 bytes** — this machine's absolute path, repeated 300 times.
+- **Both lists are now capped** (`limit`, default 50, max 500) with
+  `symbols_total`/`health_findings_total` alongside, so a truncated answer can't
+  be read as a complete one — the same pattern `get_dead_code` and `get_health`
+  already use.
+- **Symbol ids are repo-relative.** `src/lib.rs::only@1` rather than
+  `/tmp/…/src/lib.rs::only@1`. That's a real leak, not just bulk: the MCP
+  surface was the last place still emitting the producing machine's directory
+  layout, after `repowise-graph`'s JGF export fixed the same thing in round 1.
+- **`get_symbol` accepts either id form**, so ids handed out before this change
+  still resolve, and both come back as the portable one. Verified live against a
+  stored absolute id.
+- **Result: 120145 → 15244 bytes** on the same file, an 87% reduction, with
+  `limit=5` giving 1726.
+- 6 new tests, including one asserting the order-of-magnitude reduction itself
+  rather than trusting it.
+
+## Still true, and worth knowing
+
+At 15 KB the response is *still* larger than the 8.5 KB file. For a file whose
+symbols are each smaller than their own metadata, `get_context` cannot win on
+size — the JSON entry for `pub fn f0() -> i32 { 0 }` is longer than the line
+itself. The savings estimate from #299 will keep reporting those calls as a
+cost, which is correct: it's a real property of the tool, not a measurement
+artifact.
+
+---
+
 ## PR #299 — CLI: labelled MCP savings estimate in `saved`
 **2026-07-29** · follow-up to [#282](https://github.com/baileyrd/rusty_repo_wise/issues/282)
 

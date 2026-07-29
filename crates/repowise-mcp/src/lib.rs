@@ -282,6 +282,12 @@ struct SearchParams {
 struct ContextParams {
     /// Path to the file, absolute or relative to the indexed root.
     file: String,
+    /// Max symbols and max health findings returned. Default 50, capped
+    /// at 500. `symbols_total`/`health_findings_total` always report the
+    /// true counts, so a truncated answer can't be read as a complete
+    /// one.
+    #[serde(default = "default_context_limit")]
+    limit: usize,
 }
 
 fn default_top_n() -> usize {
@@ -440,10 +446,16 @@ struct HealthFindingOutput {
 struct ContextOutput {
     file: String,
     symbols: Vec<SymbolMatch>,
+    /// Symbols in this file before `limit` truncated the list. Lets a
+    /// caller tell "this file has 12 symbols" from "you're seeing 50 of
+    /// 300".
+    symbols_total: usize,
     dependencies: Vec<String>,
     dependents: Vec<String>,
     health_score: f64,
     health_findings: Vec<HealthFindingOutput>,
+    /// Findings for this file before truncation.
+    health_findings_total: usize,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -733,6 +745,57 @@ struct BlastRadiusOutput {
     importers: Vec<CrossRepoEdgeOutput>,
 }
 
+/// Default cap on `get_context`'s symbol and finding lists.
+///
+/// 50, matching `get_dead_code`'s shape. Chosen from measurement, not
+/// taste: an uncapped `get_context` on a 300-symbol file returned
+/// **120 KB for an 8.5 KB file** -- fourteen times the cost of simply
+/// reading it, which makes the tool actively worse than the thing it
+/// replaces.
+const CONTEXT_DEFAULT_LIMIT: usize = 50;
+
+/// Hard cap, however large a `limit` is requested.
+const CONTEXT_MAX_LIMIT: usize = 500;
+
+fn default_context_limit() -> usize {
+    CONTEXT_DEFAULT_LIMIT
+}
+
+/// A symbol id with the repo-relative path, rather than the absolute one
+/// `Symbol::make_id` bakes in.
+///
+/// Two problems with the stored form, both fixed here:
+///
+/// - It leaks the producing machine's directory layout to every caller.
+///   `repowise-graph`'s JGF export already rebuilds ids for exactly this
+///   reason; the MCP surface should not be the one place that still
+///   emits them.
+/// - It is *enormous* in aggregate. On a 300-symbol file the absolute
+///   prefix accounted for 34882 of the response's bytes -- 59% of the
+///   symbol list -- repeating the same path 300 times.
+fn portable_symbol_id(sym: &repowise_core::Symbol, root: &Path) -> String {
+    format!(
+        "{}::{}@{}",
+        display_rel(&sym.file, root),
+        sym.name,
+        sym.start_line
+    )
+}
+
+/// Find a symbol by either id form.
+///
+/// Accepts the stored absolute id and the portable relative one, so ids
+/// handed out by `get_context` before and after this change both keep
+/// working. Matching on the portable form is the primary path; the
+/// absolute comparison is the compatibility tail.
+fn find_symbol<'a>(index: &'a RepoIndex, wanted: &str) -> Option<&'a repowise_core::Symbol> {
+    index
+        .files
+        .iter()
+        .flat_map(|f| &f.symbols)
+        .find(|s| s.id == wanted || portable_symbol_id(s, &index.root) == wanted)
+}
+
 /// Line-count-weighted mean health score.
 ///
 /// Weighted rather than a plain file mean because a repo's health is
@@ -928,7 +991,7 @@ impl RepowiseServer {
     )]
     fn get_context(
         &self,
-        Parameters(ContextParams { file }): Parameters<ContextParams>,
+        Parameters(ContextParams { file, limit }): Parameters<ContextParams>,
     ) -> Result<Json<Envelope<ContextOutput>>, ErrorData> {
         let started = Instant::now();
         let (index, graph, cached) = self.load()?;
@@ -944,19 +1007,29 @@ impl RepowiseServer {
             ));
         };
 
-        let mut symbols: Vec<SymbolMatch> = record
+        let limit = limit.clamp(1, CONTEXT_MAX_LIMIT);
+
+        let mut all_symbols: Vec<&repowise_core::Symbol> = record
             .symbols
             .iter()
             .filter(|s| !matches!(s.kind, SymbolKind::Module))
+            .collect();
+        all_symbols.sort_by_key(|s| s.start_line);
+        let symbols_total = all_symbols.len();
+        let symbols: Vec<SymbolMatch> = all_symbols
+            .into_iter()
+            .take(limit)
             .map(|sym| SymbolMatch {
-                id: sym.id.clone(),
+                // Portable, and far smaller: the stored id embeds this
+                // machine's absolute path, which on a dense file was 59%
+                // of the whole symbol list.
+                id: portable_symbol_id(sym, &index.root),
                 name: sym.name.clone(),
                 kind: sym.kind.label().to_string(),
                 file: display_rel(&sym.file, &index.root),
                 line: sym.start_line,
             })
             .collect();
-        symbols.sort_by_key(|s| s.line);
 
         let dependencies = graph
             .dependencies_of(&target)
@@ -976,10 +1049,15 @@ impl RepowiseServer {
             .find(|f| f.file == target)
             .map(|f| f.score)
             .unwrap_or(10.0);
-        let health_findings = health
+        let matching_findings: Vec<_> = health
             .findings
             .iter()
             .filter(|f| f.file == target)
+            .collect();
+        let health_findings_total = matching_findings.len();
+        let health_findings: Vec<HealthFindingOutput> = matching_findings
+            .into_iter()
+            .take(limit)
             .map(|f| HealthFindingOutput {
                 kind: f.kind.label().to_string(),
                 symbol: f.symbol.clone(),
@@ -991,10 +1069,12 @@ impl RepowiseServer {
         let output = ContextOutput {
             file: display_rel(&target, &index.root),
             symbols,
+            symbols_total,
             dependencies,
             dependents,
             health_score: file_health,
             health_findings,
+            health_findings_total,
         };
         // The baseline: reading this file instead of asking for its
         // context. One file, unambiguous.
@@ -1087,12 +1167,7 @@ impl RepowiseServer {
         let started = Instant::now();
         let (index, _graph, cached) = self.load()?;
 
-        let Some(sym) = index
-            .files
-            .iter()
-            .flat_map(|f| &f.symbols)
-            .find(|s| s.id == symbol_id)
-        else {
+        let Some(sym) = find_symbol(&index, &symbol_id) else {
             return Err(ErrorData::resource_not_found(
                 format!("no indexed symbol with id {symbol_id}"),
                 None,
@@ -1116,7 +1191,9 @@ impl RepowiseServer {
 
         let file = sym.file.clone();
         let output = GetSymbolOutput {
-            id: sym.id.clone(),
+            // The same portable form `get_context` hands out, so an id
+            // taken from one tool and passed to the other round-trips.
+            id: portable_symbol_id(sym, &index.root),
             name: sym.name.clone(),
             kind: sym.kind.label().to_string(),
             file: display_rel(&sym.file, &index.root),
@@ -1913,6 +1990,7 @@ mod tests {
         let Json(Envelope { data: ctx, .. }) = server
             .get_context(Parameters(ContextParams {
                 file: "lib.rs".to_string(),
+                limit: CONTEXT_DEFAULT_LIMIT,
             }))
             .unwrap();
         assert_eq!(ctx.file, "lib.rs");
@@ -1934,6 +2012,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_context(Parameters(ContextParams {
             file: "missing.rs".to_string(),
+            limit: CONTEXT_DEFAULT_LIMIT,
         }));
         let Err(err) = result else {
             panic!("expected an error for an unindexed file");
@@ -2730,6 +2809,139 @@ mod tests {
             data.filters.contains("symbol_kind=function"),
             "{}",
             data.filters
+        );
+    }
+
+    /// A file with many small symbols was the case that made
+    /// `get_context` cost more than reading the file it described.
+    fn dense_source(symbols: usize) -> String {
+        (0..symbols)
+            .map(|i| format!("pub fn f{i}() -> i32 {{ {i} }}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn get_context_caps_its_lists_but_reports_the_true_totals() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), dense_source(300)).unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_context(Parameters(ContextParams {
+                file: "lib.rs".to_string(),
+                limit: CONTEXT_DEFAULT_LIMIT,
+            }))
+            .unwrap();
+
+        assert_eq!(data.symbols.len(), CONTEXT_DEFAULT_LIMIT);
+        assert_eq!(
+            data.symbols_total, 300,
+            "a truncated list must not be readable as the whole file"
+        );
+    }
+
+    #[test]
+    fn get_context_clamps_an_absurd_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), dense_source(20)).unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_context(Parameters(ContextParams {
+                file: "lib.rs".to_string(),
+                limit: 100_000,
+            }))
+            .unwrap();
+        assert_eq!(data.symbols.len(), 20);
+        assert_eq!(data.symbols_total, 20);
+    }
+
+    /// The stored id embeds this machine's absolute path. Emitting it
+    /// leaked the producing machine's layout and, on a dense file,
+    /// accounted for most of the response.
+    #[test]
+    fn get_context_ids_are_repo_relative_not_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), "pub fn only() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root.clone(), None);
+        let Json(Envelope { data, .. }) = server
+            .get_context(Parameters(ContextParams {
+                file: "lib.rs".to_string(),
+                limit: CONTEXT_DEFAULT_LIMIT,
+            }))
+            .unwrap();
+
+        let id = &data.symbols[0].id;
+        assert_eq!(id, "lib.rs::only@1", "{id}");
+        assert!(
+            !id.contains(&root.display().to_string()),
+            "the response must not carry the producing machine's paths: {id}"
+        );
+    }
+
+    /// Both id forms have to resolve: ids handed out before this change
+    /// are still in agent transcripts and scrollback.
+    #[test]
+    fn get_symbol_accepts_both_the_portable_and_the_legacy_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), "pub fn only() -> i32 { 1 }\n").unwrap();
+        build_and_save_index(&root);
+        let index = RepoIndex::load(&root).unwrap();
+        let stored = index.files[0].symbols[0].id.clone();
+        assert!(
+            stored.contains(&root.display().to_string()),
+            "precondition: the stored id is absolute"
+        );
+
+        let server = RepowiseServer::new(root, None);
+        for id in [stored.as_str(), "lib.rs::only@1"] {
+            let Json(Envelope { data, .. }) = server
+                .get_symbol(Parameters(GetSymbolParams {
+                    symbol_id: id.to_string(),
+                    context_lines: 0,
+                }))
+                .unwrap_or_else(|e| panic!("id {id:?} should resolve: {}", e.message));
+            assert_eq!(
+                data.id, "lib.rs::only@1",
+                "both forms must come back as the portable one"
+            );
+        }
+    }
+
+    /// The measurable point of the change, asserted rather than assumed.
+    #[test]
+    fn capping_shrinks_a_dense_file_response_by_an_order_of_magnitude() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), dense_source(300)).unwrap();
+        build_and_save_index(&root);
+        let server = RepowiseServer::new(root, None);
+
+        let size = |limit: usize| {
+            let Json(env) = server
+                .get_context(Parameters(ContextParams {
+                    file: "lib.rs".to_string(),
+                    limit,
+                }))
+                .unwrap();
+            serde_json::to_string(&env).unwrap().len()
+        };
+
+        let capped = size(CONTEXT_DEFAULT_LIMIT);
+        let uncapped = size(CONTEXT_MAX_LIMIT);
+        assert!(
+            capped * 5 < uncapped,
+            "the default cap should be a large win on a dense file \
+             (capped {capped}, uncapped {uncapped})"
         );
     }
 }

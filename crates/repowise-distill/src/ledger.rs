@@ -55,6 +55,10 @@ pub enum Kind {
     /// coverage, the difference between "the hook is working" and "the
     /// hook is installed".
     Skipped,
+    /// A command that ran through `distill` but produced no saving.
+    /// Carries an exit code, so it counts for fumble detection while
+    /// staying out of the savings totals.
+    Ran,
 }
 
 impl Kind {
@@ -62,6 +66,7 @@ impl Kind {
         match self {
             Kind::Distilled => "distilled",
             Kind::Skipped => "skipped",
+            Kind::Ran => "ran",
         }
     }
 
@@ -69,6 +74,7 @@ impl Kind {
         match s {
             "distilled" => Some(Kind::Distilled),
             "skipped" => Some(Kind::Skipped),
+            "ran" => Some(Kind::Ran),
             _ => None,
         }
     }
@@ -87,6 +93,14 @@ pub struct Record {
     pub kept_bytes: usize,
     /// Skip reason, or empty.
     pub detail: String,
+    /// The command's exit status.
+    ///
+    /// `None` for records that didn't run a command (skips), and for
+    /// records written before this field existed -- a trailing field is
+    /// absent in older lines, and `read` treats absent as unknown
+    /// rather than as success. Conflating "we never saw an exit code"
+    /// with "it exited 0" would invent successes that never happened.
+    pub exit_code: Option<i32>,
 }
 
 impl Record {
@@ -126,18 +140,28 @@ pub fn append(store_dir: &Path, record: &Record) -> std::io::Result<()> {
         .open(ledger_path(store_dir))?;
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
         record.at,
         record.kind.tag(),
         sanitize(&record.program),
         record.raw_bytes,
         record.kept_bytes,
-        sanitize(&record.detail)
+        sanitize(&record.detail),
+        record
+            .exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_string())
     )
 }
 
 /// Record a distillation that just happened.
-pub fn record_distilled(store_dir: &Path, program: &str, raw_bytes: usize, kept_bytes: usize) {
+pub fn record_distilled(
+    store_dir: &Path,
+    program: &str,
+    raw_bytes: usize,
+    kept_bytes: usize,
+    exit_code: i32,
+) {
     let _ = append(
         store_dir,
         &Record {
@@ -147,6 +171,28 @@ pub fn record_distilled(store_dir: &Path, program: &str, raw_bytes: usize, kept_
             raw_bytes,
             kept_bytes,
             detail: String::new(),
+            exit_code: Some(exit_code),
+        },
+    );
+}
+
+/// Record a command that ran through `distill` but wasn't compacted.
+///
+/// Needed for fumble detection even though there's no saving to report:
+/// the *succeeding* half of a fumble pair is usually short output that
+/// distillation passed straight through, and without it every fumble
+/// would look unresolved.
+pub fn record_ran(store_dir: &Path, program: &str, raw_bytes: usize, exit_code: i32) {
+    let _ = append(
+        store_dir,
+        &Record {
+            at: now_secs(),
+            kind: Kind::Ran,
+            program: program.to_string(),
+            raw_bytes,
+            kept_bytes: raw_bytes,
+            detail: String::new(),
+            exit_code: Some(exit_code),
         },
     );
 }
@@ -162,6 +208,7 @@ pub fn record_skipped(store_dir: &Path, program: &str, reason: &str) {
             raw_bytes: 0,
             kept_bytes: 0,
             detail: reason.to_string(),
+            exit_code: None,
         },
     );
 }
@@ -184,6 +231,9 @@ fn parse_line(line: &str) -> Option<Record> {
     let raw_bytes = parts.next()?.parse().ok()?;
     let kept_bytes = parts.next()?.parse().ok()?;
     let detail = parts.next().unwrap_or("").to_string();
+    // Absent or "-" is unknown, never success. A record written before
+    // this field existed must not be read as having exited 0.
+    let exit_code = parts.next().and_then(|s| s.parse().ok());
     Some(Record {
         at,
         kind,
@@ -191,6 +241,7 @@ fn parse_line(line: &str) -> Option<Record> {
         raw_bytes,
         kept_bytes,
         detail,
+        exit_code,
     })
 }
 
@@ -210,7 +261,7 @@ mod tests {
     #[test]
     fn records_round_trip_through_the_ledger() {
         let d = dir();
-        record_distilled(d.path(), "cargo", 4000, 400);
+        record_distilled(d.path(), "cargo", 4000, 400, 0);
         record_skipped(d.path(), "git", "not-rewritable");
 
         let records = read(d.path());
@@ -227,7 +278,7 @@ mod tests {
     #[test]
     fn field_separators_in_a_command_cannot_corrupt_the_ledger() {
         let d = dir();
-        record_distilled(d.path(), "car\tgo\nnpm", 100, 10);
+        record_distilled(d.path(), "car\tgo\nnpm", 100, 10, 0);
         let records = read(d.path());
         assert_eq!(records.len(), 1, "one command must produce one record");
         assert!(!records[0].program.contains('\t'));
@@ -237,7 +288,7 @@ mod tests {
     #[test]
     fn a_malformed_line_is_skipped_not_fatal() {
         let d = dir();
-        record_distilled(d.path(), "cargo", 100, 10);
+        record_distilled(d.path(), "cargo", 100, 10, 0);
         {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
@@ -246,7 +297,7 @@ mod tests {
                 .unwrap();
             writeln!(f, "garbage line with no fields").unwrap();
         }
-        record_distilled(d.path(), "pytest", 200, 20);
+        record_distilled(d.path(), "pytest", 200, 20, 0);
 
         let records = read(d.path());
         assert_eq!(records.len(), 2, "the two good records must still be read");
@@ -263,6 +314,7 @@ mod tests {
             raw_bytes: 10,
             kept_bytes: 40,
             detail: String::new(),
+            exit_code: Some(0),
         };
         assert_eq!(r.saved_bytes(), 0);
     }

@@ -6,6 +6,32 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #257 — UI: coverage view (`/api/coverage` + `CoverageSection`)
+**2026-07-28** · closes [#257](https://github.com/baileyrd/rusty_repo_wise/issues/257)
+
+- **Added:** `GET /api/coverage` in `repowise-server` and a `CoverageSection`
+  in `crates/repowise-web`. First issue of the UI parity round.
+- **Closes a loop opened earlier today.** #241/#242/#243 built coverage ingest,
+  impacted-tests, and two health markers — and nothing surfaced any of it. The
+  data was computed, stored at `.repowise/coverage.json`, and reachable only
+  from the CLI.
+- **The API keeps "never measured" and "0% covered" apart.** Measured files go
+  in `files`; indexed files no report mentioned are counted in
+  `unmeasured_files` rather than listed at 0%. `CoverageData::line_coverage_of`
+  returns `None` vs `Some(0.0)` precisely to preserve that, and flattening them
+  at the API boundary would have quietly undone it.
+- **The view states the unmeasured count rather than implying coverage.**
+  Without that line the measured set reads as the whole repo — on this repo,
+  1 measured file out of 85 would look like complete coverage.
+- **Reports per-test map presence**, since `repowise impacted-tests` can't run
+  without one and that's invisible otherwise.
+- **Coverage on disk that matches no indexed file reports `available: false`**
+  rather than "0 measured files", which would read as "nothing is covered".
+- 2 server tests. Verified end-to-end against a live `serve-dashboard`: both
+  the nothing-ingested and the one-file-at-50% states.
+
+---
+
 ## PR #256 — One frontend: remove the React app, give the Leptos crate a real CI gate
 **2026-07-28**
 

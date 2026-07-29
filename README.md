@@ -1805,6 +1805,13 @@ FastAPI-backend architecture, minus the Node.js dependency.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+- **Coverage view** (issue #257) renders `GET /api/coverage`: mean line
+  coverage, the least-covered files, and whether a per-test map is present
+  (without one, `repowise impacted-tests` can't run). It states the count of
+  indexed files that appear in **no** report separately from the measured
+  ones — an unmeasured file is not a 0%-covered file, and the endpoint keeps
+  the two apart rather than flattening them into one list. With nothing
+  ingested the view says so and points at `repowise coverage add`.
 - **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
   renders every section the static dashboard has — overview, code
   health, hotspots, architectural decisions, and a symbols table with a

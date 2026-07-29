@@ -120,6 +120,24 @@ struct Health {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+struct FileCoverage {
+    path: String,
+    percent: f64,
+    lines_known: usize,
+    lines_hit: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Coverage {
+    available: bool,
+    files: Vec<FileCoverage>,
+    unmeasured_files: usize,
+    mean_percent: f64,
+    has_per_test_map: bool,
+    test_contexts: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
 struct Hotspot {
     file: String,
     churn: usize,
@@ -528,6 +546,93 @@ fn HealthSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                                 }
                                 .into_any()
                             }}
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Test coverage (issue #257), surfacing what `repowise coverage add`
+/// ingested.
+///
+/// The distinction this view exists to preserve: a file that no report
+/// measured is **not** a file at 0%. The server keeps them apart
+/// (measured files in `files`, the rest counted in `unmeasured_files`)
+/// and this renders both, so an unmeasured repo can never look like an
+/// untested one.
+#[component]
+fn CoverageSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let coverage = LocalResource::new(|| fetch_json::<Coverage>("/api/coverage"));
+
+    view! {
+        <h2>"Test coverage"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                coverage
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(c) if !c.available => view! {
+                            <p class="empty">
+                                "No coverage ingested. Run `repowise coverage add <REPORT>` \
+                                 to populate this view."
+                            </p>
+                        }
+                        .into_any(),
+                        Ok(c) => view! {
+                            <p>
+                                {format!(
+                                    "{:.1}% mean line coverage across {} measured file(s).",
+                                    c.mean_percent,
+                                    c.files.len(),
+                                )}
+                            </p>
+                            // Stated, never implied: without this the measured
+                            // set reads as the whole repo.
+                            {(c.unmeasured_files > 0)
+                                .then(|| view! {
+                                    <p class="empty">
+                                        {format!(
+                                            "{} indexed file(s) appear in no report -- unmeasured, \
+                                             which is not the same as untested.",
+                                            c.unmeasured_files,
+                                        )}
+                                    </p>
+                                })}
+                            <p>
+                                {if c.has_per_test_map {
+                                    format!(
+                                        "Per-test map: {} test context(s) -- `repowise \
+                                         impacted-tests` can run.",
+                                        c.test_contexts,
+                                    )
+                                } else {
+                                    "Per-test map: none. The ingested reports carried no TN: \
+                                     records, so `repowise impacted-tests` cannot run."
+                                        .to_string()
+                                }}
+                            </p>
+                            <h3>"Least-covered files"</h3>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"File"</th>
+                                        <th>"Coverage"</th>
+                                        <th>"Lines hit"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {c.files.into_iter().map(|f| view! {
+                                        <tr>
+                                            <td>{file_cell(f.path, selected)}</td>
+                                            <td>{format!("{:.0}%", f.percent)}</td>
+                                            <td>{format!("{} / {}", f.lines_hit, f.lines_known)}</td>
+                                        </tr>
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
                         }
                         .into_any(),
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
@@ -1993,6 +2098,7 @@ fn App() -> impl IntoView {
         <FileDetailPanel wiki_pages=wiki_pages selected=selected />
         <OverviewSection selected=selected />
         <HealthSection selected=selected />
+        <CoverageSection selected=selected />
         <HotspotsSection selected=selected />
         <DecisionsSection />
         <SymbolsSection selected=selected />

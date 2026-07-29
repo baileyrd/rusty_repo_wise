@@ -16,11 +16,16 @@
 //! this port): unset `REPOWISE_LLM_BASE_URL` and every LLM feature here
 //! degrades to "not available" rather than failing.
 //!
-//! This is a first, deliberately narrow slice of the four LLM-dependent
-//! features tracked by issue #61 (wiki-prose generation, RAG chat,
-//! refactor-plan codegen, doc-gen-as-decision-source): only wiki-summary
-//! generation is implemented here. The other three need real
-//! retrieval/context design of their own and are left as follow-ups.
+//! Three of the four LLM-dependent features tracked by issue #61 now
+//! live here: wiki-prose generation, RAG chat ([`retrieval`]), and
+//! doc-gen-as-decision-source ([`decision_proposals`]). Refactor-plan
+//! codegen is the remaining one.
+//!
+//! [`decision_proposals`] is the write half of an LLM-inferred decision
+//! source whose read half is `repowise_adr::inferred`. The split keeps
+//! every decision *read* path deterministic and offline; see that
+//! module for the anchoring that makes an inferred decision trustworthy
+//! enough to show at all.
 //!
 //! [`complete_messages_with_usage`] also returns each response's token
 //! [`Usage`] (`prompt_tokens`/`completion_tokens`/`total_tokens`), when
@@ -48,9 +53,11 @@
 //! of the repo while its citations look complete is exactly the failure
 //! [`retrieval`] exists to avoid. That decision is a follow-up.
 
+pub mod decision_proposals;
 pub mod embedding_index;
 pub mod retrieval;
 
+pub use decision_proposals::{propose_decisions, ProposalReport};
 pub use embedding_index::{EmbeddingIndex, Unavailable};
 pub use retrieval::{retrieve, Retrieval, RetrievalMode};
 

@@ -144,3 +144,118 @@ fn mines_and_links_adrs_and_decision_commits() {
     assert!(commit_decision.title.contains("switch to sled"));
     assert_eq!(commit_decision.linked_files, vec![queue_path]);
 }
+
+/// The inferred source flowing through `mine()` end to end, alongside a
+/// real mined decision — the combination is what matters, since the
+/// whole point is that a reader can tell the two apart in one list.
+#[test]
+fn inferred_decisions_reach_mine_labelled_and_never_masquerade_as_mined() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/queue.rs"),
+        "// WHY: bounded so backpressure beats memory growth\npub struct TaskQueue;\nlet q = Bounded::new(128);\n",
+    )
+    .unwrap();
+
+    repowise_adr::InferredStore {
+        model: "fixture-model".to_string(),
+        decisions: vec![
+            repowise_adr::InferredDecision {
+                title: "Bounded task queue".to_string(),
+                rationale: "Backpressure is preferred to unbounded memory growth.".to_string(),
+                file: "src/queue.rs".to_string(),
+                anchor: "let q = Bounded::new(128);".to_string(),
+            },
+            // Anchored to code that isn't there. Must not survive.
+            repowise_adr::InferredDecision {
+                title: "Retries with jitter".to_string(),
+                rationale: "The code retries with exponential backoff.".to_string(),
+                file: "src/queue.rs".to_string(),
+                anchor: "retry_with_jitter(5)".to_string(),
+            },
+        ],
+    }
+    .save(&root)
+    .unwrap();
+
+    let index = RepoIndex {
+        root: root.clone(),
+        files: vec![FileRecord {
+            path: root.join("src/queue.rs"),
+            language: Language::Rust,
+            lines: 3,
+            // No symbols needed: an inferred decision links via its
+            // anchor and an inline marker via its enclosing file --
+            // neither goes through symbol matching.
+            symbols: vec![],
+            imports: vec![],
+            calls: vec![],
+            field_accesses: vec![],
+        }],
+        other_files: 0,
+        indexed_commit: None,
+    };
+
+    let (records, state) = repowise_adr::mine_reporting(&index).unwrap();
+
+    let inferred: Vec<_> = records.iter().filter(|d| d.source.is_inferred()).collect();
+    assert_eq!(
+        inferred.len(),
+        1,
+        "the unanchored proposal must not survive: {:?}",
+        inferred.iter().map(|d| &d.title).collect::<Vec<_>>()
+    );
+    assert_eq!(inferred[0].title, "Bounded task queue");
+    assert_eq!(inferred[0].linked_files, vec![root.join("src/queue.rs")]);
+
+    // The marker source in the same file is mined, and must stay
+    // unflagged -- an `inferred` flag that also fires on written
+    // artifacts would tell a reader nothing.
+    let marker: Vec<_> = records
+        .iter()
+        .filter(|d| matches!(d.source, DecisionSource::InlineMarker { .. }))
+        .collect();
+    assert_eq!(marker.len(), 1, "{records:?}");
+    assert!(!marker[0].source.is_inferred());
+
+    assert!(state.describe().contains("fixture-model"));
+    assert!(
+        state.describe().contains("no longer in the file"),
+        "the dropped proposal must be reported, not silently swallowed: {}",
+        state.describe()
+    );
+}
+
+/// `mine` and `mine_reporting` must not diverge — the only difference
+/// is that one discards the state.
+#[test]
+fn mine_returns_exactly_what_mine_reporting_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::write(root.join("a.rs"), "// DECISION: use one runtime\n").unwrap();
+
+    let index = RepoIndex {
+        root: root.clone(),
+        files: vec![FileRecord {
+            path: root.join("a.rs"),
+            language: Language::Rust,
+            lines: 1,
+            symbols: vec![],
+            imports: vec![],
+            calls: vec![],
+            field_accesses: vec![],
+        }],
+        other_files: 0,
+        indexed_commit: None,
+    };
+
+    let plain = mine(&index).unwrap();
+    let (reported, _) = repowise_adr::mine_reporting(&index).unwrap();
+    assert_eq!(plain.len(), reported.len());
+    assert_eq!(
+        plain.iter().map(|d| &d.id).collect::<Vec<_>>(),
+        reported.iter().map(|d| &d.id).collect::<Vec<_>>()
+    );
+}

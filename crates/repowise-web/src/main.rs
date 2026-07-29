@@ -145,6 +145,8 @@ struct DecisionDetail {
     supersedes: Option<String>,
     body: String,
     linked_files: Vec<String>,
+    source: String,
+    inferred: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -361,6 +363,20 @@ struct Decision {
     status: Option<String>,
     superseded_by: Option<String>,
     linked_file_count: usize,
+    source: String,
+    /// True when a model inferred this from code rather than reading it
+    /// from something a person wrote. Rendered as a badge -- carrying it
+    /// in the payload without showing it would defeat the point.
+    inferred: bool,
+}
+
+/// `GET /api/decisions`. An object rather than a bare array so it can
+/// carry `inferred_source`: an empty list is ambiguous between "no
+/// inferred decisions here" and "the pass that infers them never ran".
+#[derive(Deserialize, Clone, Debug)]
+struct Decisions {
+    decisions: Vec<Decision>,
+    inferred_source: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -893,7 +909,22 @@ fn DecisionDetailSection(id: String, selected: RwSignal<Option<String>>) -> impl
                                     </a>
                                 </p>
                             })}
+                            // Second-loudest, and for the same reason as
+                            // the supersession banner: this is the page
+                            // where someone decides whether to act on a
+                            // decision, so "a model guessed this" cannot
+                            // be a detail they have to go looking for.
+                            {d.inferred.then(|| view! {
+                                <p class="error">
+                                    "INFERRED BY A MODEL from code, not read from an ADR, \
+                                     commit, or comment. It is anchored to code the model \
+                                     quoted -- a quote that no longer appears in the file \
+                                     drops the decision -- but it is a reading of the code, \
+                                     not recorded intent."
+                                </p>
+                            })}
                             {d.status.clone().map(|st| view! { <p>{format!("Status: {st}")}</p> })}
+                            <p class="empty">{format!("Source: {}", d.source)}</p>
                             <h3>{format!("Linked files ({})", d.linked_files.len())}</h3>
                             {if d.linked_files.is_empty() {
                                 view! { <p class="empty">"No linked files."</p> }.into_any()
@@ -1406,7 +1437,7 @@ fn HotspotsSection(selected: RwSignal<Option<String>>) -> impl IntoView {
 
 #[component]
 fn DecisionsSection() -> impl IntoView {
-    let decisions = LocalResource::new(|| fetch_json::<Vec<Decision>>("/api/decisions"));
+    let decisions = LocalResource::new(|| fetch_json::<Decisions>("/api/decisions"));
 
     view! {
         <h2>"Architectural decisions"</h2>
@@ -1415,28 +1446,44 @@ fn DecisionsSection() -> impl IntoView {
                 decisions
                     .get()
                     .map(|result| match result.take() {
-                        Ok(ds) if ds.is_empty() => view! {
+                        Ok(ds) if ds.decisions.is_empty() => view! {
                             <p class="empty">
                                 "No decisions found (docs/adr/*.md or decision-like commits)."
                             </p>
+                            <p class="empty">{ds.inferred_source}</p>
                         }
                         .into_any(),
                         Ok(ds) => view! {
+                            <p class="empty">{ds.inferred_source.clone()}</p>
                             <table>
                                 <thead>
                                     <tr>
                                         <th>"ID"</th>
                                         <th>"Title"</th>
                                         <th>"Status"</th>
+                                        <th>"Source"</th>
                                         <th>"Linked files"</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {ds.into_iter().map(|d| {
+                                    {ds.decisions.into_iter().map(|d| {
+                                        // Only ADR files carry a `Status:`
+                                        // line. The absent case used to
+                                        // render as "commit", from when
+                                        // commits were the only other
+                                        // source -- which now mislabels
+                                        // comments, changelog entries and
+                                        // LLM inferences. The Source column
+                                        // says where it came from.
                                         let status = match d.superseded_by {
                                             Some(target) => format!("superseded by {target}"),
-                                            None => d.status.unwrap_or_else(|| "commit".to_string()),
+                                            None => d.status.unwrap_or_default(),
                                         };
+                                        // The badge is the whole point of
+                                        // carrying `inferred` to the client.
+                                        let badge = d.inferred.then(|| view! {
+                                            <span class="badge">"inferred"</span>" "
+                                        });
                                         view! {
                                             <tr>
                                                 <td>
@@ -1444,8 +1491,9 @@ fn DecisionsSection() -> impl IntoView {
                                                         Route::Decisions, &d.id,
                                                     )>{d.id.clone()}</a>
                                                 </td>
-                                                <td>{d.title}</td>
+                                                <td>{badge}{d.title}</td>
                                                 <td>{status}</td>
+                                                <td>{d.source}</td>
                                                 <td>{d.linked_file_count}</td>
                                             </tr>
                                         }
@@ -1563,9 +1611,7 @@ fn FileDetail(path: String, has_wiki: bool, selected: RwSignal<Option<String>>) 
         let path = path.clone();
         move || {
             let path = path.clone();
-            async move {
-                fetch_json_with_query::<Vec<Decision>>("/api/decisions", &[("file", &path)]).await
-            }
+            async move { fetch_json_with_query::<Decisions>("/api/decisions", &[("file", &path)]).await }
         }
     });
     let title = path.clone();
@@ -1629,14 +1675,22 @@ fn FileDetail(path: String, has_wiki: bool, selected: RwSignal<Option<String>>) 
                     decisions
                         .get()
                         .map(|result| match result.take() {
-                            Ok(ds) if ds.is_empty() => {
-                                view! { <p class="empty">"No decisions linked to this file."</p> }
+                            Ok(ds) if ds.decisions.is_empty() => {
+                                view! {
+                                    <p class="empty">"No decisions linked to this file."</p>
+                                    <p class="empty">{ds.inferred_source}</p>
+                                }
                                     .into_any()
                             }
                             Ok(ds) => view! {
                                 <ul>
-                                    {ds.into_iter().map(|d| view! {
-                                        <li><strong>{d.id}</strong>": "{d.title}</li>
+                                    {ds.decisions.into_iter().map(|d| {
+                                        let badge = d.inferred.then(|| view! {
+                                            <span class="badge">"inferred"</span>" "
+                                        });
+                                        view! {
+                                            <li>{badge}<strong>{d.id}</strong>": "{d.title}</li>
+                                        }
                                     }).collect::<Vec<_>>()}
                                 </ul>
                             }

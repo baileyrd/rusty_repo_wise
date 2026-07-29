@@ -2423,7 +2423,7 @@ fn cmd_docs(path: &Path) -> anyhow::Result<()> {
 fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let index = RepoIndex::load(&root)?;
-    let mut decisions = repowise_adr::mine(&index)?;
+    let (mut decisions, inferred_state) = repowise_adr::mine_reporting(&index)?;
 
     if let Some(f) = for_file {
         let target = if f.is_absolute() {
@@ -2440,9 +2440,14 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
         index.root.display(),
         decisions.len()
     );
+    // Printed whether or not anything was found: "no inferred decisions"
+    // and "the pass that infers them never ran" are different facts, and
+    // an empty list looks the same either way.
+    println!("  {}", inferred_state.describe());
     if decisions.is_empty() {
         println!(
-            "  No decisions found (docs/adr/*.md, decision-like commit messages, and merged PR bodies)."
+            "  No decisions found (docs/adr/*.md, decision-like commit messages, merged PR \
+             bodies, code comments, inline markers, and CHANGELOG sections)."
         );
         return Ok(());
     }
@@ -2470,9 +2475,19 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             repowise_adr::DecisionSource::Changelog { file, section } => {
                 format!("{section} (changelog: {})", display_path(file, &index.root))
             }
+            repowise_adr::DecisionSource::Inferred { file, line, model } => {
+                format!(
+                    "LLM-INFERRED from {}:{line} by model {model} -- not a written decision",
+                    display_path(file, &index.root)
+                )
+            }
         };
         let status = d.status.as_deref().unwrap_or("-");
-        println!("  {:<10} {:<10} {}", d.id, status, d.title);
+        // The marker goes in the id column, where it can't be scrolled
+        // past: a reader scanning titles must not have to reach the
+        // source line to learn this one was guessed.
+        let marker = if d.source.is_inferred() { "~" } else { " " };
+        println!("{marker} {:<10} {:<10} {}", d.id, status, d.title);
         println!("    source: {source_label}");
         if let Some(target) = &d.superseded_by {
             println!("    superseded by: {target}");
@@ -3188,6 +3203,48 @@ fn cmd_generate(path: &Path) -> anyhow::Result<()> {
     if failed > 0 {
         println!("  {failed} file(s) failed (LLM call or write error)");
     }
+
+    // Second ask in the same pass, not a second pipeline: the files are
+    // already being read and the model is already being called.
+    let (proposals, _) = repowise_llm::propose_decisions(&index, &config)?;
+    println!(
+        "Inferred {} architectural decision(s) from {} file(s) -> `repowise decisions`",
+        proposals.kept, proposals.files_considered
+    );
+    // Every drop is reported. A pass that discards most of what the
+    // model returned is a fact about that model worth seeing, and
+    // reporting only the survivors would present a filtered number as
+    // if it were the whole story.
+    if proposals.dropped_unanchored > 0 {
+        println!(
+            "  {} dropped: the code they quoted isn't in the file (proposals must quote \
+             verbatim, and the quote is checked)",
+            proposals.dropped_unanchored
+        );
+    }
+    if proposals.dropped_incomplete > 0 {
+        println!(
+            "  {} dropped: missing a title or rationale, or duplicated another proposal's \
+             anchor",
+            proposals.dropped_incomplete
+        );
+    }
+    if proposals.unparseable_files > 0 {
+        println!(
+            "  {} file(s) contributed nothing: the model's reply wasn't the requested JSON",
+            proposals.unparseable_files
+        );
+    }
+    if proposals.failed_files > 0 {
+        println!(
+            "  {} file(s) contributed nothing: the LLM call failed",
+            proposals.failed_files
+        );
+    }
+    println!(
+        "  These are a model's reading of the code, not anything a person wrote down. \
+         Every surface that shows them labels them as inferred."
+    );
     Ok(())
 }
 

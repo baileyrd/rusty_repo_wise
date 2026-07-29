@@ -671,8 +671,18 @@ struct GetSymbolOutput {
 struct DecisionOutput {
     id: String,
     title: String,
-    /// `"adr:<file>"` or `"commit:<short hash> by <author>"`.
+    /// `"adr:<file>"`, `"commit:<short hash> by <author>"`,
+    /// `"inferred:<file>:<line> by <model>"`, etc.
     source: String,
+    /// True when a **model inferred** this decision from code rather
+    /// than reading it from something a person wrote.
+    ///
+    /// A separate boolean and not just a `source` prefix, because
+    /// filtering on a string prefix is the kind of thing a caller
+    /// forgets to do. Omitted when false, so its presence is the
+    /// signal — every decision without it came from a written artifact.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    inferred: bool,
     /// Raw `Status:` line value (ADR source only).
     status: Option<String>,
     /// Normalized `ADR-XXXX` this decision is superseded by, if any.
@@ -685,7 +695,26 @@ struct DecisionOutput {
 #[derive(Serialize, schemars::JsonSchema)]
 struct WhyOutput {
     decisions: Vec<DecisionOutput>,
+    /// What the LLM-inferred decision source contributed, and why, if it
+    /// contributed nothing.
+    ///
+    /// Always present. An absent contribution is ambiguous between "this
+    /// repo has no inferred decisions" and "the pass that infers them
+    /// was never run", and only one of those is a fact about the
+    /// codebase.
+    inferred_source: String,
+    /// Set when any returned decision is model-inferred, telling the
+    /// reader what that means for how to weigh it. Absent when every
+    /// decision came from a written artifact, so it stays worth reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inferred_caveat: Option<String>,
 }
+
+/// Attached to any `get_why` response containing inferred decisions.
+const INFERRED_CAVEAT: &str = "Some decisions here were inferred by a model from code, not read \
+from an ADR, commit message, or comment. They are marked `inferred: true` and anchored to code \
+the model quoted (a quote that no longer appears in the file drops the decision). Treat them as \
+a reading of the code, not as recorded intent.";
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct DeadCodeCandidateOutput {
@@ -1425,7 +1454,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_why",
-        description = "Architectural decisions mined from docs/adr/*.md and decision-like commit messages (via repowise-adr), same data as `repowise decisions --for-file`. Given `targets` (file paths or symbol ids), returns only decisions whose body links to at least one target's file. Given no targets (or an empty list), returns every mined decision."
+        description = "Architectural decisions mined from docs/adr/*.md, decision-like commit messages, merged PR bodies, code comments, inline WHY:/DECISION: markers, and CHANGELOG sections (via repowise-adr), same data as `repowise decisions --for-file`. Given `targets` (file paths or symbol ids), returns only decisions whose body links to at least one target's file. Given no targets (or an empty list), returns every mined decision. One source is NOT a written artifact: decisions marked `inferred: true` were inferred by a model from code during `repowise generate`, anchored to a verbatim quote that is re-checked against the file on every read. `inferred_source` always reports what that source contributed, so an absent contribution can't be mistaken for a repo with nothing to infer."
     )]
     fn get_why(
         &self,
@@ -1433,9 +1462,10 @@ impl RepowiseServer {
     ) -> Result<Json<Envelope<WhyOutput>>, ErrorData> {
         let started = Instant::now();
         let (index, _graph, cached) = self.load()?;
-        let mut decisions = repowise_adr::mine(&index).map_err(|e| {
-            ErrorData::internal_error(format!("failed to mine decisions: {e}"), None)
-        })?;
+        let (mut decisions, inferred_state) =
+            repowise_adr::mine_reporting(&index).map_err(|e| {
+                ErrorData::internal_error(format!("failed to mine decisions: {e}"), None)
+            })?;
 
         if !targets.is_empty() {
             let target_files: Vec<PathBuf> = targets
@@ -1444,6 +1474,12 @@ impl RepowiseServer {
                 .collect();
             decisions.retain(|d| d.linked_files.iter().any(|f| target_files.contains(f)));
         }
+
+        // Computed after the target filter, so the caveat describes what
+        // was actually returned rather than what the repo happens to
+        // hold. A response with no inferred decisions in it shouldn't
+        // carry a warning about them.
+        let any_inferred = decisions.iter().any(|d| d.source.is_inferred());
 
         let decisions = decisions
             .into_iter()
@@ -1467,11 +1503,19 @@ impl RepowiseServer {
                     repowise_adr::DecisionSource::Changelog { file, section } => {
                         format!("changelog:{section}:{}", display_rel(file, &index.root))
                     }
+                    repowise_adr::DecisionSource::Inferred { file, line, model } => {
+                        format!(
+                            "inferred:{}:{line} by {model}",
+                            display_rel(file, &index.root)
+                        )
+                    }
                 };
+                let inferred = d.source.is_inferred();
                 DecisionOutput {
                     id: d.id,
                     title: d.title,
                     source,
+                    inferred,
                     status: d.status,
                     superseded_by: d.superseded_by,
                     date: d.date,
@@ -1484,7 +1528,16 @@ impl RepowiseServer {
             })
             .collect();
 
-        Ok(self.indexed(WhyOutput { decisions }, &index, started, cached))
+        Ok(self.indexed(
+            WhyOutput {
+                decisions,
+                inferred_source: inferred_state.describe(),
+                inferred_caveat: any_inferred.then(|| INFERRED_CAVEAT.to_string()),
+            },
+            &index,
+            started,
+            cached,
+        ))
     }
 
     #[tool(
@@ -2677,6 +2730,121 @@ mod tests {
             .unwrap();
 
         assert_eq!(why.decisions.len(), 0);
+    }
+
+    /// Without the inferred pass having run, `get_why` must say so.
+    /// An absent contribution is otherwise indistinguishable from a repo
+    /// with nothing to infer.
+    #[test]
+    fn get_why_reports_the_inferred_source_state_even_when_it_contributed_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_two_decision_fixture(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data: why, .. }) = server
+            .get_why(Parameters(WhyParams { targets: vec![] }))
+            .unwrap();
+
+        assert!(
+            why.inferred_source.contains("opt-in"),
+            "{}",
+            why.inferred_source
+        );
+        // No inferred decisions were returned, so the caveat about them
+        // must not fire -- a warning that's always present stops being
+        // read as a warning.
+        assert!(why.inferred_caveat.is_none());
+        assert!(why.decisions.iter().all(|d| !d.inferred));
+    }
+
+    /// The whole point of the source: an inferred decision must arrive
+    /// flagged, caveated, and distinguishable from the mined ones beside
+    /// it in the same list.
+    #[test]
+    fn get_why_flags_inferred_decisions_and_caveats_the_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_two_decision_fixture(&root);
+        std::fs::write(root.join("anchored.rs"), "let q = Bounded::new(128);\n").unwrap();
+        repowise_adr::InferredStore {
+            model: "fixture-model".to_string(),
+            decisions: vec![repowise_adr::InferredDecision {
+                title: "Bounded queue".to_string(),
+                rationale: "Backpressure over unbounded growth.".to_string(),
+                file: "anchored.rs".to_string(),
+                anchor: "let q = Bounded::new(128);".to_string(),
+            }],
+        }
+        .save(&root)
+        .unwrap();
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data: why, .. }) = server
+            .get_why(Parameters(WhyParams { targets: vec![] }))
+            .unwrap();
+
+        let inferred: Vec<_> = why.decisions.iter().filter(|d| d.inferred).collect();
+        assert_eq!(
+            inferred.len(),
+            1,
+            "{:?}",
+            why.decisions.iter().map(|d| &d.source).collect::<Vec<_>>()
+        );
+        assert_eq!(inferred[0].title, "Bounded queue");
+        assert!(
+            inferred[0].source.starts_with("inferred:"),
+            "the source string must say so too, not only the flag: {}",
+            inferred[0].source
+        );
+        assert!(
+            inferred[0].source.contains("fixture-model"),
+            "a reader judging an inferred claim is entitled to know what inferred it: {}",
+            inferred[0].source
+        );
+
+        // The mined decisions in the same response stay unflagged.
+        assert!(why.decisions.iter().filter(|d| !d.inferred).count() >= 2);
+
+        let caveat = why
+            .inferred_caveat
+            .expect("a response containing inferred decisions must carry the caveat");
+        assert!(caveat.contains("not") && caveat.contains("recorded intent"));
+    }
+
+    /// Filtering to a file with no inferred decisions must drop the
+    /// caveat with them: it describes what was returned, not what the
+    /// repo happens to hold.
+    #[test]
+    fn get_why_drops_the_caveat_when_the_filter_excludes_every_inferred_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_two_decision_fixture(&root);
+        std::fs::write(root.join("anchored.rs"), "let q = Bounded::new(128);\n").unwrap();
+        repowise_adr::InferredStore {
+            model: "fixture-model".to_string(),
+            decisions: vec![repowise_adr::InferredDecision {
+                title: "Bounded queue".to_string(),
+                rationale: "Backpressure over unbounded growth.".to_string(),
+                file: "anchored.rs".to_string(),
+                anchor: "let q = Bounded::new(128);".to_string(),
+            }],
+        }
+        .save(&root)
+        .unwrap();
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data: why, .. }) = server
+            .get_why(Parameters(WhyParams {
+                targets: vec!["src/queue.rs".to_string()],
+            }))
+            .unwrap();
+
+        assert!(why.decisions.iter().all(|d| !d.inferred));
+        assert!(why.inferred_caveat.is_none());
+        // The state line still reports the source, because "you never
+        // ran the pass" stays worth knowing even under a filter.
+        assert!(why.inferred_source.contains("fixture-model"));
     }
 
     #[test]

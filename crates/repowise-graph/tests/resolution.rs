@@ -609,3 +609,98 @@ fn resolves_shell_source_via_script_dir_idiom_and_plain_relative_path() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].file, helper_sh);
 }
+
+#[test]
+fn file_import_cycles_finds_a_two_file_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("pkg")).unwrap();
+    fs::write(root.join("pkg/__init__.py"), "").unwrap();
+    fs::write(
+        root.join("pkg/a.py"),
+        "from pkg.b import b_helper\n\ndef a_helper():\n    return b_helper()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("pkg/b.py"),
+        "from pkg.a import a_helper\n\ndef b_helper():\n    return 1\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+    let a_py = find_file(&index, "a.py").path.clone();
+    let b_py = find_file(&index, "b.py").path.clone();
+
+    let cycles = graph.file_import_cycles();
+    assert_eq!(cycles.len(), 1, "{cycles:?}");
+    let mut cycle = cycles[0].clone();
+    cycle.sort();
+    let mut expected = vec![a_py, b_py];
+    expected.sort();
+    assert_eq!(cycle, expected);
+}
+
+/// A plain three-file chain (a -> b -> c, no cycle) must report nothing
+/// -- a caller who only ever exercised the two-file cycle test could
+/// otherwise miss an implementation that reports every dependency edge
+/// as a "cycle" of size 1.
+#[test]
+fn file_import_cycles_reports_none_for_an_acyclic_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("pkg")).unwrap();
+    fs::write(root.join("pkg/__init__.py"), "").unwrap();
+    fs::write(root.join("pkg/c.py"), "def c_helper():\n    return 1\n").unwrap();
+    fs::write(
+        root.join("pkg/b.py"),
+        "from pkg.c import c_helper\n\ndef b_helper():\n    return c_helper()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("pkg/a.py"),
+        "from pkg.b import b_helper\n\ndef a_helper():\n    return b_helper()\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    assert!(
+        graph.file_import_cycles().is_empty(),
+        "an acyclic chain must not be reported as a cycle: {:?}",
+        graph.file_import_cycles()
+    );
+}
+
+/// A three-file cycle (a -> b -> c -> a), to confirm the SCC isn't
+/// limited to pairs.
+#[test]
+fn file_import_cycles_finds_a_three_file_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("pkg")).unwrap();
+    fs::write(root.join("pkg/__init__.py"), "").unwrap();
+    fs::write(
+        root.join("pkg/a.py"),
+        "from pkg.b import b_helper\n\ndef a_helper():\n    return b_helper()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("pkg/b.py"),
+        "from pkg.c import c_helper\n\ndef b_helper():\n    return c_helper()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("pkg/c.py"),
+        "from pkg.a import a_helper\n\ndef c_helper():\n    return 1\n",
+    )
+    .unwrap();
+
+    let index = index_dir(&root);
+    let graph = RepoGraph::build(&index);
+
+    let cycles = graph.file_import_cycles();
+    assert_eq!(cycles.len(), 1, "{cycles:?}");
+    assert_eq!(cycles[0].len(), 3, "{:?}", cycles[0]);
+}

@@ -1124,6 +1124,7 @@ dependencies = [
  "repowise-llm",
  "repowise-mcp",
  "repowise-parser",
+ "repowise-refactor",
  "repowise-server",
  "repowise-workspace",
  "serde_json",
@@ -1238,6 +1239,7 @@ dependencies = [
  "repowise-health",
  "repowise-llm",
  "repowise-parser",
+ "repowise-refactor",
  "repowise-workspace",
  "rmcp",
  "schemars",
@@ -1272,6 +1274,17 @@ dependencies = [
  "tree-sitter-scala",
  "tree-sitter-swift",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "repowise-refactor"
+version = "0.1.0"
+dependencies = [
+ "repowise-core",
+ "repowise-graph",
+ "repowise-health",
+ "repowise-parser",
+ "tempfile",
 ]
 
 [[package]]

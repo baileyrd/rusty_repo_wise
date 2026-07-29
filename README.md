@@ -334,7 +334,11 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
+repowise refactor [PATH]           # deterministic refactor candidates: import cycles, god
+                                    #   classes, low-cohesion classes, duplicate functions --
+                                    #   read-only, never generates a diff (see issue #304)
+                                    #   --kind <...>, --limit <N> (default 20, 0 for unlimited)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
@@ -1399,6 +1403,62 @@ dominate the `high` tier on a well-tested codebase. Treat the output as a
 list to review, not a list to delete. Excluding test functions would
 change `get_dead_code`'s results too, so it's deliberately not done here.
 
+## Refactoring candidates
+
+`repowise refactor [PATH]` (`crates/repowise-refactor`) lists
+deterministic refactor candidates: four kinds of structural problem,
+synthesized from signals `repowise-graph`/`repowise-health` already
+compute rather than any new detection —
+
+- **`break-import-cycle`** — files whose (best-effort resolved) imports
+  form a cycle, A imports B imports ... imports A, including a file that
+  imports itself. New for this feature: nothing computed single-repo
+  import cycles before (only `repowise-workspace`'s cross-repo cycle
+  detection existed) — see `RepoGraph::file_import_cycles`, the same
+  Kosaraju-SCC technique as its cross-repo counterpart, applied to this
+  repo's own file-level `Imports` edges.
+- **`split-god-class`** — a class/struct with more methods than
+  `repowise_health::GOD_CLASS_METHODS` (15), the same threshold
+  `repowise health`'s `god-class` marker uses.
+- **`split-by-cohesion`** — a class whose field-touching methods split
+  into 2+ disjoint groups (`repowise_health::find_low_cohesion`, LCOM4).
+- **`extract-duplicate`** — a pair of functions/methods with identical
+  bodies, or measured as substantially similar
+  (`repowise_health::find_near_duplicates`). Each pair is reported once,
+  not once per direction.
+
+**This is the deterministic half of issue #304's refactoring layer, and
+deliberately only the deterministic half.** The other half — generating
+a diff that implements a plan — turned out to be a genuinely open,
+needs-a-human question (should this port ever write to source at all,
+under what supervision) rather than a sizing question, so it was split
+into its own issue instead of resolved by default here.
+**`repowise refactor` never generates a diff or writes to a file.** It
+names a problem and where it is; every field on every candidate traces
+back to a specific measured number (a method count, a component count,
+an overlap ratio), never a judgment call, since nothing in
+`repowise-refactor` is LLM-generated. Deciding *how* to actually
+re-arrange the code is left to whoever reads the report.
+
+- `--kind <break-import-cycle|split-god-class|split-by-cohesion|extract-duplicate>`
+  restricts to one category.
+- `--limit <N>` (default 20, `0` for unlimited) caps the listing.
+  **This cap matters more here than for `dead-code`'s**: running this
+  against this port's own workspace produced over 6,000 candidates,
+  almost entirely `extract-duplicate` pairs among structurally-similar
+  test fixtures spread across ~20 crates. `repowise_health`'s own
+  `near-duplicate-code` marker is already this noisy on this codebase
+  (12,000+ findings) — it's just never been surfaced as a flat list
+  before, since every existing consumer folds it into a per-file score.
+  Candidates are ranked strongest-first (exact duplicates, then
+  near-duplicates by descending overlap) specifically so a cap keeps the
+  signal rather than an arbitrary file-order slice.
+
+**Not instant.** `--limit` only truncates what's printed — the full
+analysis runs first, and near-duplicate detection alone measured
+~6 seconds on this port's own workspace (the same cost `repowise health`
+already pays for its `near-duplicate-code` marker).
+
 ## Git analytics
 
 `repowise hotspots`/`ownership`/`coupled` shell out to `git log`/`git
@@ -1737,7 +1797,7 @@ judging an inferred claim is entitled to know what inferred it.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Thirteen tools are implemented, and
+a prior `repowise init`/`update`. Fourteen tools are implemented, and
 **every response carries a `_meta` block** (see "Response metadata"
 below):
 
@@ -1928,6 +1988,30 @@ below):
   original's dead-code model (4 finding kinds, 3 confidence tiers, and a
   runtime-load risk factor this port has no way to assess) — see
   `repowise_health::find_dead_code` for the exact tiering logic.
+- **`get_refactor_candidates(kind?, limit?)`** — file-level import cycles,
+  god classes, low-cohesion classes, and duplicate/near-duplicate
+  functions, synthesized from signals `repowise-graph`/`repowise-health`
+  already compute into named, located refactor candidates. See
+  "Refactoring candidates" below for the deterministic-only,
+  no-diff-generation scope this deliberately stays inside.
+  - `kind` restricts to one category: `break-import-cycle`,
+    `split-god-class`, `split-by-cohesion`, or `extract-duplicate`.
+  - `limit` (default 20, max 100) caps the list; `total_matching` reports
+    the true count before truncation. **This cap matters more here than
+    for `get_dead_code`** — running this against this port's own
+    workspace produced over 6,000 candidates, almost all
+    `extract-duplicate` pairs among structurally-similar test fixtures
+    across ~20 crates. Candidates come back ranked strongest-first
+    (exact duplicates before near-duplicates, near-duplicates by
+    descending overlap), so a cap keeps the signal rather than an
+    arbitrary slice.
+  - Fully deterministic, same as every source it draws from — no LLM
+    involved, nothing to anchor-check.
+  - **Not a cheap lookup.** Near-duplicate detection is the same cost as
+    `repowise health`'s equivalent marker (`find_near_duplicates`), and
+    `limit` only truncates the *response* — the full computation still
+    runs first. Measured at ~6-7 seconds on this port's own ~20-crate
+    workspace, comparable to `repowise health` on the same repo.
 
 A call re-reads `.repowise/index.json` and rebuilds the dependency graph
 only when the index file's mtime has changed; otherwise it reuses the

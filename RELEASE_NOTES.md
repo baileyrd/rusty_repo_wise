@@ -6,6 +6,37 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #293 — CLI: `expand`
+**2026-07-29** · closes [#280](https://github.com/baileyrd/rusty_repo_wise/issues/280)
+
+- **Added `repowise expand <ref> [-q PATTERN]`** — the reversal that makes
+  `distill` defensible. Without it the omission markers are a promise the tool
+  can't keep, and every dropped line is simply gone.
+- **Accepts both a bare ref and a pasted whole marker**, because someone will
+  copy the entire `[repowise#...]` string out of their scrollback rather than
+  carefully selecting the 12 characters inside it.
+- **`-q` greps inside the omission.** The reason output was distilled is that it
+  was large, so dumping all of it back to a terminal is often not the useful
+  operation.
+- **A missing ref says which kind of missing it is.** Malformed ("expected 12
+  hex digits") and well-formed-but-absent are different problems: the store has
+  a 7-day TTL and a size cap, so a correct ref genuinely can stop existing.
+  Reporting that as a plain "not found" would send someone hunting for a typo
+  they never made. The error names both stores it searched.
+- **A `-q` with no matches is distinguished from an empty ref**, so nobody
+  concludes the stored output was blank.
+- Searches the repo store then the user-level fallback, matching where `distill`
+  writes — an `expand` that checked only one would fail to find refs its own
+  `distill` had just written.
+- 4 new integration tests over reversibility, including that kept + restored
+  reconstructs the original exactly, and that awkward content (tabs, trailing
+  spaces, quotes, backslashes, unicode) survives storage verbatim — a round trip
+  that normalizes whitespace isn't a round trip.
+- Verified live end to end: 61 raw lines → 2 printed + a marker → `expand`
+  returns 60 → recombined output is **identical** to the original.
+
+---
+
 ## PR #292 — CLI: `distill` (reversible output compaction)
 **2026-07-29** · closes [#279](https://github.com/baileyrd/rusty_repo_wise/issues/279)
 

@@ -53,6 +53,23 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Report recurring command fumbles: the same program run twice,
+    /// the first failing and a later variant succeeding. Reads the
+    /// distill ledger, where exit codes are known exactly rather than
+    /// inferred. Report-only unless `--write` is given.
+    Corrections {
+        /// How many times a fumble must recur before it's reported.
+        #[arg(long, default_value_t = 2)]
+        min_count: usize,
+        /// Only consider records from the last N days.
+        #[arg(long)]
+        since_days: Option<u64>,
+        /// Maintain the managed block in `.claude/CLAUDE.md`.
+        #[arg(long)]
+        write: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Report tokens saved by `repowise distill`, from measured bytes
     /// in and out. Token counts are approximate (bytes/4, no
     /// model-specific tokenizer).
@@ -517,6 +534,12 @@ fn main() -> anyhow::Result<()> {
         Command::Overview { path } => cmd_overview(&path),
         Command::Distill { command } => cmd_distill(&command),
         Command::Expand { reference, query } => cmd_expand(&reference, query.as_deref()),
+        Command::Corrections {
+            min_count,
+            since_days,
+            write,
+            path,
+        } => cmd_corrections(min_count, since_days, write, &path),
         Command::Saved {
             by,
             since_days,
@@ -708,6 +731,142 @@ fn distill_stores() -> anyhow::Result<Vec<repowise_distill::Store>> {
         }
     }
     Ok(stores)
+}
+
+/// Render the fumble report.
+///
+/// `observed` is the number of runs with a known exit status. It leads
+/// the report because a thin result is ambiguous without it: few
+/// findings could mean few fumbles, or it could mean almost nothing was
+/// watched. Those are different claims and the reader can't tell them
+/// apart from a count of findings alone.
+fn render_corrections(
+    fumbles: &[repowise_distill::corrections::Fumble],
+    observed: usize,
+    min_count: usize,
+) -> String {
+    if observed == 0 {
+        return "No command runs observed.\n\
+                This reads the `repowise distill` ledger, so it only sees commands run\n\
+                through `repowise distill` or the rewrite hook (`repowise hook rewrite\n\
+                install`). Nothing observed is not the same as no fumbles.\n"
+            .to_string();
+    }
+
+    let mut out = String::new();
+    if fumbles.is_empty() {
+        out.push_str(&format!(
+            "No recurring fumbles across {observed} observed run(s) \
+             (threshold: {min_count} occurrence(s)).\n"
+        ));
+        out.push_str(
+            "\nOnly commands run through distill are observed, and only exit codes it saw\n\
+             directly are counted -- nothing here is inferred from output text.\n",
+        );
+        return out;
+    }
+
+    out.push_str(&format!(
+        "Recurring command fumbles ({observed} observed run(s), threshold {min_count}):\n\n"
+    ));
+    out.push_str(&format!(
+        "  {:<20} {:>8}  {}\n",
+        "program", "times", "failing exit code(s)"
+    ));
+    for f in fumbles {
+        let codes: Vec<String> = f.exit_codes.iter().map(|c| c.to_string()).collect();
+        out.push_str(&format!(
+            "  {:<20} {:>8}  {}\n",
+            f.program,
+            f.count,
+            codes.join(", ")
+        ));
+    }
+    out.push_str(
+        "\nEach row is a run that exited nonzero followed shortly by a successful run of\n\
+         the same program -- a command that took more than one attempt to get right.\n\
+         A single repeated exit code suggests one recurring mistake; several different\n\
+         codes suggest the program is failing for varied reasons.\n",
+    );
+    out
+}
+
+/// The managed-block body written by `--write`.
+///
+/// Programs and counts only -- deliberately no argv. Commands carry
+/// secrets (tokens in URLs, credentials in flags), and this text lands
+/// in a file that gets committed. A command *shape* is the useful part
+/// anyway.
+fn corrections_block_body(fumbles: &[repowise_distill::corrections::Fumble]) -> String {
+    let mut out = String::from("### Known command corrections\n\n");
+    out.push_str(
+        "Commands that have repeatedly needed more than one attempt in this repo.\n\
+         Derived from exit codes observed by `repowise distill`; program names only,\n\
+         never full command lines.\n\n",
+    );
+    for f in fumbles {
+        out.push_str(&format!(
+            "- `{}` -- needed a second attempt {} time(s)\n",
+            f.program, f.count
+        ));
+    }
+    out
+}
+
+fn cmd_corrections(
+    min_count: usize,
+    since_days: Option<u64>,
+    write: bool,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let stores = distill_stores()?;
+    let mut records: Vec<repowise_distill::ledger::Record> = stores
+        .iter()
+        .flat_map(|s| repowise_distill::ledger::read(s.dir()))
+        .collect();
+    records.sort_by_key(|r| r.at);
+
+    if let Some(days) = since_days {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .saturating_sub(days * 86_400);
+        records.retain(|r| r.at >= cutoff);
+    }
+
+    let observed = repowise_distill::corrections::observed_runs(&records);
+    let fumbles = repowise_distill::corrections::detect(&records, min_count);
+    print!("{}", render_corrections(&fumbles, observed, min_count));
+
+    if !write {
+        return Ok(());
+    }
+    if fumbles.is_empty() {
+        println!("\nNothing to write.");
+        return Ok(());
+    }
+
+    // Reuses agent_md's marker discipline rather than growing a second
+    // one: a file a human edits must never lose hand-written content to
+    // a regeneration.
+    let root = path.canonicalize()?;
+    let target = root.join(agent_md::DEFAULT_OUTPUT);
+    let block = format!(
+        "{}\n\n{}\n{}",
+        agent_md::BEGIN_MARKER,
+        corrections_block_body(&fumbles),
+        agent_md::END_MARKER
+    );
+    let existing = std::fs::read_to_string(&target).ok();
+    let (content, action) =
+        agent_md::splice(existing.as_deref(), &block).map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&target, content)?;
+    println!("\n{} {}", action.label(), target.display());
+    Ok(())
 }
 
 /// Render the savings report.
@@ -965,12 +1124,25 @@ fn cmd_distill(command: &[String]) -> anyhow::Result<()> {
     // zero-saving row would dilute the report with non-events.
     let raw_bytes = stdout_raw.len() + stderr_raw.len();
     let kept_bytes = rendered_out.text.len() + rendered_err.text.len();
+    let exit_code = output.status.code().unwrap_or(1);
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program);
     if rendered_out.reference.is_some() || rendered_err.reference.is_some() {
-        let name = Path::new(program)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(program);
-        repowise_distill::ledger::record_distilled(store.dir(), name, raw_bytes, kept_bytes);
+        repowise_distill::ledger::record_distilled(
+            store.dir(),
+            name,
+            raw_bytes,
+            kept_bytes,
+            exit_code,
+        );
+    } else {
+        // Recorded even though it saved nothing: the *succeeding* half
+        // of a fumble pair is usually short output that passed straight
+        // through, and without it every fumble would look uncorrected.
+        // `Ran` keeps these out of the savings totals.
+        repowise_distill::ledger::record_ran(store.dir(), name, raw_bytes, exit_code);
     }
 
     if !rendered_out.text.is_empty() {
@@ -991,9 +1163,8 @@ fn cmd_distill(command: &[String]) -> anyhow::Result<()> {
     // returning Err: an anyhow error would print its own message and
     // use its own code, which would make this wrapper visible to the
     // script wrapping it.
-    let code = output.status.code().unwrap_or(1);
-    if code != 0 {
-        std::process::exit(code);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
     Ok(())
 }
@@ -3291,6 +3462,7 @@ mod tests {
             raw_bytes: raw,
             kept_bytes: kept,
             detail: detail.to_string(),
+            exit_code: Some(0),
         }
     }
 
@@ -3412,5 +3584,70 @@ mod tests {
             out.contains("deliberate and will never be"),
             "shell-syntax skips must not read as a coverage gap:\n{out}"
         );
+    }
+
+    fn fumble(
+        program: &str,
+        count: usize,
+        codes: Vec<i32>,
+    ) -> repowise_distill::corrections::Fumble {
+        repowise_distill::corrections::Fumble {
+            program: program.to_string(),
+            count,
+            exit_codes: codes,
+        }
+    }
+
+    /// Nothing observed and no fumbles are different claims, and the
+    /// reader can't tell them apart from a count of findings alone.
+    #[test]
+    fn corrections_with_nothing_observed_says_so() {
+        let out = render_corrections(&[], 0, 2);
+        assert!(out.contains("No command runs observed"), "{out}");
+        assert!(out.contains("not the same as no fumbles"), "{out}");
+    }
+
+    #[test]
+    fn corrections_with_observations_but_no_fumbles_reports_the_sample_size() {
+        let out = render_corrections(&[], 40, 2);
+        assert!(out.contains("40 observed run(s)"), "{out}");
+        assert!(
+            out.contains("nothing here is inferred"),
+            "the report must say the exit codes were observed, not guessed:\n{out}"
+        );
+    }
+
+    #[test]
+    fn corrections_reports_counts_and_distinct_exit_codes() {
+        let out = render_corrections(&[fumble("cargo", 3, vec![101])], 50, 2);
+        assert!(out.contains("cargo"), "{out}");
+        assert!(out.contains("101"), "{out}");
+        assert!(out.contains("50 observed run(s)"), "{out}");
+        assert!(
+            out.contains("several different"),
+            "the report should explain what varied codes mean:\n{out}"
+        );
+    }
+
+    /// Commands carry secrets, and this text gets committed.
+    #[test]
+    fn the_written_block_carries_program_names_never_argv() {
+        let body = corrections_block_body(&[fumble("cargo", 2, vec![101])]);
+        assert!(body.contains("`cargo`"), "{body}");
+        assert!(
+            body.contains("never full command lines"),
+            "the block must state its own limit:\n{body}"
+        );
+        // A flag is `--` immediately followed by a letter; the prose
+        // uses `--` as a separator, which is not argv.
+        assert!(
+            !body.contains("--t") && !body.contains("--w") && !body.contains(" -x"),
+            "no flags or argv fragments should appear: {body}"
+        );
+        // The strongest form of the check: nothing but the program name
+        // and counts, so a command that had a token in it can't leak.
+        let leaked = corrections_block_body(&[fumble("mytool", 1, vec![1])]);
+        assert!(leaked.contains("`mytool`"));
+        assert!(!leaked.contains("http"), "{leaked}");
     }
 }

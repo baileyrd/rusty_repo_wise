@@ -14,6 +14,7 @@
 //! the store, and the marker format that `expand`, the rewrite hook and
 //! the savings report all read.
 
+pub mod corrections;
 pub mod filter;
 pub mod ledger;
 pub mod rewrite;

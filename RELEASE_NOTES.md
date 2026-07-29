@@ -6,6 +6,46 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #296 — CLI: `corrections`
+**2026-07-29** · closes [#283](https://github.com/baileyrd/rusty_repo_wise/issues/283)
+
+- **Added `repowise corrections [--min-count N] [--since-days N] [--write]`** —
+  recurring command fumbles: the same program run twice, the first failing and a
+  later variant succeeding.
+- **The originally-specified source was measured and rejected.** #283 assumed
+  Claude Code's JSONL transcripts. Tested against a real 582-command transcript
+  *before writing code*: only **16 of 581** commands were detectable as failed by
+  any signal — a ~2.7% recall ceiling — because a nonzero exit simply isn't
+  recorded (`is_error` fires for permission rejections and MCP errors, not
+  command failures). Grouping by base command also degenerates, since nearly
+  every real command is a compound starting with `cd`; the pairing produced
+  matches like `grep …` "corrected by" `ls …`. Built that way, this would have
+  written confident-looking noise into `CLAUDE.md`.
+- **Reads the distill ledger instead**, where `distill` ran the command and knows
+  the exit code exactly. Nothing is inferred. The tradeoff is stated in the
+  output: only commands run after the rewrite hook is installed are observed, so
+  there's no retroactive history.
+- **The report leads with how much was observed.** A thin result is ambiguous
+  without it — few findings could mean few fumbles or almost nothing watched, and
+  a count of findings alone can't distinguish them.
+- **Unknown exit status is neither failure nor success.** Records written before
+  the ledger carried exit codes read as unknown and are excluded from both sides
+  of a pair, rather than being assumed to have succeeded.
+- **A short correction window (3 runs)** stops unrelated later invocations from
+  being read as corrections — precisely the failure that sank the transcript
+  approach.
+- **`--write` carries program names and counts, never argv.** Commands contain
+  secrets and this text gets committed. It reuses `agent_md.rs`'s marker
+  discipline rather than growing a second one, so hand-written prose survives.
+- The ledger gained an exit-status field plus a `Ran` record kind, so
+  pass-through commands count for fumble detection while staying out of the
+  savings totals — without them the *succeeding* half of a pair would be
+  invisible and every fumble would look uncorrected.
+- 13 new tests. Verified live: two real fumbles detected with their exact exit
+  codes (101 and 2), threshold gating, and `--write` preserving existing prose.
+
+---
+
 ## PR #295 — CLI: `saved`
 **2026-07-29** · closes [#282](https://github.com/baileyrd/rusty_repo_wise/issues/282)
 

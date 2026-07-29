@@ -35,11 +35,25 @@ pub fn generate(root: &Path) -> anyhow::Result<PathBuf> {
     let index = RepoIndex::load(root)?;
     let graph = RepoGraph::build(&index);
     let overview = graph.overview(&index);
-    let health = repowise_health::analyze(&index, &graph);
 
-    let hotspots = repowise_git::GitAnalytics::collect(root)
-        .ok()
-        .map(|analytics| repowise_git::hotspots(&index, &analytics));
+    // One `GitAnalytics::collect` walk feeds both hotspots and the
+    // organizational-signal health markers (#313), rather than walking
+    // `git log` twice.
+    let analytics = repowise_git::GitAnalytics::collect(root).ok();
+    let hotspots = analytics
+        .as_ref()
+        .map(|analytics| repowise_git::hotspots(&index, analytics));
+    let org_signals = analytics
+        .as_ref()
+        .and_then(|a| repowise_git::org_signals::collect_org_signals(root, &index, a).ok());
+    let health = repowise_health::analyze_with_context(
+        &index,
+        &graph,
+        &repowise_health::HealthWeights::default(),
+        &std::collections::HashSet::new(),
+        None,
+        org_signals.as_ref(),
+    );
 
     let decisions = repowise_adr::mine(&index).unwrap_or_default();
 

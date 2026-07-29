@@ -1728,12 +1728,12 @@ const HOT_PATH_REPO_FRACTION: usize = 4;
 /// shallow clone, git missing). Failing soft is deliberate:
 /// `hot_path_sync_io` is the only marker that needs this, and losing one
 /// marker is a much better outcome than refusing to score at all.
-fn hot_path_files(root: &Path, index: &RepoIndex) -> std::collections::HashSet<PathBuf> {
-    let Ok(analytics) = repowise_git::GitAnalytics::collect(root) else {
-        return std::collections::HashSet::new();
-    };
+fn hot_path_files(
+    index: &RepoIndex,
+    analytics: &repowise_git::GitAnalytics,
+) -> std::collections::HashSet<PathBuf> {
     let limit = HOT_PATH_MAX_FILES.min((index.files.len() / HOT_PATH_REPO_FRACTION).max(1));
-    repowise_git::hotspots(index, &analytics)
+    repowise_git::hotspots(index, analytics)
         .into_iter()
         .filter(|h| h.score > 0)
         .take(limit)
@@ -1753,16 +1753,34 @@ fn cmd_health(path: &Path, worst: usize, weights_path: Option<&Path>) -> anyhow:
         }
         None => repowise_health::HealthWeights::default(),
     };
-    let hot_files = hot_path_files(&root, &index);
+    // One `GitAnalytics::collect` walk feeds both hot-path detection and
+    // the organizational-signal markers below, rather than walking `git
+    // log` twice for two different consumers of the same history.
+    let analytics = repowise_git::GitAnalytics::collect(&root).ok();
+    let hot_files = analytics
+        .as_ref()
+        .map(|a| hot_path_files(&index, a))
+        .unwrap_or_default();
     // Coverage is optional: without it the two coverage markers simply
     // never fire, rather than every file scoring as untested.
     let coverage = repowise_core::coverage::CoverageData::load(&root).ok();
+    // Org signals need one `git blame` per indexed file on top of the
+    // history walk -- measured at several seconds on this port's own
+    // workspace (see `repowise_git::org_signals`'s own module doc), the
+    // same "not a cheap lookup, but this is the full-report command"
+    // tradeoff `repowise refactor` already made for near-duplicate
+    // detection (#304). Missing entirely (not a git repo, no history)
+    // degrades to skipping these six markers, same as `coverage`.
+    let org_signals = analytics
+        .as_ref()
+        .and_then(|a| repowise_git::org_signals::collect_org_signals(&root, &index, a).ok());
     let report = repowise_health::analyze_with_context(
         &index,
         &graph,
         &weights,
         &hot_files,
         coverage.as_ref(),
+        org_signals.as_ref(),
     );
 
     println!("Repowise code health for {}", index.root.display());

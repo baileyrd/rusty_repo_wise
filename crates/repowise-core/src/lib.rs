@@ -4,6 +4,7 @@
 //! structures produced by `repowise-parser` and consumed by `repowise-graph`.
 
 pub mod coverage;
+pub mod org_signals;
 mod walk;
 
 pub use walk::{discover_files, DiscoveredFile};

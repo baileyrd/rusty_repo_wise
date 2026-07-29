@@ -220,8 +220,21 @@ impl RepowiseServer {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 struct SearchParams {
-    /// Case-insensitive substring to match against symbol names.
+    /// Case-insensitive substring to match.
     query: String,
+    /// What to match against: `symbol` (default), `path`, or `hybrid`.
+    /// `semantic`/`concept` is deliberately rejected rather than
+    /// silently degraded -- see `repowise_graph::SearchMode`.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Restrict to files of one role: `implementation`, `test`,
+    /// `config`, `doc`, or `unknown`. Inferred from path conventions.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Restrict symbol hits to one kind (`function`, `method`,
+    /// `struct`, `enum`, `trait`, `class`, `module`, `mixin`).
+    #[serde(default)]
+    symbol_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
@@ -351,7 +364,7 @@ struct OverviewOutput {
     most_depended_on: Vec<DependedOnFile>,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SymbolMatch {
     /// Stable identifier for this symbol, usable with `get_symbol` to
     /// fetch its raw source text.
@@ -362,9 +375,16 @@ struct SymbolMatch {
     line: usize,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SearchOutput {
     matches: Vec<SymbolMatch>,
+    /// Files whose path matched. Populated in `path`/`hybrid` mode.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    file_matches: Vec<String>,
+    /// The filters actually applied. Echoed back so an empty result is
+    /// readable: "nothing matches" and "your filters excluded
+    /// everything" are otherwise indistinguishable.
+    filters: String,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -769,26 +789,96 @@ impl RepowiseServer {
     )]
     fn search_codebase(
         &self,
-        Parameters(SearchParams { query }): Parameters<SearchParams>,
+        Parameters(SearchParams {
+            query,
+            mode,
+            kind,
+            symbol_kind,
+        }): Parameters<SearchParams>,
     ) -> Result<Json<Envelope<SearchOutput>>, ErrorData> {
         let started = Instant::now();
         if query.trim().is_empty() {
             return Err(ErrorData::invalid_params("query must not be empty", None));
         }
+        let mode = repowise_graph::SearchMode::parse(mode.as_deref().unwrap_or("symbol"))
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let kind = kind
+            .as_deref()
+            .map(repowise_graph::FileKind::parse)
+            .transpose()
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let symbol_kind = symbol_kind
+            .as_deref()
+            .map(repowise_graph::parse_symbol_kind)
+            .transpose()
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
+
         let (index, graph, cached) = self.load()?;
-        let mut matches: Vec<SymbolMatch> = graph
-            .search(&query)
-            .into_iter()
-            .map(|sym| SymbolMatch {
-                id: sym.id.clone(),
-                name: sym.name.clone(),
-                kind: sym.kind.label().to_string(),
-                file: display_rel(&sym.file, &index.root),
-                line: sym.start_line,
-            })
-            .collect();
-        matches.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
-        Ok(self.indexed(SearchOutput { matches }, &index, started, cached))
+
+        let file_allowed = |file: &Path| -> bool {
+            let Some(want) = kind else { return true };
+            index
+                .files
+                .iter()
+                .find(|f| f.path == file)
+                .map(|f| repowise_graph::classify(f, &index.root) == want)
+                .unwrap_or(false)
+        };
+
+        let mut matches: Vec<SymbolMatch> = Vec::new();
+        if matches!(
+            mode,
+            repowise_graph::SearchMode::Symbol | repowise_graph::SearchMode::Hybrid
+        ) {
+            matches = graph
+                .search(&query)
+                .into_iter()
+                .filter(|s| symbol_kind.is_none_or(|k| s.kind == k))
+                .filter(|s| file_allowed(&s.file))
+                .map(|sym| SymbolMatch {
+                    id: sym.id.clone(),
+                    name: sym.name.clone(),
+                    kind: sym.kind.label().to_string(),
+                    file: display_rel(&sym.file, &index.root),
+                    line: sym.start_line,
+                })
+                .collect();
+            matches.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
+        }
+
+        let mut file_matches: Vec<String> = Vec::new();
+        if matches!(
+            mode,
+            repowise_graph::SearchMode::Path | repowise_graph::SearchMode::Hybrid
+        ) {
+            file_matches = index
+                .files
+                .iter()
+                .filter(|f| repowise_graph::path_matches(&f.path, &index.root, &query))
+                .filter(|f| kind.is_none_or(|k| repowise_graph::classify(f, &index.root) == k))
+                .map(|f| display_rel(&f.path, &index.root))
+                .collect();
+            file_matches.sort();
+        }
+
+        let mut filters = vec![format!("mode={}", mode.label())];
+        if let Some(k) = kind {
+            filters.push(format!("kind={}", k.label()));
+        }
+        if let Some(k) = symbol_kind {
+            filters.push(format!("symbol_kind={}", k.label()));
+        }
+
+        Ok(self.indexed(
+            SearchOutput {
+                matches,
+                file_matches,
+                filters: filters.join(", "),
+            },
+            &index,
+            started,
+            cached,
+        ))
     }
 
     #[tool(
@@ -1744,6 +1834,7 @@ mod tests {
         let Json(Envelope { data: result, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "helperfunc".to_string(),
+                ..Default::default()
             }))
             .unwrap();
         assert_eq!(result.matches.len(), 1);
@@ -1759,6 +1850,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.search_codebase(Parameters(SearchParams {
             query: "  ".to_string(),
+            ..Default::default()
         }));
         let Err(err) = result else {
             panic!("expected an error for a blank query");
@@ -2018,6 +2110,7 @@ mod tests {
         let Json(Envelope { data: search, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "target".to_string(),
+                ..Default::default()
             }))
             .unwrap();
         let symbol_id = search.matches[0].id.clone();
@@ -2051,6 +2144,7 @@ mod tests {
         let Json(Envelope { data: search, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "target".to_string(),
+                ..Default::default()
             }))
             .unwrap();
         let symbol_id = search.matches[0].id.clone();
@@ -2155,6 +2249,7 @@ mod tests {
         let Json(Envelope { data: search, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "OtherThing".to_string(),
+                ..Default::default()
             }))
             .unwrap();
         let symbol_id = search.matches[0].id.clone();
@@ -2463,5 +2558,139 @@ mod tests {
         assert_eq!(idx2.files.len(), 1);
         assert_eq!(idx1.files[0].path, idx2.files[0].path);
         assert!(cached2, "the second load should have hit the cache");
+    }
+
+    /// Path search was previously impossible to express -- only symbol
+    /// names were searchable, so "which file is the config loader in"
+    /// had no query that answered it.
+    #[test]
+    fn search_codebase_path_mode_matches_files_not_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/loader.rs"), "pub fn load() {}\n").unwrap();
+        std::fs::write(root.join("other.rs"), "pub fn config_thing() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "config".to_string(),
+                mode: Some("path".to_string()),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert!(
+            data.file_matches.iter().any(|f| f.contains("loader.rs")),
+            "{:?}",
+            data.file_matches
+        );
+        assert!(
+            data.matches.is_empty(),
+            "path mode must not return symbol hits: {:?}",
+            data.matches
+        );
+    }
+
+    #[test]
+    fn search_codebase_hybrid_mode_returns_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/loader.rs"), "pub fn load() {}\n").unwrap();
+        std::fs::write(root.join("other.rs"), "pub fn config_thing() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "config".to_string(),
+                mode: Some("hybrid".to_string()),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert!(!data.matches.is_empty(), "expected the symbol hit");
+        assert!(!data.file_matches.is_empty(), "expected the path hit");
+    }
+
+    #[test]
+    fn search_codebase_kind_filter_excludes_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("thing.rs"), "pub fn parse_it() {}\n").unwrap();
+        std::fs::write(root.join("tests/thing.rs"), "pub fn parse_it_test() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "parse_it".to_string(),
+                kind: Some("implementation".to_string()),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert_eq!(data.matches.len(), 1, "{:?}", data.matches);
+        assert!(
+            !data.matches[0].file.contains("tests/"),
+            "{:?}",
+            data.matches
+        );
+    }
+
+    /// A silent fallback would answer a different question than the one
+    /// asked, so the tool refuses instead.
+    #[test]
+    fn search_codebase_rejects_semantic_mode_with_the_real_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let err = server
+            .search_codebase(Parameters(SearchParams {
+                query: "how does auth work".to_string(),
+                mode: Some("semantic".to_string()),
+                ..Default::default()
+            }))
+            .err()
+            .expect("semantic mode must be rejected");
+        assert!(
+            err.message.contains("embeddings"),
+            "must name the real limitation, not report a typo: {}",
+            err.message
+        );
+    }
+
+    /// An empty result with filters active is ambiguous unless the
+    /// response says what was filtered.
+    #[test]
+    fn search_codebase_echoes_the_filters_it_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "zzz-no-such-thing".to_string(),
+                kind: Some("test".to_string()),
+                symbol_kind: Some("function".to_string()),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert!(data.matches.is_empty());
+        assert!(data.filters.contains("kind=test"), "{}", data.filters);
+        assert!(
+            data.filters.contains("symbol_kind=function"),
+            "{}",
+            data.filters
+        );
     }
 }

@@ -4,7 +4,7 @@ mod hook;
 mod impacted;
 
 use clap::{Parser, Subcommand};
-use repowise_core::RepoIndex;
+use repowise_core::{RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
 use repowise_health::{DeadCodeCandidate, DeadCodeConfidence};
 use std::path::{Path, PathBuf};
@@ -41,11 +41,29 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Search indexed symbols by name (case-insensitive substring match).
+    /// Search the index by symbol name (default), file path, or both.
+    /// Case-insensitive substring match. `--mode semantic` is
+    /// deliberately not offered -- it needs embeddings this port
+    /// doesn't have (issue #61), and a silent fallback to substring
+    /// matching would answer a different question than the one asked.
     Search {
         query: String,
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// What to match against: `symbol` (default), `path`, or `hybrid`.
+        #[arg(long, default_value = "symbol")]
+        mode: String,
+        /// Restrict to files of one role: implementation, test, config,
+        /// doc, or unknown. Inferred from path conventions.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Restrict symbol hits to one kind (function, method, struct,
+        /// enum, trait, class, module, mixin). Ignored in path mode.
+        #[arg(long)]
+        symbol_kind: Option<String>,
+        /// Max results. 0 means no limit.
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
     },
     /// Show a file's resolved import dependencies and dependents.
     Deps {
@@ -408,7 +426,21 @@ fn main() -> anyhow::Result<()> {
         Command::Init { path } => cmd_init(&path),
         Command::Update { path } => cmd_update(&path),
         Command::Overview { path } => cmd_overview(&path),
-        Command::Search { query, path } => cmd_search(&query, &path),
+        Command::Search {
+            query,
+            path,
+            mode,
+            kind,
+            symbol_kind,
+            limit,
+        } => cmd_search(
+            &query,
+            &path,
+            &mode,
+            kind.as_deref(),
+            symbol_kind.as_deref(),
+            limit,
+        ),
         Command::Deps { file, path } => cmd_deps(&file, &path),
         Command::Health {
             path,
@@ -553,18 +585,106 @@ fn cmd_overview(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_search(query: &str, path: &Path) -> anyhow::Result<()> {
+/// Describe the filters that were applied, for the no-results message.
+///
+/// An empty result is ambiguous: "nothing in this repo matches" and
+/// "your filters excluded everything" look identical, and the second is
+/// the far more likely explanation once flags are in play. Echoing the
+/// active filters back is what lets someone tell which they're looking
+/// at without re-running the command to find out.
+fn active_filters(
+    mode: repowise_graph::SearchMode,
+    kind: Option<repowise_graph::FileKind>,
+    symbol_kind: Option<SymbolKind>,
+) -> String {
+    let mut parts = vec![format!("mode={}", mode.label())];
+    if let Some(k) = kind {
+        parts.push(format!("kind={}", k.label()));
+    }
+    if let Some(k) = symbol_kind {
+        parts.push(format!("symbol_kind={}", k.label()));
+    }
+    parts.join(", ")
+}
+
+fn cmd_search(
+    query: &str,
+    path: &Path,
+    mode: &str,
+    kind: Option<&str>,
+    symbol_kind: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let mode = repowise_graph::SearchMode::parse(mode).map_err(|e| anyhow::anyhow!(e))?;
+    let kind = kind
+        .map(repowise_graph::FileKind::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let symbol_kind = symbol_kind
+        .map(repowise_graph::parse_symbol_kind)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!(e))?;
+
     let root = path.canonicalize()?;
     let index = RepoIndex::load(&root)?;
     let graph = RepoGraph::build(&index);
-    let mut matches = graph.search(query);
-    matches.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
 
-    if matches.is_empty() {
-        println!("No symbols matching {query:?}");
+    // A file passes the `--kind` filter, or there is no filter.
+    let file_allowed = |file: &Path| -> bool {
+        let Some(want) = kind else { return true };
+        index
+            .files
+            .iter()
+            .find(|f| f.path == file)
+            .map(|f| repowise_graph::classify(f, &index.root) == want)
+            .unwrap_or(false)
+    };
+
+    let mut symbol_hits: Vec<&Symbol> = Vec::new();
+    if matches!(
+        mode,
+        repowise_graph::SearchMode::Symbol | repowise_graph::SearchMode::Hybrid
+    ) {
+        symbol_hits = graph
+            .search(query)
+            .into_iter()
+            .filter(|s| symbol_kind.is_none_or(|k| s.kind == k))
+            .filter(|s| file_allowed(&s.file))
+            .collect();
+        symbol_hits.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
+    }
+
+    let mut path_hits: Vec<&Path> = Vec::new();
+    if matches!(
+        mode,
+        repowise_graph::SearchMode::Path | repowise_graph::SearchMode::Hybrid
+    ) {
+        path_hits = index
+            .files
+            .iter()
+            .filter(|f| repowise_graph::path_matches(&f.path, &index.root, query))
+            .filter(|f| kind.is_none_or(|k| repowise_graph::classify(f, &index.root) == k))
+            .map(|f| f.path.as_path())
+            .collect();
+        path_hits.sort();
+    }
+
+    let total = symbol_hits.len() + path_hits.len();
+    if total == 0 {
+        println!(
+            "No matches for {query:?} ({})",
+            active_filters(mode, kind, symbol_kind)
+        );
         return Ok(());
     }
-    for sym in matches {
+
+    let shown = if limit == 0 { total } else { limit.min(total) };
+    let mut printed = 0usize;
+
+    for sym in &symbol_hits {
+        if printed >= shown {
+            break;
+        }
         println!(
             "{:<8} {:<30} {}:{}",
             sym.kind.label(),
@@ -572,6 +692,18 @@ fn cmd_search(query: &str, path: &Path) -> anyhow::Result<()> {
             display_path(&sym.file, &index.root),
             sym.start_line
         );
+        printed += 1;
+    }
+    for file in &path_hits {
+        if printed >= shown {
+            break;
+        }
+        println!("{:<8} {}", "file", display_path(file, &index.root));
+        printed += 1;
+    }
+
+    if printed < total {
+        println!("... {} of {total} shown (--limit {limit})", printed);
     }
     Ok(())
 }

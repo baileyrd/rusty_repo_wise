@@ -11,10 +11,12 @@ mod change_risk;
 mod changed_lines;
 mod issue_refs;
 mod log;
+pub mod org_signals;
 
 pub use change_risk::{change_risk, ChangeRisk};
 pub use changed_lines::{changed_lines, ChangedLines};
 pub use log::CommitInfo;
+pub use org_signals::collect_org_signals;
 
 use repowise_core::RepoIndex;
 use std::collections::{HashMap, HashSet};

@@ -396,6 +396,12 @@ to `[0, 10]`:
 | Goroutine in unbounded loop (`goroutine_in_unbounded_loop`) | a Go `go` statement inside a loop body with no channel-based concurrency bound | −0.6 |
 | Membership test in loop (`membership_test_in_loop`) | an `x in xs`-shaped test inside a loop where a local binding shows `xs` is a list, not a set | −0.6 |
 | Hot-path sync I/O (`hot_path_sync_io`) | a blocking I/O call in a function whose file ranks among the repo's top git hotspots | −0.3 |
+| Prior defect (`prior_defect`) | at least one bug-fix commit in the file's history | −0.5 |
+| Churn risk (`churn_risk`) | >= 20 commits touching the file | −0.3 |
+| Knowledge loss (`knowledge_loss`) | bus factor <= 1, given >= 5 commits of history | −0.4 |
+| Co-change scatter (`co_change_scatter`) | >= 5 distinct co-change partners (each >= 3 co-changes) | −0.3 |
+| Hidden coupling (`hidden_coupling`) | co-changes >= 3 times with another file, no import/call edge between them | −0.5 |
+| Developer congestion (`developer_congestion`) | > 4 distinct authors touching the file within the last 90 days | −0.3 |
 
 "Possibly dead code" is never applied to shell scripts (`Language::Shell`)
 — a shell function is routinely invoked only from the command line,
@@ -416,12 +422,15 @@ high_complexity = 2.0
 god_class = 3.0
 ```
 
-This is a precursor for the ML-calibrated weights repowise itself uses
-(see issue #62), not the calibration itself — a real calibrated weight
-set still needs a labeled defect corpus and a training pipeline this
-port doesn't have, and sourcing that data is still an open question.
-What this abstraction unblocks is having *somewhere* to plug calibrated
-numbers into once they exist, without touching any scoring logic.
+This is a precursor for the ML-calibrated weights repowise itself uses,
+not the calibration itself — issue #62 closed that question as a
+permanent "no": a real calibrated weight set needs a labeled defect
+corpus and a training/versioning pipeline this port has never had
+infrastructure for, and nothing about that has changed. What this
+abstraction unblocks is having *somewhere* to plug fixed numbers into
+without touching scoring logic, which is exactly what the six
+organizational-signal markers below are — ordinary thresholds, not
+calibration.
 
 All of these come from data already computed by `repowise-parser`
 (per-symbol line span, complexity, param count, body hash) and
@@ -447,6 +456,68 @@ excluded from the per-class graph entirely rather than counted as its
 own singleton component — otherwise nearly any real-world class would
 trip this marker. Extending field-access tracking to the remaining
 languages is a natural follow-up, not done here.
+
+**The six organizational-signal markers** (issue #313, split from #62)
+are plain fixed-penalty thresholds over git history, computed by
+`repowise_git::org_signals::collect_org_signals` and injected the same
+way `hot_path_sync_io`/`coverage_gap` already are —
+`analyze_with_context`'s `org_signals` parameter, `None` skipping all
+six rather than reporting false "no risk". Only `repowise health`,
+`get_health`, `repowise dashboard`, and the live dashboard's
+`/api/health` compute them; `get_context`/`get_risk` (which use health
+scoring as one ingredient in a faster, per-file answer) deliberately
+don't, to avoid making a cheap lookup pay this cost.
+
+- **Prior defect** and **churn risk** read `GitAnalytics::bugfix_commits_of`/
+  `churn_of` directly — no new git plumbing.
+- **Knowledge loss** is a low bus factor (`repowise_git::bus_factor`,
+  already computed from `ownership_of`'s per-author blame breakdown),
+  gated on the file having enough churn (>= 5 commits) that its
+  ownership concentration means something — a file touched twice has a
+  low bus factor by construction, which isn't this marker's signal.
+- **Co-change scatter** and **hidden coupling** both read from
+  `GitAnalytics`'s existing co-change data, filtered to pairs/partners
+  co-changing at least 3 times. Hidden coupling cross-references against
+  the dependency graph `repowise-health` already has: a pair that
+  co-changes often but shares no import/call edge.
+- **Developer congestion** is the one new aggregation: distinct authors
+  touching a file within the last 90 days, from a second `git log` walk
+  (`GitAnalytics` only retains aggregates, not per-commit author/
+  timestamp detail).
+
+**Not a cheap call.** Bus factor needs one `git blame` per indexed file
+on top of the history walk — measured at ~3.5 seconds across this
+port's own ~90 tracked Rust files, comparable to `find_near_duplicates`'s
+own cost (#304). `repowise health` on this repo runs in ~7-8 seconds
+total. This is why these six are wired into the full-report surfaces
+only.
+
+**Restricted to parsed-language files, and why.** Running this against
+this port's own workspace surfaced `hidden_coupling` firing between
+source files and `README.md` — co-changed 31 times, because nearly
+every PR here updates docs alongside the source they describe. That
+isn't hidden coupling: the marker's whole premise is "the code graph
+should explain this but doesn't", and the graph was never a candidate
+to explain a documentation file's co-changes — prose doesn't import
+anything, so its silence carries no information. The same category
+mismatch applies to the other five markers (a doc file has no
+meaningful "prior defect" or "bus factor" as a *code* risk concept), so
+`Language::Other` files are excluded from all six.
+
+**One honest limitation, left as a property of the signal rather than
+tuned away.** Even past the doc-file fix, `hidden_coupling` stays
+noisy on this port's own workspace — e.g. `repowise-server/src/lib.rs`
+co-changes 20+ times with several other crates' files that it shares no
+edge with, because this repo's own development history is unusually
+cross-cutting (many commits touch several crates for one logical
+feature, this session's own workflow included). That's a property of
+*this* repo, not a bug in the marker: `MIN_CO_CHANGE`/the other
+thresholds are fixed, hand-picked counts, the same convention every
+other marker in this table already uses, and pushing them higher just
+to make this one repo's numbers look cleaner would be exactly the kind
+of ad hoc numeric tuning issue #62 declined to substitute for real
+calibration. Most target repos won't have this repo's unusually broad
+commit shape.
 
 **Nested complexity (`nested_complexity`)** measures maximum control-flow
 nesting depth (if/for/while/etc. nested inside each other) per function,

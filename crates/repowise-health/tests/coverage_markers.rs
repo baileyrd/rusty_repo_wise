@@ -82,7 +82,7 @@ fn no_coverage_data_reports_neither_marker() {
     for report in [
         analyze(&index, &graph),
         analyze_with_hotspots(&index, &graph, &weights, &hot(&["core.rs"])),
-        analyze_with_context(&index, &graph, &weights, &hot(&["core.rs"]), None),
+        analyze_with_context(&index, &graph, &weights, &hot(&["core.rs"]), None, None),
     ] {
         assert!(kinds(&report, FindingKind::CoverageGap).is_empty());
         assert!(kinds(&report, FindingKind::UntestedHotspot).is_empty());
@@ -97,14 +97,21 @@ fn untested_hotspot_needs_all_three_signals() {
     let cov = barely_covered();
 
     // All three present -> fires.
-    let all = analyze_with_context(&index, &graph, &weights, &hot(&["core.rs"]), Some(&cov));
+    let all = analyze_with_context(
+        &index,
+        &graph,
+        &weights,
+        &hot(&["core.rs"]),
+        Some(&cov),
+        None,
+    );
     assert_eq!(
         kinds(&all, FindingKind::UntestedHotspot),
         vec![Path::new("core.rs")]
     );
 
     // Not a hotspot -> does not fire (falls back to the milder gap marker).
-    let not_hot = analyze_with_context(&index, &graph, &weights, &HashSet::new(), Some(&cov));
+    let not_hot = analyze_with_context(&index, &graph, &weights, &HashSet::new(), Some(&cov), None);
     assert!(kinds(&not_hot, FindingKind::UntestedHotspot).is_empty());
     assert_eq!(
         kinds(&not_hot, FindingKind::CoverageGap),
@@ -125,14 +132,21 @@ fn untested_hotspot_needs_all_three_signals() {
         &weights,
         &hot(&["core.rs"]),
         Some(&cov),
+        None,
     );
     assert!(kinds(&few_deps, FindingKind::UntestedHotspot).is_empty());
 
     // Hot and depended-on, but well covered -> does not fire.
     let covered =
         parse_lcov("SF:core.rs\nDA:1,1\nDA:2,1\nDA:3,1\nDA:4,1\nDA:5,1\nend_of_record\n").unwrap();
-    let well_tested =
-        analyze_with_context(&index, &graph, &weights, &hot(&["core.rs"]), Some(&covered));
+    let well_tested = analyze_with_context(
+        &index,
+        &graph,
+        &weights,
+        &hot(&["core.rs"]),
+        Some(&covered),
+        None,
+    );
     assert!(kinds(&well_tested, FindingKind::UntestedHotspot).is_empty());
     assert!(kinds(&well_tested, FindingKind::CoverageGap).is_empty());
 }
@@ -149,6 +163,7 @@ fn a_file_never_measured_is_skipped_even_when_others_are_covered() {
         &HealthWeights::default(),
         &HashSet::new(),
         Some(&barely_covered()),
+        None,
     );
     let gaps = kinds(&report, FindingKind::CoverageGap);
     assert_eq!(gaps, vec![Path::new("core.rs")]);
@@ -167,6 +182,7 @@ fn the_two_markers_do_not_both_charge_the_same_file() {
         &HealthWeights::default(),
         &hot(&["core.rs"]),
         Some(&barely_covered()),
+        None,
     );
     assert_eq!(
         kinds(&report, FindingKind::UntestedHotspot),
@@ -188,6 +204,7 @@ fn a_measured_file_with_zero_percent_still_counts_as_measured() {
         &HealthWeights::default(),
         &HashSet::new(),
         Some(&zero),
+        None,
     );
     assert_eq!(
         kinds(&report, FindingKind::CoverageGap),

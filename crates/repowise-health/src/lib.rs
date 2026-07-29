@@ -93,7 +93,7 @@ pub use near_duplicate::{find_near_duplicates, NearDuplicateCandidate};
 use repowise_core::{Language, RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A function/method longer than this (in lines) is flagged.
 pub const LONG_FUNCTION_LINES: usize = 50;
@@ -113,6 +113,31 @@ pub const BUMPY_ROAD_MIN_BUMPS: usize = 3;
 /// parameters (see `repowise_core::Symbol::primitive_param_count`) is
 /// flagged.
 pub const PRIMITIVE_OBSESSION_MIN_COUNT: usize = 3;
+
+// Organizational-signal thresholds (issue #313). Absolute, hand-picked
+// counts, the same convention every other threshold on this list
+// already uses -- not calibrated against a defect corpus, which is
+// exactly the ML-calibration question issue #62 declined to pursue.
+/// A file with churn at or above this commit count is flagged
+/// `churn_risk`, independent of `Hotspot`'s churn×complexity score.
+pub const CHURN_RISK_MIN_CHURN: usize = 20;
+/// A file must have at least this much churn before its bus factor is
+/// meaningful to flag -- a file touched twice necessarily has a low
+/// bus factor by construction, which isn't the signal `knowledge_loss`
+/// is for. Mirrors LCOM4's "need 2+ tracked methods before cohesion is
+/// meaningful" convention.
+pub const KNOWLEDGE_LOSS_MIN_CHURN: usize = 5;
+/// A file whose bus factor is at or below this is flagged
+/// `knowledge_loss` (given `KNOWLEDGE_LOSS_MIN_CHURN` is also met).
+pub const KNOWLEDGE_LOSS_MAX_BUS_FACTOR: usize = 1;
+/// A file with at least this many distinct co-change partners (each
+/// already at or above `repowise_git::org_signals::MIN_CO_CHANGE`) is
+/// flagged `co_change_scatter`.
+pub const CO_CHANGE_SCATTER_MIN_PARTNERS: usize = 5;
+/// More than this many distinct authors touching a file within
+/// `repowise_git::org_signals::RECENT_WINDOW_DAYS` flags
+/// `developer_congestion`.
+pub const DEVELOPER_CONGESTION_MIN_AUTHORS: usize = 4;
 
 const MAX_SCORE: f64 = 10.0;
 
@@ -302,6 +327,36 @@ fn default_membership_test_in_loop() -> f64 {
 fn default_hot_path_sync_io() -> f64 {
     0.3
 }
+// Organizational-signal markers (issue #313, split from #62): plain
+// fixed-penalty thresholds over `repowise_core::org_signals::OrgSignals`,
+// the same "caller supplies external data, this crate only scores it"
+// split `hot_path_sync_io`/`coverage_gap` already established. Weighted
+// in the same range as those two -- heuristic, git-history-derived
+// signals, not structural ones, so none of these approach `god_class`'s
+// 1.5.
+fn default_prior_defect() -> f64 {
+    0.5
+}
+fn default_churn_risk() -> f64 {
+    0.3
+}
+fn default_knowledge_loss() -> f64 {
+    0.4
+}
+fn default_co_change_scatter() -> f64 {
+    0.3
+}
+// Weighted like a real structural finding rather than the other
+// org-signal markers: this is the one case where the *code graph*
+// itself is silent about a real coupling that git history has already
+// seen, which is a different kind of gap than "this file changed a
+// lot."
+fn default_hidden_coupling() -> f64 {
+    0.5
+}
+fn default_developer_congestion() -> f64 {
+    0.3
+}
 
 /// Coverage thresholds and penalties for issue #243's two markers.
 ///
@@ -423,6 +478,18 @@ pub struct HealthWeights {
     pub membership_test_in_loop: f64,
     #[serde(default = "default_hot_path_sync_io")]
     pub hot_path_sync_io: f64,
+    #[serde(default = "default_prior_defect")]
+    pub prior_defect: f64,
+    #[serde(default = "default_churn_risk")]
+    pub churn_risk: f64,
+    #[serde(default = "default_knowledge_loss")]
+    pub knowledge_loss: f64,
+    #[serde(default = "default_co_change_scatter")]
+    pub co_change_scatter: f64,
+    #[serde(default = "default_hidden_coupling")]
+    pub hidden_coupling: f64,
+    #[serde(default = "default_developer_congestion")]
+    pub developer_congestion: f64,
 }
 
 impl Default for HealthWeights {
@@ -461,6 +528,12 @@ impl Default for HealthWeights {
             hot_path_sync_io: default_hot_path_sync_io(),
             coverage_gap: default_coverage_gap(),
             untested_hotspot: default_untested_hotspot(),
+            prior_defect: default_prior_defect(),
+            churn_risk: default_churn_risk(),
+            knowledge_loss: default_knowledge_loss(),
+            co_change_scatter: default_co_change_scatter(),
+            hidden_coupling: default_hidden_coupling(),
+            developer_congestion: default_developer_congestion(),
         }
     }
 }
@@ -509,6 +582,12 @@ impl HealthWeights {
             FindingKind::HotPathSyncIo => self.hot_path_sync_io,
             FindingKind::CoverageGap => self.coverage_gap,
             FindingKind::UntestedHotspot => self.untested_hotspot,
+            FindingKind::PriorDefect => self.prior_defect,
+            FindingKind::ChurnRisk => self.churn_risk,
+            FindingKind::KnowledgeLoss => self.knowledge_loss,
+            FindingKind::CoChangeScatter => self.co_change_scatter,
+            FindingKind::HiddenCoupling => self.hidden_coupling,
+            FindingKind::DeveloperCongestion => self.developer_congestion,
         }
     }
 }
@@ -548,6 +627,32 @@ pub enum FindingKind {
     HotPathSyncIo,
     CoverageGap,
     UntestedHotspot,
+    /// This file has had at least one bug-fix commit in its history.
+    /// Direct: `repowise_git::GitAnalytics::bugfix_commits_of` measured,
+    /// not inferred.
+    PriorDefect,
+    /// Commit count touching this file exceeds
+    /// [`CHURN_RISK_MIN_CHURN`] -- a coarse, correlational signal
+    /// independent of the churn×complexity `Hotspot` score.
+    ChurnRisk,
+    /// This file's blamed lines are concentrated in very few authors
+    /// (bus factor at or below [`KNOWLEDGE_LOSS_MAX_BUS_FACTOR`]), and
+    /// the file has enough history ([`KNOWLEDGE_LOSS_MIN_CHURN`]) for
+    /// that concentration to mean something.
+    KnowledgeLoss,
+    /// This file co-changes with many distinct other files rather than
+    /// one tightly-coupled partner -- [`CO_CHANGE_SCATTER_MIN_PARTNERS`]
+    /// or more, each at or above
+    /// `repowise_git::org_signals::MIN_CO_CHANGE`.
+    CoChangeScatter,
+    /// This file pair co-changes often in git history but has no
+    /// import/call edge between them in the dependency graph -- a
+    /// coupling the code graph itself is silent about.
+    HiddenCoupling,
+    /// More than [`DEVELOPER_CONGESTION_MIN_AUTHORS`] distinct authors
+    /// touched this file within
+    /// `repowise_git::org_signals::RECENT_WINDOW_DAYS`.
+    DeveloperCongestion,
 }
 
 impl FindingKind {
@@ -586,6 +691,12 @@ impl FindingKind {
             FindingKind::HotPathSyncIo => "hot-path-sync-io",
             FindingKind::CoverageGap => "coverage-gap",
             FindingKind::UntestedHotspot => "untested-hotspot",
+            FindingKind::PriorDefect => "prior-defect",
+            FindingKind::ChurnRisk => "churn-risk",
+            FindingKind::KnowledgeLoss => "knowledge-loss",
+            FindingKind::CoChangeScatter => "co-change-scatter",
+            FindingKind::HiddenCoupling => "hidden-coupling",
+            FindingKind::DeveloperCongestion => "developer-congestion",
         }
     }
 }
@@ -663,7 +774,7 @@ pub fn analyze_with_hotspots(
     weights: &HealthWeights,
     hot_files: &HashSet<PathBuf>,
 ) -> HealthReport {
-    analyze_with_context(index, graph, weights, hot_files, None)
+    analyze_with_context(index, graph, weights, hot_files, None, None)
 }
 
 /// Score `index` with `weights`, hotspot data, and optionally ingested
@@ -678,12 +789,19 @@ pub fn analyze_with_hotspots(
 ///
 /// **These are ordinary fixed-penalty markers.** Nothing here presumes
 /// an answer to the ML-calibrated-weights question in issue #62.
+///
+/// `org_signals` (issue #313, also split from #62) follows the exact
+/// same split for the Organizational-signal markers: `repowise-git`
+/// computes `OrgSignals`, this function only thresholds it. `None`
+/// (matching `coverage`'s convention) skips those markers entirely
+/// rather than reporting a false "no risk".
 pub fn analyze_with_context(
     index: &RepoIndex,
     graph: &RepoGraph,
     weights: &HealthWeights,
     hot_files: &HashSet<PathBuf>,
     coverage: Option<&repowise_core::coverage::CoverageData>,
+    org_signals: Option<&repowise_core::org_signals::OrgSignals>,
 ) -> HealthReport {
     let mut findings = Vec::new();
 
@@ -714,6 +832,7 @@ pub fn analyze_with_context(
     check_near_duplicate_code(index, &mut findings);
     check_low_cohesion(index, &mut findings);
     check_coverage(index, graph, hot_files, coverage, &mut findings);
+    check_org_signals(index, graph, org_signals, &mut findings);
 
     let file_scores = score_files(index, &findings, weights);
     let average_score = if file_scores.is_empty() {
@@ -1230,6 +1349,174 @@ fn check_coverage(
                 detail: format!("{pct:.0}% line coverage"),
             });
         }
+    }
+}
+
+/// A path relative to `root`, for embedding in a `detail` string that
+/// names a *second* file -- `Finding.file` already carries this
+/// marker's own file absolutely, but there's no other field for the
+/// other half of a pair, and an absolute path there would leak the
+/// indexing machine's directory layout the same way unrelativized
+/// symbol ids did before `get_context` fixed that (issue #299).
+fn relative_for_detail(root: &Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// Organizational-signal markers (issue #313, split from #62): plain
+/// fixed-penalty thresholds over externally-supplied git history, the
+/// same "caller computes it, this crate only scores it" split
+/// `check_coverage` already established. `None` skips every marker here
+/// -- an unsupplied `OrgSignals` means "not measured", not "no risk".
+///
+/// # Restricted to parsed-language files, and why
+///
+/// Running this against this port's own workspace surfaced
+/// `hidden_coupling` firing between source files and `README.md` --
+/// co-changed 31 times, because nearly every PR in this repo's history
+/// updates docs alongside the source they describe. That isn't hidden
+/// coupling; `hidden_coupling`'s entire premise is "the code graph
+/// should explain this but doesn't", and the graph was never a
+/// candidate to explain a documentation file's co-changes in the first
+/// place -- prose doesn't import anything, so its silence carries no
+/// information. The same category mismatch applies to every other
+/// marker here (a doc file has no meaningful "prior defect", "bus
+/// factor", or "developer congestion" as *code* risk concepts), so
+/// `Language::Other` files are excluded from all six, the same way
+/// `check_function_markers` already scopes `skip_dead_code` to
+/// languages where the underlying signal is meaningful.
+fn check_org_signals(
+    index: &RepoIndex,
+    graph: &RepoGraph,
+    org_signals: Option<&repowise_core::org_signals::OrgSignals>,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(org) = org_signals else {
+        return;
+    };
+
+    let code_files: HashMap<&PathBuf, Language> =
+        index.files.iter().map(|f| (&f.path, f.language)).collect();
+    let is_code = |path: &PathBuf| {
+        code_files
+            .get(path)
+            .is_some_and(|lang| *lang != Language::Other)
+    };
+
+    for file in &index.files {
+        if file.language == Language::Other {
+            continue;
+        }
+        let path = &file.path;
+        let churn = org.churn_of(path);
+        let bugfix_commits = org.bugfix_commits_of(path);
+        let bus_factor = org.bus_factor_of(path);
+        let partners = org.co_change_partner_count_of(path);
+        let recent_authors = org.recent_author_count_of(path);
+
+        if bugfix_commits > 0 {
+            findings.push(Finding {
+                file: path.clone(),
+                symbol: None,
+                line: None,
+                kind: FindingKind::PriorDefect,
+                detail: format!("{bugfix_commits} bug-fix commit(s) in history"),
+            });
+        }
+
+        if churn >= CHURN_RISK_MIN_CHURN {
+            findings.push(Finding {
+                file: path.clone(),
+                symbol: None,
+                line: None,
+                kind: FindingKind::ChurnRisk,
+                detail: format!("{churn} commit(s) touching this file (>= {CHURN_RISK_MIN_CHURN})"),
+            });
+        }
+
+        // `bus_factor >= 1` excludes 0, which means "no blameable
+        // history" (see `OrgSignals::bus_factor_of`) -- a file with no
+        // ownership data isn't a knowledge-loss risk, it's unmeasured.
+        if churn >= KNOWLEDGE_LOSS_MIN_CHURN
+            && bus_factor >= 1
+            && bus_factor <= KNOWLEDGE_LOSS_MAX_BUS_FACTOR
+        {
+            findings.push(Finding {
+                file: path.clone(),
+                symbol: None,
+                line: None,
+                kind: FindingKind::KnowledgeLoss,
+                detail: format!("bus factor {bus_factor} across {churn} commit(s)"),
+            });
+        }
+
+        if partners >= CO_CHANGE_SCATTER_MIN_PARTNERS {
+            findings.push(Finding {
+                file: path.clone(),
+                symbol: None,
+                line: None,
+                kind: FindingKind::CoChangeScatter,
+                detail: format!(
+                    "{partners} distinct co-change partner(s) (>= {CO_CHANGE_SCATTER_MIN_PARTNERS})"
+                ),
+            });
+        }
+
+        if recent_authors > DEVELOPER_CONGESTION_MIN_AUTHORS {
+            findings.push(Finding {
+                file: path.clone(),
+                symbol: None,
+                line: None,
+                kind: FindingKind::DeveloperCongestion,
+                detail: format!(
+                    "{recent_authors} distinct author(s) in the recent window (> \
+                     {DEVELOPER_CONGESTION_MIN_AUTHORS})"
+                ),
+            });
+        }
+    }
+
+    // Cross-referenced against the graph rather than against another
+    // git-derived signal: this is the one marker whose whole point is
+    // that the *code* graph is silent about something git history isn't.
+    // Pushed for both files in the pair, the same convention
+    // `check_duplicate_code` uses for a duplicate pair, so either file's
+    // score reflects it regardless of which one a caller looks at.
+    for (a, b, count) in &org.co_changed_pairs {
+        // Neither file is a candidate for a graph edge unless both are
+        // parsed source -- see this function's own doc comment for why
+        // a documentation file co-changing with source isn't "hidden".
+        if !is_code(a) || !is_code(b) {
+            continue;
+        }
+        let has_edge = graph.dependencies_of(a).contains(b) || graph.dependencies_of(b).contains(a);
+        if has_edge {
+            continue;
+        }
+        findings.push(Finding {
+            file: a.clone(),
+            symbol: None,
+            line: None,
+            kind: FindingKind::HiddenCoupling,
+            detail: format!(
+                "co-changes with {} {count} time(s) in git history, but no import/call edge \
+                 exists between them",
+                relative_for_detail(&index.root, b)
+            ),
+        });
+        findings.push(Finding {
+            file: b.clone(),
+            symbol: None,
+            line: None,
+            kind: FindingKind::HiddenCoupling,
+            detail: format!(
+                "co-changes with {} {count} time(s) in git history, but no import/call edge \
+                 exists between them",
+                relative_for_detail(&index.root, a)
+            ),
+        });
     }
 }
 

@@ -1690,7 +1690,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_health",
-        description = "Deterministic code-health marker scores. With no `targets`, returns repo-wide KPIs and the lowest-scoring files -- use this to find what to fix first. With `targets`, returns each file's score and its individual findings. Requires a prior `repowise init`/`update`."
+        description = "Deterministic code-health marker scores, including six organizational-signal markers derived from git history: prior-defect, churn-risk, knowledge-loss (low bus factor), co-change-scatter, hidden-coupling (files that co-change often but share no import/call edge), and developer-congestion. With no `targets`, returns repo-wide KPIs and the lowest-scoring files -- use this to find what to fix first. With `targets`, returns each file's score and its individual findings. Requires a prior `repowise init`/`update`. NOTE: the organizational-signal markers need one `git blame` per indexed file on top of a history walk -- measured at several seconds on this port's own workspace, so this is a full-report call, not a cheap lookup. They're silently skipped (not reported as zero risk) if the root isn't a git repository."
     )]
     fn get_health(
         &self,
@@ -1698,7 +1698,22 @@ impl RepowiseServer {
     ) -> Result<Json<Envelope<HealthOutput>>, ErrorData> {
         let started = Instant::now();
         let (index, graph, cached) = self.load()?;
-        let report = repowise_health::analyze(&index, &graph);
+        // One `GitAnalytics::collect` walk feeds the organizational
+        // signals; a repo with no git history (or that isn't a git repo
+        // at all) simply skips those six markers, the same degrade-
+        // gracefully convention `coverage`/`hot_files` already use here.
+        let analytics = repowise_git::GitAnalytics::collect(&self.root).ok();
+        let org_signals = analytics.as_ref().and_then(|a| {
+            repowise_git::org_signals::collect_org_signals(&self.root, &index, a).ok()
+        });
+        let report = repowise_health::analyze_with_context(
+            &index,
+            &graph,
+            &repowise_health::HealthWeights::default(),
+            &std::collections::HashSet::new(),
+            None,
+            org_signals.as_ref(),
+        );
         let limit = limit.clamp(1, HEALTH_MAX_LIMIT);
 
         let render = |fh: &repowise_health::FileHealth| FileHealthOutput {

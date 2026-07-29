@@ -730,7 +730,23 @@ async fn get_overview(State(state): State<AppState>) -> Result<Json<OverviewDto>
 async fn get_health(State(state): State<AppState>) -> Result<Json<HealthDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let graph = repowise_graph::RepoGraph::build(&index);
-    let health = repowise_health::analyze(&index, &graph);
+    // Organizational-signal markers (#313) need one `git blame` per
+    // indexed file on top of a history walk -- several seconds on this
+    // port's own workspace, acceptable for a full-report endpoint.
+    // Degrades to skipping those six markers (not reporting zero risk)
+    // when the root isn't a git repository.
+    let analytics = repowise_git::GitAnalytics::collect(&state.root).ok();
+    let org_signals = analytics
+        .as_ref()
+        .and_then(|a| repowise_git::org_signals::collect_org_signals(&state.root, &index, a).ok());
+    let health = repowise_health::analyze_with_context(
+        &index,
+        &graph,
+        &repowise_health::HealthWeights::default(),
+        &std::collections::HashSet::new(),
+        None,
+        org_signals.as_ref(),
+    );
 
     let by_kind = health
         .findings_by_kind()

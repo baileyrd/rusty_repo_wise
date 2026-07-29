@@ -6,6 +6,64 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #314 — Fixed-penalty organizational-signal health markers
+**2026-07-29** · closes [#313](https://github.com/baileyrd/rusty_repo_wise/issues/313)
+
+- **Six new `repowise-health` markers, all plain fixed-penalty thresholds over
+  git history**: `prior_defect`, `churn_risk`, `knowledge_loss` (low bus factor),
+  `co_change_scatter`, `hidden_coupling` (co-changes often, shares no import/call
+  edge), `developer_congestion`. Split from #62 -- ML-calibrated weights stay a
+  permanent no (closed the same day), but these needed no calibration: every
+  field traces to a plain count `repowise-git` already computes or can compute
+  with one added aggregation, no defect corpus involved.
+- **`repowise_core::org_signals::OrgSignals`** carries the data, following the
+  exact "caller computes it, `repowise-health` only scores it" split
+  `hot_files`/`coverage` already established for issues #186/#243 --
+  `analyze_with_context` gains a sixth parameter, `None` skips all six markers
+  rather than reporting false "no risk". `repowise_git::org_signals::
+  collect_org_signals` builds it: no new git plumbing beyond one extra `git log`
+  walk (for the recent-author window) and one `git blame` per indexed file (bus
+  factor, via the existing `ownership_of`).
+- **`repowise_health::find_god_classes`-style extraction**: `bus_factor`/
+  `ownership_of`/`churn_of`/`bugfix_commits_of`/`coupled_files`/
+  `top_co_changed_pairs` were all already public; only `developer_congestion`
+  needed genuinely new aggregation (distinct authors per file in a 90-day
+  window, matching `GitAnalytics`'s own hotspot-decay half-life).
+- **Wired into the full-report surfaces only**: `repowise health`, `get_health`,
+  `repowise dashboard`, and the live dashboard's `/api/health`.
+  `get_context`/`get_risk` deliberately keep using bare `analyze()` --
+  computing bus factor for every indexed file costs several seconds, and
+  those two are meant to stay a fast, per-file lookup.
+- **A real category bug found by running this against the port's own
+  workspace**: `hidden_coupling` fired between source files and `README.md` --
+  co-changed 31 times, because nearly every PR here updates docs alongside the
+  source they describe. That isn't hidden coupling: the marker's whole premise
+  is "the code graph should explain this but doesn't", and a documentation file
+  was never a candidate for a graph edge in the first place, so the graph's
+  silence about it carries no information. All six markers now skip
+  `Language::Other` files -- the same category mismatch applies to the other
+  five (a doc file has no meaningful "bus factor" as a *code* risk concept).
+  Pinned with a regression test built from the exact failure shape.
+- **One noise characteristic left undisturbed, deliberately**: even past the
+  doc-file fix, `hidden_coupling` stays noisy on this repo specifically --
+  several files co-change often with unrelated crates' files because this
+  repo's own development history is unusually cross-cutting (many commits
+  touch several crates for one logical feature). That's a property of this
+  particular repo's commit shape, not a bug in the marker, and pushing
+  thresholds higher just to make this one repo's numbers look cleaner would be
+  the same kind of ad hoc tuning issue #62 already declined to substitute for
+  real calibration.
+- **Measured, not assumed**: `git blame` across this port's own ~90 tracked
+  Rust files costs ~3.5 seconds -- comparable to `find_near_duplicates`'s own
+  cost (#304). `repowise health` on this repo now runs in ~7-8 seconds total,
+  documented in the tool description and README rather than hidden.
+- 15 new tests (5 in `repowise-git`, 10 in `repowise-health`'s new
+  `org_signals_markers.rs`, including the doc-file regression test). Verified
+  live against this port's own workspace, including a before/after comparison
+  of the `hidden_coupling` count once the doc-file fix landed (1034 -> 878).
+
+---
+
 ## PR #312 — Deterministic refactor-candidate detection
 **2026-07-29** · closes [#304](https://github.com/baileyrd/rusty_repo_wise/issues/304) · splits off [#311](https://github.com/baileyrd/rusty_repo_wise/issues/311)
 

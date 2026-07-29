@@ -53,6 +53,21 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Report tokens saved by `repowise distill`, from measured bytes
+    /// in and out. Token counts are approximate (bytes/4, no
+    /// model-specific tokenizer).
+    Saved {
+        /// Grouping: `program` (default) or `day`.
+        #[arg(long, default_value = "program")]
+        by: String,
+        /// Only count records from the last N days.
+        #[arg(long)]
+        since_days: Option<u64>,
+        /// Instead of savings, report commands the rewrite hook
+        /// declined to wrap -- what's slipping past it.
+        #[arg(long)]
+        missed: bool,
+    },
     /// Restore the output behind a `[repowise#<ref>]` omission marker
     /// left by `repowise distill`. Accepts a bare 12-hex ref or a
     /// pasted whole marker. Looks in this repo's store first, then the
@@ -502,6 +517,11 @@ fn main() -> anyhow::Result<()> {
         Command::Overview { path } => cmd_overview(&path),
         Command::Distill { command } => cmd_distill(&command),
         Command::Expand { reference, query } => cmd_expand(&reference, query.as_deref()),
+        Command::Saved {
+            by,
+            since_days,
+            missed,
+        } => cmd_saved(&by, since_days, missed),
         Command::GenerateClaudeMd {
             path,
             output,
@@ -690,6 +710,154 @@ fn distill_stores() -> anyhow::Result<Vec<repowise_distill::Store>> {
     Ok(stores)
 }
 
+/// Render the savings report.
+///
+/// Split out so the wording -- especially the caveats, which are most
+/// of what keeps this number honest -- is testable without a ledger on
+/// disk.
+fn render_saved(records: &[repowise_distill::ledger::Record], by: &str) -> String {
+    use repowise_distill::ledger::{approx_tokens, Kind};
+    use std::collections::BTreeMap;
+
+    let distilled: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == Kind::Distilled)
+        .collect();
+
+    if distilled.is_empty() {
+        return "No distillations recorded yet.\n\
+                This counts only what `repowise distill` actually ran -- \
+                if you haven't wrapped a command\n\
+                (or installed the rewrite hook), there is nothing to measure.\n"
+            .to_string();
+    }
+
+    let raw: usize = distilled.iter().map(|r| r.raw_bytes).sum();
+    let kept: usize = distilled.iter().map(|r| r.kept_bytes).sum();
+    let saved: usize = distilled.iter().map(|r| r.saved_bytes()).sum();
+
+    let mut groups: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for r in &distilled {
+        let key = if by == "day" {
+            // Whole days since the epoch -- enough to bucket by date
+            // without pulling in a calendar library for a rollup.
+            format!("day {}", r.at / 86_400)
+        } else {
+            r.program.clone()
+        };
+        let entry = groups.entry(key).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += r.saved_bytes();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Distillation savings ({} run(s))\n\n",
+        distilled.len()
+    ));
+    out.push_str(&format!(
+        "  {:<24} {:>8} {:>14}\n",
+        "group", "runs", "~tokens saved"
+    ));
+    for (key, (runs, bytes)) in &groups {
+        out.push_str(&format!(
+            "  {:<24} {:>8} {:>14}\n",
+            key,
+            runs,
+            approx_tokens(*bytes)
+        ));
+    }
+    out.push_str(&format!(
+        "\n  raw output:      {:>10} bytes (~{} tokens)\n  printed:         {:>10} bytes (~{} tokens)\n  saved:           {:>10} bytes (~{} tokens)\n",
+        raw,
+        approx_tokens(raw),
+        kept,
+        approx_tokens(kept),
+        saved,
+        approx_tokens(saved)
+    ));
+
+    out.push_str(
+        "\nEvery figure above is measured: bytes that went into a distillation and\n\
+         bytes that came out, for commands that actually ran. Token counts are\n\
+         approximate -- bytes/4, with no model-specific tokenizer -- so treat them\n\
+         as an order of magnitude, not an invoice.\n",
+    );
+    out.push_str(
+        "\nNot counted: MCP tool responses. The reference credits those against \"the raw\n\
+         file exploration they replaced\", which is a counterfactual -- nobody knows what\n\
+         the agent would have read instead. Rather than fold a guess into a measured\n\
+         total, this port leaves it out and says so.\n",
+    );
+    out
+}
+
+/// Render the `--missed` report: what the rewrite hook let past.
+fn render_missed(records: &[repowise_distill::ledger::Record]) -> String {
+    use repowise_distill::ledger::Kind;
+    use std::collections::BTreeMap;
+
+    let skipped: Vec<_> = records.iter().filter(|r| r.kind == Kind::Skipped).collect();
+    if skipped.is_empty() {
+        return "No skipped commands recorded.\n\
+                This is populated by the rewrite hook -- if it isn't installed \
+                (`repowise hook rewrite install`),\n\
+                nothing is being observed, which is not the same as nothing being missed.\n"
+            .to_string();
+    }
+
+    let mut groups: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for r in &skipped {
+        *groups
+            .entry((r.program.clone(), r.detail.clone()))
+            .or_insert(0) += 1;
+    }
+    let mut rows: Vec<_> = groups.into_iter().collect();
+    rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+
+    let mut out = String::from("Commands the rewrite hook declined to wrap:\n\n");
+    out.push_str(&format!(
+        "  {:<20} {:<18} {:>6}\n",
+        "program", "reason", "times"
+    ));
+    for ((program, reason), count) in rows {
+        out.push_str(&format!("  {program:<20} {reason:<18} {count:>6}\n"));
+    }
+    out.push_str(
+        "\n`not-rewritable` means the program isn't in the closed set the hook understands --\n\
+         a candidate for widening it. `shell-syntax` is deliberate and will never be\n\
+         rewritten, however often it appears.\n",
+    );
+    out
+}
+
+fn cmd_saved(by: &str, since_days: Option<u64>, missed: bool) -> anyhow::Result<()> {
+    if by != "program" && by != "day" {
+        anyhow::bail!("--by must be `program` or `day`, got {by:?}");
+    }
+    let stores = distill_stores()?;
+    let mut records: Vec<repowise_distill::ledger::Record> = stores
+        .iter()
+        .flat_map(|s| repowise_distill::ledger::read(s.dir()))
+        .collect();
+
+    if let Some(days) = since_days {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .saturating_sub(days * 86_400);
+        records.retain(|r| r.at >= cutoff);
+    }
+
+    if missed {
+        print!("{}", render_missed(&records));
+    } else {
+        print!("{}", render_saved(&records, by));
+    }
+    Ok(())
+}
+
 fn cmd_expand(reference: &str, query: Option<&str>) -> anyhow::Result<()> {
     let Some(parsed) = repowise_distill::parse_ref(reference) else {
         anyhow::bail!(
@@ -790,6 +958,20 @@ fn cmd_distill(command: &[String]) -> anyhow::Result<()> {
 
     let rendered_out = repowise_distill::render(&stdout_raw, &store);
     let rendered_err = repowise_distill::render(&stderr_raw, &store);
+
+    // Measured accounting: bytes actually in, bytes actually out, for a
+    // command that actually ran. Recorded only when something was
+    // distilled -- a pass-through saved nothing and logging it as a
+    // zero-saving row would dilute the report with non-events.
+    let raw_bytes = stdout_raw.len() + stderr_raw.len();
+    let kept_bytes = rendered_out.text.len() + rendered_err.text.len();
+    if rendered_out.reference.is_some() || rendered_err.reference.is_some() {
+        let name = Path::new(program)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(program);
+        repowise_distill::ledger::record_distilled(store.dir(), name, raw_bytes, kept_bytes);
+    }
 
     if !rendered_out.text.is_empty() {
         print!("{}", rendered_out.text);
@@ -1525,7 +1707,28 @@ fn cmd_hook_rewrite(action: RewriteAction) -> anyhow::Result<()> {
         RewriteAction::Apply => {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
-            let out = match repowise_distill::decide(&input) {
+            let decision = repowise_distill::decide(&input);
+            // Recording skips is what makes `saved --missed` real: it's
+            // the feature auditing its own coverage, the difference
+            // between "the hook is working" and "the hook is installed".
+            // Best-effort -- accounting must never break a command.
+            if let repowise_distill::Decision::Skip(reason) = &decision {
+                if let Ok(cwd) = std::env::current_dir() {
+                    let home = std::env::var_os("HOME").map(PathBuf::from);
+                    let dir = repowise_distill::store::store_dir(&cwd, home.as_deref());
+                    let program = input
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("");
+                    if !program.is_empty() {
+                        repowise_distill::ledger::record_skipped(&dir, program, reason.label());
+                    }
+                }
+            }
+            let out = match decision {
                 repowise_distill::Decision::Rewrite { .. } => {
                     repowise_distill::rewrite::rewrite(&input)
                 }
@@ -3072,5 +3275,142 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Rust-only"));
+    }
+
+    fn rec(
+        kind: repowise_distill::ledger::Kind,
+        program: &str,
+        raw: usize,
+        kept: usize,
+        detail: &str,
+    ) -> repowise_distill::ledger::Record {
+        repowise_distill::ledger::Record {
+            at: 1_700_000_000,
+            kind,
+            program: program.to_string(),
+            raw_bytes: raw,
+            kept_bytes: kept,
+            detail: detail.to_string(),
+        }
+    }
+
+    /// An empty report must not read as "distillation saved you
+    /// nothing". Nothing was measured, which is a different claim.
+    #[test]
+    fn saved_with_no_records_says_nothing_was_measured() {
+        let out = render_saved(&[], "program");
+        assert!(out.contains("No distillations recorded"), "{out}");
+        assert!(
+            out.contains("nothing to measure"),
+            "must distinguish 'saved nothing' from 'measured nothing':\n{out}"
+        );
+    }
+
+    #[test]
+    fn saved_totals_measured_bytes_and_labels_tokens_as_approximate() {
+        let records = vec![
+            rec(
+                repowise_distill::ledger::Kind::Distilled,
+                "cargo",
+                4000,
+                400,
+                "",
+            ),
+            rec(
+                repowise_distill::ledger::Kind::Distilled,
+                "pytest",
+                2000,
+                200,
+                "",
+            ),
+        ];
+        let out = render_saved(&records, "program");
+        assert!(out.contains("cargo"), "{out}");
+        assert!(out.contains("pytest"), "{out}");
+        // 5400 bytes saved / 4 = 1350 approximate tokens.
+        assert!(out.contains("1350"), "{out}");
+        assert!(out.contains("approximate"), "{out}");
+        assert!(
+            out.contains("not an invoice"),
+            "a rule-of-thumb token count must not look precise:\n{out}"
+        );
+    }
+
+    /// The report must say what it left out, or a reader will assume
+    /// the total covers everything distill touches.
+    #[test]
+    fn saved_states_that_mcp_responses_are_not_counted_and_why() {
+        let records = vec![rec(
+            repowise_distill::ledger::Kind::Distilled,
+            "cargo",
+            100,
+            10,
+            "",
+        )];
+        let out = render_saved(&records, "program");
+        assert!(out.contains("Not counted: MCP tool responses"), "{out}");
+        assert!(
+            out.contains("counterfactual"),
+            "the reason has to be there, not just the exclusion:\n{out}"
+        );
+    }
+
+    #[test]
+    fn saved_can_group_by_day() {
+        let records = vec![rec(
+            repowise_distill::ledger::Kind::Distilled,
+            "cargo",
+            400,
+            40,
+            "",
+        )];
+        let out = render_saved(&records, "day");
+        assert!(out.contains("day "), "{out}");
+        assert!(
+            !out.contains("cargo"),
+            "day grouping shouldn't list programs:\n{out}"
+        );
+    }
+
+    /// Skipped records only exist if the hook is installed, so an empty
+    /// --missed means "not observed", not "nothing missed".
+    #[test]
+    fn missed_with_no_records_says_nothing_is_being_observed() {
+        let out = render_missed(&[]);
+        assert!(out.contains("No skipped commands"), "{out}");
+        assert!(
+            out.contains("not the same as nothing being missed"),
+            "{out}"
+        );
+    }
+
+    /// The two skip reasons mean opposite things for the reader: one is
+    /// a gap to close, the other is the design working.
+    #[test]
+    fn missed_separates_a_widening_candidate_from_a_deliberate_refusal() {
+        let records = vec![
+            rec(
+                repowise_distill::ledger::Kind::Skipped,
+                "git",
+                0,
+                0,
+                "not-rewritable",
+            ),
+            rec(
+                repowise_distill::ledger::Kind::Skipped,
+                "cargo",
+                0,
+                0,
+                "shell-syntax",
+            ),
+        ];
+        let out = render_missed(&records);
+        assert!(out.contains("not-rewritable"), "{out}");
+        assert!(out.contains("shell-syntax"), "{out}");
+        assert!(out.contains("candidate for widening"), "{out}");
+        assert!(
+            out.contains("deliberate and will never be"),
+            "shell-syntax skips must not read as a coverage gap:\n{out}"
+        );
     }
 }

@@ -857,6 +857,17 @@ struct AnswerOutput {
     /// Present only when retrieval degraded to keyword matching.
     #[serde(skip_serializing_if = "Option::is_none")]
     retrieval_caveat: Option<String>,
+    /// How many files' vectors came from the persisted embedding index
+    /// vs. were embedded fresh for this call, in `semantic` mode only.
+    ///
+    /// A performance fact, not a caveat: whatever the stored index
+    /// doesn't cover is embedded on the spot, so coverage at answer time
+    /// is always complete regardless of these numbers. Absent for
+    /// `keyword` mode, where no vectors are involved at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vectors_reused: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vectors_embedded_now: Option<usize>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -1542,7 +1553,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_answer",
-        description = "Answer a natural-language question about this codebase, with citations. Retrieves relevant files by embedding similarity, then answers from them. Requires an LLM endpoint (REPOWISE_LLM_BASE_URL); reports `available: false` with a reason when unconfigured rather than guessing. NOTE: retrieval re-embeds the whole index on every call, so this is a considered question tool, not a cheap lookup -- use search_codebase for finding things by name."
+        description = "Answer a natural-language question about this codebase, with citations. Retrieves relevant files by embedding similarity, then answers from them. Requires an LLM endpoint (REPOWISE_LLM_BASE_URL); reports `available: false` with a reason when unconfigured rather than guessing. Reuses vectors from the persisted embedding index (built by `init`/`update`) and embeds only the files it doesn't cover, in one batched call alongside the question -- coverage is always complete regardless of how much of the index that call had to fill in, so there's a `vectors_reused`/`vectors_embedded_now` split (semantic mode only) but no caveat to go with it. Still a considered-question tool rather than a cheap lookup -- use search_codebase for finding things by name."
     )]
     fn get_answer(
         &self,
@@ -1574,6 +1585,8 @@ impl RepowiseServer {
                     cited: Vec::new(),
                     retrieval_mode: String::new(),
                     retrieval_caveat: None,
+                    vectors_reused: None,
+                    vectors_embedded_now: None,
                 },
                 &index,
                 started,
@@ -1597,6 +1610,8 @@ impl RepowiseServer {
                 cited: retrieval.cited,
                 retrieval_mode: retrieval.mode.label().to_string(),
                 retrieval_caveat: retrieval.mode.caveat().map(str::to_string),
+                vectors_reused: retrieval.vectors.map(|v| v.reused),
+                vectors_embedded_now: retrieval.vectors.map(|v| v.embedded_now),
             },
             &index,
             started,

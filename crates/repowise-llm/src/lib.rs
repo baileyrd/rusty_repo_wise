@@ -45,13 +45,15 @@
 //! support embeddings at all).
 //!
 //! [`embedding_index`] adds the persistence that was missing, so
-//! `repowise search --mode semantic` and the `search_codebase` MCP tool
-//! embed only the query rather than the whole corpus. It is a *separate*
-//! path from [`retrieval`]: chat retrieval still re-embeds per call.
-//! Pointing it at the stored index isn't a wire-up, because the stored
-//! index can be partially covered, and grounding an answer in a subset
-//! of the repo while its citations look complete is exactly the failure
-//! [`retrieval`] exists to avoid. That decision is a follow-up.
+//! `repowise search --mode semantic`, the `search_codebase` MCP tool,
+//! and now [`retrieval`] itself all read stored vectors rather than
+//! re-embedding the corpus. [`retrieval`] tops up in memory rather than
+//! treating partial coverage as a caveat: whatever the stored index
+//! doesn't cover is embedded alongside the question in the same call, so
+//! coverage at answer time is always complete and there is nothing left
+//! to warn about (see [`retrieval`]'s own module doc for why that beats
+//! reporting the gap instead of closing it, and why nothing gets written
+//! back to the stored index).
 
 pub mod decision_proposals;
 pub mod embedding_index;

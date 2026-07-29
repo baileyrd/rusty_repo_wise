@@ -20,15 +20,14 @@
 //! `REPOWISE_LLM_BASE_URL` isn't set, same opt-in convention every other
 //! LLM feature in this port uses.
 //!
-//! [`build_chat_context_with_embeddings`] is issue #63's real semantic
-//! retrieval: embeds the question and every indexed file's symbol list
-//! via `repowise_llm::embed`, ranks by cosine similarity, and takes the
-//! top [`CHAT_CONTEXT_LIMIT`]. Falls back to the original keyword-
-//! substring [`build_chat_context`] if the embeddings call itself fails
-//! (e.g. an endpoint that doesn't implement `/v1/embeddings`), so a
-//! chat reply is never blocked by that. No vector index or persistence
-//! -- every chat call re-embeds the whole corpus in one batched
-//! request, an honest cost/latency tradeoff for a first slice.
+//! Retrieval itself moved to `repowise_llm::retrieval` (PR #306) so this
+//! endpoint and the `get_answer` MCP tool share one implementation and
+//! can't drift. It embeds the question against `repowise-llm`'s
+//! persisted embedding index, embedding only the files that index
+//! doesn't already cover (#308) -- falling back to keyword-substring
+//! matching if the embeddings call itself fails (e.g. an endpoint that
+//! doesn't implement `/v1/embeddings`), so a chat reply is never blocked
+//! by that.
 //!
 //! `/api/search` stays substring-only (no embeddings there -- an API
 //! call per keystroke would make instant search not instant) but is
@@ -681,6 +680,14 @@ struct ChatResponseDto {
     /// for the answer above it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     retrieval_caveat: Option<String>,
+    /// Files whose vectors were reused from the persisted embedding
+    /// index vs. embedded fresh for this call. `semantic` mode only --
+    /// coverage is always complete either way, so this is shown as a
+    /// performance fact rather than a caveat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vectors_reused: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vectors_embedded_now: Option<usize>,
 }
 
 /// A read-only snapshot of this server's current configuration and
@@ -1416,6 +1423,8 @@ async fn post_chat(
             cited: Vec::new(),
             retrieval_mode: String::new(),
             retrieval_caveat: None,
+            vectors_reused: None,
+            vectors_embedded_now: None,
         }));
     };
 
@@ -1463,6 +1472,8 @@ async fn post_chat(
         cited: retrieval.cited,
         retrieval_mode: retrieval.mode.label().to_string(),
         retrieval_caveat: retrieval.mode.caveat().map(str::to_string),
+        vectors_reused: retrieval.vectors.map(|v| v.reused),
+        vectors_embedded_now: retrieval.vectors.map(|v| v.embedded_now),
     }))
 }
 
@@ -3666,6 +3677,123 @@ mod tests {
             json["cited"][0], "busy.rs",
             "the answer's sources must come back structured, not only inside the prompt"
         );
+    }
+
+    /// Two real, parsed files -- a persisted embedding index can cover
+    /// one and leave the other for top-up, which a single-file fixture
+    /// can't exercise.
+    fn index_with_two_files(root: &Path) -> RepoIndex {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/auth.rs"),
+            "pub fn validate_token() -> bool { true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/config.rs"),
+            "pub fn load_config() -> u8 { 0 }\n",
+        )
+        .unwrap();
+        let index = repowise_parser::build_index(root).unwrap();
+        index.save(root).unwrap();
+        index
+    }
+
+    /// `/api/chat` must reuse the persisted embedding index rather than
+    /// re-embedding everything -- the behavior #308 added. Verified by
+    /// inspecting the actual embeddings request (via `ChatFixtureServer`,
+    /// which already records raw request bytes for the keyword-fallback
+    /// test above), not just the response, since a wrong document count
+    /// still gets a same-shaped response back.
+    #[tokio::test]
+    async fn post_chat_reuses_the_stored_embedding_index_and_reports_the_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_two_files(&root);
+        let auth = index
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("auth.rs"))
+            .unwrap();
+
+        let mut stored = repowise_llm::EmbeddingIndex::new("embed");
+        stored.entries.insert(
+            repowise_llm::embedding_index::document_key(&repowise_llm::embedding_index::document(
+                &root, auth,
+            )),
+            vec![1.0, 0.0],
+        );
+        stored.save(&root).unwrap();
+
+        // Question + exactly one file (config.rs, the uncovered one),
+        // so exactly two vectors come back.
+        let embeddings_response =
+            r#"{"data": [{"embedding": [1.0, 0.0]}, {"embedding": [0.2, 0.1]}]}"#;
+        let chat_response = r#"{"choices": [{"message": {"role": "assistant", "content": "Auth checks a token."}}]}"#;
+        let server = ChatFixtureServer::start_sequence(vec![embeddings_response, chat_response]);
+        let config = repowise_llm::LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
+            api_key: None,
+        };
+
+        let router = app_with_llm_config(root.clone(), Some(config));
+        let (status, json) = post_json(
+            router,
+            "/api/chat",
+            serde_json::json!({"history": [{"role": "user", "content": "how does auth work"}]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["retrieval_mode"], "semantic");
+        assert_eq!(json["vectors_reused"], 1);
+        assert_eq!(json["vectors_embedded_now"], 1);
+        // No caveat: coverage is complete either way, so there is
+        // nothing here for a caveat to warn about.
+        assert!(json["retrieval_caveat"].is_null());
+
+        let embed_request = &server.requests()[0];
+        let config_doc = repowise_llm::embedding_index::document(
+            &root,
+            index
+                .files
+                .iter()
+                .find(|f| f.path.ends_with("config.rs"))
+                .unwrap(),
+        );
+        let auth_doc = repowise_llm::embedding_index::document(&root, auth);
+        assert!(
+            embed_request.contains(&config_doc.replace('\n', "\\n")),
+            "config.rs has no stored vector and must be embedded: {embed_request}"
+        );
+        assert!(
+            !embed_request.contains(&auth_doc.replace('\n', "\\n")),
+            "auth.rs was already in the stored index and must not be re-embedded: {embed_request}"
+        );
+    }
+
+    /// The unconfigured and keyword-fallback responses must carry no
+    /// vector counts -- `null`, not `0`, since no vectors were involved
+    /// at all rather than an index that covered nothing.
+    #[tokio::test]
+    async fn chat_responses_without_semantic_retrieval_carry_no_vector_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app_with_llm_config(root, None);
+        let (status, json) = post_json(
+            router,
+            "/api/chat",
+            serde_json::json!({"history": [{"role": "user", "content": "anything"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert!(json["vectors_reused"].is_null());
+        assert!(json["vectors_embedded_now"].is_null());
     }
 
     /// Like `get`, but drives an already-built `Router` instead of

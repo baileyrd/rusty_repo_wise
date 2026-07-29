@@ -157,6 +157,47 @@ impl RepowiseServer {
         Ok((index, graph, false))
     }
 
+    /// Record a tool response against the files it covered, for
+    /// `repowise saved`'s modelled estimate.
+    ///
+    /// `covered` is the set of files the answer described. Their total
+    /// on-disk size is the baseline: what reading them instead would
+    /// have cost. That is a **counterfactual** -- the caller might have
+    /// read only part of them, or might have read more -- but it is
+    /// grounded in real file sizes rather than invented, and every
+    /// surface that reports it labels it as modelled.
+    ///
+    /// Only called for tools whose covered-file set is unambiguous.
+    /// `get_overview` and `search_codebase` answer *about* the repo
+    /// rather than about a knowable set of files, so there is no
+    /// defensible baseline for them and none is recorded -- an
+    /// estimate with an arbitrary denominator would be worse than no
+    /// estimate.
+    ///
+    /// Best-effort throughout: accounting must never be able to fail a
+    /// tool call.
+    fn record_savings(&self, tool: &str, covered: &[PathBuf], response: &impl Serialize) {
+        let baseline: u64 = covered
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .sum();
+        if baseline == 0 {
+            // Nothing readable behind the answer means no baseline to
+            // compare against. Recording a zero would drag the reported
+            // ratio toward "saved nothing" for reasons unrelated to the
+            // tool's behavior.
+            return;
+        }
+        let Ok(body) = serde_json::to_string(response) else {
+            return;
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let dir = repowise_distill::store::store_dir(&self.root, home.as_deref());
+        repowise_distill::ledger::record_mcp_response(&dir, tool, baseline as usize, body.len());
+    }
+
     /// Wrap a payload from a tool that answered **from the index**, so
     /// the response carries that index's provenance and freshness.
     fn indexed<T>(
@@ -947,19 +988,18 @@ impl RepowiseServer {
             })
             .collect();
 
-        Ok(self.indexed(
-            ContextOutput {
-                file: display_rel(&target, &index.root),
-                symbols,
-                dependencies,
-                dependents,
-                health_score: file_health,
-                health_findings,
-            },
-            &index,
-            started,
-            cached,
-        ))
+        let output = ContextOutput {
+            file: display_rel(&target, &index.root),
+            symbols,
+            dependencies,
+            dependents,
+            health_score: file_health,
+            health_findings,
+        };
+        // The baseline: reading this file instead of asking for its
+        // context. One file, unambiguous.
+        self.record_savings("get_context", std::slice::from_ref(&target), &output);
+        Ok(self.indexed(output, &index, started, cached))
     }
 
     #[tool(
@@ -1074,20 +1114,19 @@ impl RepowiseServer {
             .clamp(1, end_line.max(1));
         let snippet = lines[(start_line - 1)..end_line].join("\n");
 
-        Ok(self.indexed(
-            GetSymbolOutput {
-                id: sym.id.clone(),
-                name: sym.name.clone(),
-                kind: sym.kind.label().to_string(),
-                file: display_rel(&sym.file, &index.root),
-                start_line,
-                end_line,
-                source: snippet,
-            },
-            &index,
-            started,
-            cached,
-        ))
+        let file = sym.file.clone();
+        let output = GetSymbolOutput {
+            id: sym.id.clone(),
+            name: sym.name.clone(),
+            kind: sym.kind.label().to_string(),
+            file: display_rel(&sym.file, &index.root),
+            start_line,
+            end_line,
+            source: snippet,
+        };
+        // The baseline: reading the whole file to get at one symbol.
+        self.record_savings("get_symbol", std::slice::from_ref(&file), &output);
+        Ok(self.indexed(output, &index, started, cached))
     }
 
     #[tool(

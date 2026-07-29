@@ -1009,11 +1009,17 @@ fn render_saved(records: &[repowise_distill::ledger::Record], by: &str) -> Strin
         .collect();
 
     if distilled.is_empty() {
-        return "No distillations recorded yet.\n\
-                This counts only what `repowise distill` actually ran -- \
-                if you haven't wrapped a command\n\
-                (or installed the rewrite hook), there is nothing to measure.\n"
-            .to_string();
+        let mut out = String::from(
+            "No distillations recorded yet.\n\
+             This counts only what `repowise distill` actually ran -- \
+             if you haven't wrapped a command\n\
+             (or installed the rewrite hook), there is nothing to measure.\n",
+        );
+        // A ledger can hold MCP records and no distillations. Suppressing
+        // the estimate here would hide real data behind an unrelated
+        // empty state.
+        out.push_str(&render_mcp_estimate(records));
+        return out;
     }
 
     let raw: usize = distilled.iter().map(|r| r.raw_bytes).sum();
@@ -1067,11 +1073,107 @@ fn render_saved(records: &[repowise_distill::ledger::Record], by: &str) -> Strin
          approximate -- bytes/4, with no model-specific tokenizer -- so treat them\n\
          as an order of magnitude, not an invoice.\n",
     );
+    out.push_str(&render_mcp_estimate(records));
+    out
+}
+
+/// The MCP block: a **modelled** estimate, reported separately from
+/// everything above it.
+///
+/// Kept in its own function and its own section on purpose. The measured
+/// totals are bytes that actually moved; this is a counterfactual, and
+/// the two must never appear as one number. `Record::is_measured` is the
+/// structural half of that guarantee -- this is the presentational half:
+/// its own heading, its own totals, and the model stated inline so the
+/// figure can be argued with rather than just believed.
+fn render_mcp_estimate(records: &[repowise_distill::ledger::Record]) -> String {
+    use repowise_distill::ledger::{approx_tokens, Kind};
+    use std::collections::BTreeMap;
+
+    let mcp: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == Kind::McpResponse)
+        .collect();
+
+    if mcp.is_empty() {
+        return "\nMCP tool responses: none recorded.\n\
+                Recorded only for tools whose covered-file set is unambiguous \
+                (`get_context`,\n\
+                `get_symbol`). Nothing recorded means the server hasn't served \
+                those, not that\n\
+                they saved nothing.\n"
+            .to_string();
+    }
+
+    let baseline: usize = mcp.iter().map(|r| r.raw_bytes).sum();
+    let responses: usize = mcp.iter().map(|r| r.kept_bytes).sum();
+    let avoided: usize = mcp.iter().map(|r| r.saved_bytes()).sum();
+
+    let mut groups: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for r in &mcp {
+        let entry = groups.entry(r.program.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += r.saved_bytes();
+    }
+
+    // Calls where the curated answer was BIGGER than the files it
+    // described. `saved_bytes` saturates at zero, so without counting
+    // these separately the report would quietly round a loss up to
+    // "saved nothing" -- flattering the very number that most needs to
+    // be trustworthy.
+    let costlier: Vec<_> = mcp.iter().filter(|r| r.kept_bytes > r.raw_bytes).collect();
+    let overhead: usize = costlier
+        .iter()
+        .map(|r| r.kept_bytes.saturating_sub(r.raw_bytes))
+        .sum();
+
+    let mut out = String::from("\nMCP tool responses -- ESTIMATED, not measured\n\n");
+    out.push_str(&format!(
+        "  {:<24} {:>8} {:>18}\n",
+        "tool", "calls", "~tokens avoided"
+    ));
+    for (tool, (calls, bytes)) in &groups {
+        out.push_str(&format!(
+            "  {:<24} {:>8} {:>18}\n",
+            tool,
+            calls,
+            approx_tokens(*bytes)
+        ));
+    }
+    out.push_str(&format!(
+        "\n  modelled baseline: {:>10} bytes (~{} tokens)\n  \
+         actual responses:  {:>10} bytes (~{} tokens)\n  \
+         estimated avoided: {:>10} bytes (~{} tokens)\n",
+        baseline,
+        approx_tokens(baseline),
+        responses,
+        approx_tokens(responses),
+        avoided,
+        approx_tokens(avoided)
+    ));
+
+    if !costlier.is_empty() {
+        out.push_str(&format!(
+            "\n  {} of {} call(s) returned MORE than the files they described,\n  \
+             by {} bytes (~{} tokens) in total. Those are counted as zero avoided,\n  \
+             not as a negative -- but they are a real cost, not a saving.\n",
+            costlier.len(),
+            mcp.len(),
+            overhead,
+            approx_tokens(overhead)
+        ));
+    }
+
     out.push_str(
-        "\nNot counted: MCP tool responses. The reference credits those against \"the raw\n\
-         file exploration they replaced\", which is a counterfactual -- nobody knows what\n\
-         the agent would have read instead. Rather than fold a guess into a measured\n\
-         total, this port leaves it out and says so.\n",
+        "\n  The model: baseline = the total on-disk size of the files each answer\n\
+         \x20 covered, i.e. what reading them instead would have cost. Real file sizes,\n\
+         \x20 but still a counterfactual -- the caller might have read only part of a\n\
+         \x20 file, or might have read more, or might not have looked at all. Treat this\n\
+         \x20 as an upper bound on a plausible alternative, not as bytes anyone saved.\n\
+         \x20 It is deliberately NOT added to the measured totals above.\n\
+         \x20 Recorded only where the covered-file set is unambiguous: `get_overview`\n\
+         \x20 and `search_codebase` answer about the repo rather than a knowable set of\n\
+         \x20 files, so no baseline is claimed for them.\n",
     );
     out
 }
@@ -3633,10 +3735,11 @@ mod tests {
         );
     }
 
-    /// The report must say what it left out, or a reader will assume
-    /// the total covers everything distill touches.
+    /// MCP responses are now reported, but in their own labelled block.
+    /// The measured section must still say plainly that its own figures
+    /// are measured, so the two are never conflated by a skimming reader.
     #[test]
-    fn saved_states_that_mcp_responses_are_not_counted_and_why() {
+    fn saved_separates_measured_figures_from_the_mcp_estimate() {
         let records = vec![rec(
             repowise_distill::ledger::Kind::Distilled,
             "cargo",
@@ -3645,11 +3748,9 @@ mod tests {
             "",
         )];
         let out = render_saved(&records, "program");
-        assert!(out.contains("Not counted: MCP tool responses"), "{out}");
-        assert!(
-            out.contains("counterfactual"),
-            "the reason has to be there, not just the exclusion:\n{out}"
-        );
+        assert!(out.contains("Every figure above is measured"), "{out}");
+        // With no MCP records, the block says so rather than vanishing.
+        assert!(out.contains("MCP tool responses: none recorded"), "{out}");
     }
 
     #[test]
@@ -3774,5 +3875,111 @@ mod tests {
         let leaked = corrections_block_body(&[fumble("mytool", 1, vec![1])]);
         assert!(leaked.contains("`mytool`"));
         assert!(!leaked.contains("http"), "{leaked}");
+    }
+
+    fn mcp_rec(tool: &str, baseline: usize, response: usize) -> repowise_distill::ledger::Record {
+        repowise_distill::ledger::Record {
+            at: 1_700_000_000,
+            kind: repowise_distill::ledger::Kind::McpResponse,
+            program: tool.to_string(),
+            raw_bytes: baseline,
+            kept_bytes: response,
+            detail: String::new(),
+            exit_code: None,
+        }
+    }
+
+    /// The guarantee the whole design rests on: a modelled figure must
+    /// never land in a total that claims to be measured.
+    #[test]
+    fn the_modelled_estimate_is_never_added_to_the_measured_total() {
+        let records = vec![
+            rec(
+                repowise_distill::ledger::Kind::Distilled,
+                "cargo",
+                4000,
+                400,
+                "",
+            ),
+            mcp_rec("get_symbol", 900_000, 500),
+        ];
+        let out = render_saved(&records, "program");
+
+        // 3600 measured, and the huge modelled number must not appear
+        // anywhere in the measured section.
+        let measured_section = out.split("MCP tool responses").next().unwrap();
+        assert!(measured_section.contains("3600"), "{measured_section}");
+        assert!(
+            !measured_section.contains("899500") && !measured_section.contains("900000"),
+            "the modelled baseline leaked into the measured block:\n{measured_section}"
+        );
+    }
+
+    #[test]
+    fn the_estimate_block_labels_itself_and_states_its_model() {
+        let out = render_saved(
+            &[
+                rec(
+                    repowise_distill::ledger::Kind::Distilled,
+                    "cargo",
+                    100,
+                    10,
+                    "",
+                ),
+                mcp_rec("get_context", 8000, 800),
+            ],
+            "program",
+        );
+        assert!(out.contains("ESTIMATED, not measured"), "{out}");
+        assert!(out.contains("counterfactual"), "{out}");
+        assert!(out.contains("NOT added to the measured totals"), "{out}");
+        assert!(
+            out.contains("upper bound"),
+            "the estimate must not read as a floor or an exact figure:\n{out}"
+        );
+    }
+
+    /// A response bigger than the files it described is a real cost.
+    /// `saved_bytes` saturates at zero, so without this the report would
+    /// round a loss up to "saved nothing".
+    #[test]
+    fn a_response_larger_than_its_baseline_is_reported_as_a_cost() {
+        let out = render_mcp_estimate(&[mcp_rec("get_context", 500, 9000)]);
+        assert!(
+            out.contains("returned MORE than the files they described"),
+            "{out}"
+        );
+        assert!(out.contains("8500"), "{out}");
+        assert!(out.contains("a real cost, not a saving"), "{out}");
+    }
+
+    #[test]
+    fn no_cost_warning_when_every_call_saved() {
+        let out = render_mcp_estimate(&[mcp_rec("get_symbol", 9000, 500)]);
+        assert!(!out.contains("returned MORE"), "{out}");
+    }
+
+    /// Nothing recorded means the server hasn't served those tools --
+    /// not that they saved nothing.
+    #[test]
+    fn an_empty_estimate_says_nothing_was_recorded_not_nothing_was_saved() {
+        let out = render_mcp_estimate(&[]);
+        assert!(out.contains("none recorded"), "{out}");
+        assert!(
+            out.contains("not that\nthey saved nothing") || out.contains("not that"),
+            "{out}"
+        );
+    }
+
+    /// A ledger holding only MCP records must still show them, rather
+    /// than being swallowed by the no-distillations empty state.
+    #[test]
+    fn mcp_records_survive_an_empty_distillation_ledger() {
+        let out = render_saved(&[mcp_rec("get_symbol", 9000, 500)], "program");
+        assert!(out.contains("No distillations recorded"), "{out}");
+        assert!(
+            out.contains("get_symbol"),
+            "an MCP-only ledger must still report its estimate:\n{out}"
+        );
     }
 }

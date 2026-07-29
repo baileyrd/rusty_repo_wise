@@ -235,7 +235,7 @@ fn diagnostics_reports_a_cross_repo_path_hit_with_a_different_method_as_a_mismat
         )],
     );
 
-    let diag = repowise_workspace::workspace_diagnostics(&vec![server, client]);
+    let diag = repowise_workspace::workspace_diagnostics(&[server, client]);
 
     assert_eq!(
         diag.unmatched_consumers.len(),
@@ -275,7 +275,7 @@ fn diagnostics_names_repos_it_could_not_read() {
     )
     .unwrap();
 
-    let diag = repowise_workspace::workspace_diagnostics(&vec![
+    let diag = repowise_workspace::workspace_diagnostics(&[
         indexed,
         ResolvedWorkspaceRepo {
             name: "never".to_string(),
@@ -320,7 +320,7 @@ fn diagnostics_reports_producers_nothing_calls() {
         )],
     );
 
-    let diag = repowise_workspace::workspace_diagnostics(&vec![server, client]);
+    let diag = repowise_workspace::workspace_diagnostics(&[server, client]);
 
     let orphans: Vec<_> = diag
         .orphan_producers

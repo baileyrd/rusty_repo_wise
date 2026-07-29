@@ -41,6 +41,10 @@
 //! (see `repowise-server`'s own module doc for the fallback behavior
 //! when an endpoint doesn't support embeddings at all).
 
+pub mod retrieval;
+
+pub use retrieval::{retrieve, Retrieval, RetrievalMode};
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

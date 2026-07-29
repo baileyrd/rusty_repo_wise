@@ -621,6 +621,18 @@ struct ChatResponseDto {
     /// `reply` is `None` in that case.
     available: bool,
     reply: Option<String>,
+    /// Repo-relative files the answer drew on. Empty means the answer
+    /// came from no sources -- worth showing, since an ungrounded answer
+    /// and a well-sourced one look identical otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cited: Vec<String>,
+    /// `semantic` or `keyword`. The latter is the degraded fallback.
+    #[serde(default)]
+    retrieval_mode: String,
+    /// Present only when retrieval degraded, explaining what that means
+    /// for the answer above it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retrieval_caveat: Option<String>,
 }
 
 /// A read-only snapshot of this server's current configuration and
@@ -637,163 +649,6 @@ struct SettingsDto {
     wiki_pages_available: bool,
     llm_configured: bool,
     llm_model: Option<String>,
-}
-
-/// How many keyword-matched files/symbols to inject as grounding
-/// context -- enough to be useful, short enough to stay a small
-/// fraction of the LLM's context window.
-const CHAT_CONTEXT_LIMIT: usize = 10;
-
-/// A lightweight, non-embeddings "RAG" pass: split the latest user
-/// message into words, substring-match them against indexed file paths
-/// and symbol names (the same technique `/api/search` uses), and hand
-/// the LLM whatever turns up. Real semantic retrieval is issue #63's
-/// job; this is deliberately simple and fully deterministic.
-fn build_chat_context(root: &Path, index: &RepoIndex, question: &str) -> String {
-    let mut context = String::from(
-        "You are a helpful assistant answering questions about a codebase. \
-         Base your answers only on the information below; if you don't have \
-         enough information to answer, say so rather than guessing.\n\n",
-    );
-    context.push_str(&format!(
-        "This repo has {} indexed file(s).\n",
-        index.files.len()
-    ));
-
-    let words: Vec<String> = question
-        .split(|c: char| !c.is_alphanumeric())
-        .map(|w| w.to_lowercase())
-        .filter(|w| w.len() > 2)
-        .collect();
-
-    let mut matches = Vec::new();
-    if !words.is_empty() {
-        for file in &index.files {
-            let rel = relative(root, &file.path);
-            let rel_lower = rel.to_lowercase();
-            if words.iter().any(|w| rel_lower.contains(w.as_str())) {
-                matches.push(format!("File: {rel}"));
-            }
-            for sym in &file.symbols {
-                let name_lower = sym.name.to_lowercase();
-                if words.iter().any(|w| name_lower.contains(w.as_str())) {
-                    matches.push(format!(
-                        "Symbol: {} ({}) in {rel}:{}",
-                        sym.name,
-                        sym.kind.label(),
-                        sym.start_line
-                    ));
-                }
-            }
-        }
-    }
-    matches.truncate(CHAT_CONTEXT_LIMIT);
-
-    if matches.is_empty() {
-        context.push_str("\nNo specific files or symbols matched keywords in the question.\n");
-    } else {
-        context.push_str(
-            "\nPossibly relevant, found via keyword search over file paths and symbol names:\n",
-        );
-        for m in &matches {
-            context.push_str(&format!("- {m}\n"));
-        }
-    }
-    context
-}
-
-/// A per-file text unit for embedding: this port's index stores
-/// structural metadata (symbols/imports/calls), not raw source, so the
-/// file's path and symbol list is the closest thing to a "document" it
-/// has to offer -- the same information `build_chat_context`'s keyword
-/// pass already matches against.
-fn file_document(root: &Path, file: &repowise_core::FileRecord) -> String {
-    let rel = relative(root, &file.path);
-    let mut doc = format!("File: {rel}\n");
-    for sym in &file.symbols {
-        doc.push_str(&format!("- {} ({})\n", sym.name, sym.kind.label()));
-    }
-    doc
-}
-
-/// Issue #63's real semantic retrieval: embeds the question and every
-/// indexed file's [`file_document`] in one batched call, ranks files by
-/// [`repowise_llm::cosine_similarity`], and takes the top
-/// `CHAT_CONTEXT_LIMIT`. No vector index or persistence -- every chat
-/// call re-embeds the whole corpus, an honest cost/latency tradeoff for
-/// a first slice (a large repo would want to cache these, tied to the
-/// reindex job, as a follow-up). Returns `Ok(None)` only for an empty
-/// index; any embeddings-call failure (a bad response, or an endpoint
-/// that doesn't implement `/v1/embeddings` at all) propagates as `Err`
-/// for the caller to fall back to keyword search on.
-fn embed_and_rank_context(
-    root: &Path,
-    index: &RepoIndex,
-    question: &str,
-    config: &repowise_llm::LlmConfig,
-) -> anyhow::Result<Option<String>> {
-    if index.files.is_empty() {
-        return Ok(None);
-    }
-
-    let mut inputs = vec![question.to_string()];
-    inputs.extend(index.files.iter().map(|f| file_document(root, f)));
-    let embeddings = repowise_llm::embed(config, &inputs)?;
-    let mut embeddings = embeddings.into_iter();
-    let question_embedding = embeddings
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("embeddings response was empty"))?;
-
-    let mut scored: Vec<(f32, &repowise_core::FileRecord)> = index
-        .files
-        .iter()
-        .zip(embeddings)
-        .map(|(file, embedding)| {
-            (
-                repowise_llm::cosine_similarity(&question_embedding, &embedding),
-                file,
-            )
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(CHAT_CONTEXT_LIMIT);
-
-    let mut context = String::from(
-        "You are a helpful assistant answering questions about a codebase. \
-         Base your answers only on the information below; if you don't have \
-         enough information to answer, say so rather than guessing.\n\n",
-    );
-    context.push_str(&format!(
-        "This repo has {} indexed file(s).\n",
-        index.files.len()
-    ));
-    context.push_str(
-        "\nPossibly relevant, found via semantic (embedding) search over indexed files:\n",
-    );
-    for (score, file) in &scored {
-        let rel = relative(root, &file.path);
-        context.push_str(&format!("- File: {rel} (similarity {score:.2})\n"));
-        for sym in &file.symbols {
-            context.push_str(&format!("  - {} ({})\n", sym.name, sym.kind.label()));
-        }
-    }
-    Ok(Some(context))
-}
-
-/// Builds the chat system prompt via embeddings-based retrieval, falling
-/// back to the keyword-search [`build_chat_context`] if the embeddings
-/// call itself fails -- a chat reply should never be blocked just
-/// because the configured endpoint doesn't support `/v1/embeddings`.
-fn build_chat_context_with_embeddings(
-    root: &Path,
-    index: &RepoIndex,
-    question: &str,
-    config: &repowise_llm::LlmConfig,
-) -> String {
-    match embed_and_rank_context(root, index, question, config) {
-        Ok(Some(context)) => context,
-        _ => build_chat_context(root, index, question),
-    }
 }
 
 struct ApiError(anyhow::Error);
@@ -1502,6 +1357,9 @@ async fn post_chat(
         return Ok(Json(ChatResponseDto {
             available: false,
             reply: None,
+            cited: Vec::new(),
+            retrieval_mode: String::new(),
+            retrieval_caveat: None,
         }));
     };
 
@@ -1523,14 +1381,18 @@ async fn post_chat(
         })
         .collect();
 
-    let (reply, usage) = tokio::task::spawn_blocking(move || {
-        let context = build_chat_context_with_embeddings(&root, &index, &question, &config);
-        let mut turns = vec![repowise_llm::Turn::system(context)];
+    let (completion, retrieval) = tokio::task::spawn_blocking(move || {
+        let retrieval = repowise_llm::retrieve(&root, &index, &question, &config);
+        let mut turns = vec![repowise_llm::Turn::system(retrieval.context.clone())];
         turns.extend(history);
-        repowise_llm::complete_messages_with_usage(&config, &turns)
+        (
+            repowise_llm::complete_messages_with_usage(&config, &turns),
+            retrieval,
+        )
     })
     .await
-    .map_err(anyhow::Error::from)??;
+    .map_err(anyhow::Error::from)?;
+    let (reply, usage) = completion?;
 
     if let Some(usage) = usage {
         state.usage.record(usage);
@@ -1539,6 +1401,12 @@ async fn post_chat(
     Ok(Json(ChatResponseDto {
         available: true,
         reply: Some(reply),
+        // Surfaced so the dashboard can show sources and flag a degraded
+        // retrieval, rather than presenting every answer as equally
+        // grounded.
+        cited: retrieval.cited,
+        retrieval_mode: retrieval.mode.label().to_string(),
+        retrieval_caveat: retrieval.mode.caveat().map(str::to_string),
     }))
 }
 
@@ -2848,79 +2716,6 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    #[test]
-    fn build_chat_context_includes_keyword_matched_symbols() {
-        let root = PathBuf::from("/repo");
-        let file = root.join("busy.rs");
-        let index = RepoIndex {
-            root: root.clone(),
-            files: vec![repowise_core::FileRecord {
-                path: file.clone(),
-                language: repowise_core::Language::Rust,
-                lines: 1,
-                symbols: vec![repowise_core::Symbol {
-                    id: "busy.rs::busy::1".to_string(),
-                    name: "busy".to_string(),
-                    kind: repowise_core::SymbolKind::Function,
-                    file: file.clone(),
-                    start_line: 1,
-                    end_line: 1,
-                    parent: None,
-                    complexity: 1,
-                    max_nesting_depth: 0,
-                    bumpy_road_bumps: 0,
-                    complex_conditionals: Vec::new(),
-                    io_in_loop: Vec::new(),
-                    string_concat_in_loop: Vec::new(),
-                    resource_construction_in_loop: Vec::new(),
-                    lock_in_loop: Vec::new(),
-                    list_insert_zero_in_loop: Vec::new(),
-                    json_parse_in_loop: Vec::new(),
-                    regex_compile_in_loop: Vec::new(),
-                    nested_loop_with_io: Vec::new(),
-                    nested_loop_quadratic: Vec::new(),
-                    serial_await_in_loop: Vec::new(),
-                    pd_concat_in_loop: Vec::new(),
-                    blocking_sync_in_async: Vec::new(),
-                    blocking_io_under_lock: Vec::new(),
-                    array_spread_in_reduce: Vec::new(),
-                    sql_cartesian_join: Vec::new(),
-                    defer_in_loop: Vec::new(),
-                    goroutine_in_unbounded_loop: Vec::new(),
-                    membership_test_in_loop: Vec::new(),
-                    sync_io_calls: Vec::new(),
-                    param_count: 0,
-                    primitive_param_count: 0,
-                    body_hash: None,
-                }],
-                imports: vec![],
-                calls: vec![],
-                field_accesses: vec![],
-            }],
-            other_files: 0,
-            indexed_commit: None,
-        };
-
-        let context = build_chat_context(&root, &index, "What does busy do?");
-
-        assert!(context.contains("Symbol: busy (function) in busy.rs:1"));
-    }
-
-    #[test]
-    fn build_chat_context_notes_no_matches_for_an_unrelated_question() {
-        let root = PathBuf::from("/repo");
-        let index = RepoIndex {
-            root: root.clone(),
-            files: vec![],
-            other_files: 0,
-            indexed_commit: None,
-        };
-
-        let context = build_chat_context(&root, &index, "hello there");
-
-        assert!(context.contains("No specific files or symbols matched"));
-    }
-
     /// Same hand-rolled fixture-server approach `repowise-llm`'s own
     /// tests use: a real HTTP round trip with no mocking crate.
     /// Reads a full HTTP request off `stream`: a single `read()` call
@@ -3788,6 +3583,23 @@ mod tests {
         assert_eq!(json["available"], true);
         assert_eq!(json["reply"], "busy() lives in busy.rs.");
         assert!(server.requests()[1].contains("keyword search"));
+        // The degradation is now reported, not just silently survived:
+        // a keyword-backed answer and a semantic one are materially
+        // different in quality and the caller is entitled to know which
+        // it got.
+        assert_eq!(json["retrieval_mode"], "keyword");
+        assert!(
+            json["retrieval_caveat"]
+                .as_str()
+                .expect("a degraded retrieval must carry a caveat")
+                .contains("retrieval failure"),
+            "{}",
+            json["retrieval_caveat"]
+        );
+        assert_eq!(
+            json["cited"][0], "busy.rs",
+            "the answer's sources must come back structured, not only inside the prompt"
+        );
     }
 
     /// Like `get`, but drives an already-built `Router` instead of

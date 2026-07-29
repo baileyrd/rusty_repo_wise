@@ -208,9 +208,8 @@ generate`, see "LLM-assisted wiki summaries" below) — a first, narrow slice
 of what was previously a fully-deferred LLM tier; RAG chat and refactor-plan
 codegen remain deferred. ADR mining is also not fully ported (only 6 of the
 original's 8 decision sources are implemented —
-see "Architectural decision mining" below). The MCP server covers all but one of
-the original's ten flagship tools (`get_answer` needs an LLM), and adds
-three the original doesn't have — see "MCP server" below. The
+see "Architectural decision mining" below). The MCP server covers all ten of
+the original's flagship tools, and adds three the original doesn't have — see "MCP server" below. The
 dashboard is one static page with no per-file drill-down or live search
 — see "Dashboard" below for what a richer version would need.
 
@@ -1615,7 +1614,7 @@ Recency/confidence scoring on mined decisions is also not implemented.
 
 `repowise serve [PATH]` runs an MCP server over stdio (via the official
 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK), requiring
-a prior `repowise init`/`update`. Twelve tools are implemented, and
+a prior `repowise init`/`update`. Thirteen tools are implemented, and
 **every response carries a `_meta` block** (see "Response metadata"
 below):
 
@@ -1669,6 +1668,30 @@ below):
   by (recency-weighted) hotspot score. Degrades to zero/empty git data
   (rather than erroring) when the indexed root isn't a git repository —
   same tradeoff `repowise-dashboard`'s hotspots section already makes.
+- **`get_answer(question)`** — a natural-language question about the
+  codebase, answered from retrieved context, **with citations**. Shares
+  its retrieval with the dashboard's `POST /api/chat` (one implementation
+  in `repowise-llm`, so the two surfaces can't drift).
+  - **Opt-in.** Without `REPOWISE_LLM_BASE_URL` it returns
+    `available: false` and a reason naming the variable — and noting that
+    every other tool works without it, so an agent doesn't conclude the
+    server is broken. It never returns an empty-but-confident answer.
+  - **`cited` is the point.** Repo-relative files the answer drew on. An
+    **empty** list means the answer is ungrounded — retrieval found
+    nothing, so whatever the model said came from its priors rather than
+    from this codebase. That's the case a caller most needs to spot, and
+    the one that reads most confidently.
+  - **`retrieval_mode` says how the context was found**: `semantic`
+    (embeddings) or `keyword` (substring fallback, used when the
+    embeddings call fails). The fallback is materially weaker — it finds
+    little for a conceptually phrased question — so it carries a
+    `retrieval_caveat` telling the reader to treat a thin answer as a
+    retrieval failure rather than as evidence the codebase lacks the
+    thing. The healthy path carries no caveat, so the caveat stays worth
+    reading.
+  - **Retrieval re-embeds the whole index on every call** (no persisted
+    vector index yet — #302). This is a considered-question tool, not a
+    cheap lookup; use `search_codebase` to find things by name.
 - **`get_health(targets?, limit?)`** — the same deterministic markers as
   `repowise health`, for agents. With no `targets`, repo mode: the
   lowest-scoring files (capped by `limit`, default 20, max 50, with
@@ -1753,9 +1776,7 @@ only when the index file's mtime has changed; otherwise it reuses the
 previous load. (`get_change_risk` doesn't touch the index at all — it's
 pure `git` plumbing, same as `repowise-git`'s other functions.)
 
-Not implemented from the original's ten flagship tools: **`get_answer`**
-(one-call RAG Q&A), which needs an LLM provider this port deliberately
-doesn't have — see issue #61.
+All ten of the original's flagship tools are now implemented.
 
 ### Response metadata (`_meta`)
 

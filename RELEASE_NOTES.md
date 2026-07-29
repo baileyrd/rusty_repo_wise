@@ -6,6 +6,44 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #306 — MCP: `get_answer`
+**2026-07-29** · closes [#301](https://github.com/baileyrd/rusty_repo_wise/issues/301)
+
+- **Added the `get_answer` MCP tool.** This completes all ten of the reference's
+  flagship tools. It was the last one outstanding, and #61 had it blocked on "no
+  LLM provider" — which stopped being true two PRs before that issue was written.
+- **Retrieval moved to `repowise-llm` and is now shared.** The dashboard's
+  `POST /api/chat` and the MCP tool run the same code, so an agent asking over
+  stdio and a browser asking over HTTP can't get different answers to the same
+  question because one drifted.
+- **Citations.** The context always listed its sources *inside the prompt*;
+  nothing structured came back out. `cited` now does. An **empty** list means the
+  answer is ungrounded — retrieval found nothing, so the model answered from its
+  priors rather than from this codebase. That's the case a caller most needs to
+  spot and the one that reads most confidently.
+- **The silent fallback now announces itself.** Embedding retrieval degrades to
+  substring matching whenever the embeddings call fails. That fallback finds
+  little for a conceptually phrased question, and previously it happened
+  invisibly — a caller had no way to tell a semantic answer from a degraded one.
+  `retrieval_mode` says which ran, and the degraded path carries a caveat telling
+  the reader to treat a thin answer as a *retrieval failure* rather than as
+  evidence the codebase lacks the thing. The healthy path carries none, so the
+  caveat stays worth reading. The dashboard gets the same three fields.
+- **Unconfigured is a reported state, not an error or an empty answer.** Without
+  `REPOWISE_LLM_BASE_URL` the tool returns `available: false` with a reason
+  naming the variable — and noting every other tool works without it, so an agent
+  doesn't conclude the server is broken.
+- The tool description warns that retrieval re-embeds the whole index per call
+  (#302), so it isn't mistaken for a cheap lookup.
+- Two server unit tests were deleted rather than kept: they duplicated behaviour
+  that moved to `repowise-llm`, and near-identical tests in two crates is the
+  drift the move existed to prevent. The endpoint test now asserts the new fields.
+- 10 new tests. Verified over real MCP stdio against a stub endpoint across all
+  three paths: unconfigured, semantic (sources ranked, `auth.rs` first, no
+  caveat), and embeddings-failing (degrades to keyword, cites, and says so).
+
+---
+
 ## PR #305 — Correct the `--mode semantic` explanation
 **2026-07-29** · relates to [#302](https://github.com/baileyrd/rusty_repo_wise/issues/302)
 

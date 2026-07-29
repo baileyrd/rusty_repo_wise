@@ -42,6 +42,17 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Run a command and print a compact rendering of its output.
+    /// Noise is dropped; errors, failures and summaries always survive;
+    /// the command's exit code is preserved. Dropped content is stored
+    /// under `.repowise/omissions/` and referenced by an inline
+    /// `[repowise#<ref>]` marker -- nothing is lost, only moved. On any
+    /// problem the raw output is printed unchanged.
+    Distill {
+        /// The command and its arguments.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
     /// Write a managed block of codebase intelligence into
     /// `CLAUDE.md` (default `.claude/CLAUDE.md`), preserving everything
     /// outside the markers. A file with no repowise markers is
@@ -443,6 +454,7 @@ fn main() -> anyhow::Result<()> {
         Command::Init { path } => cmd_init(&path),
         Command::Update { path } => cmd_update(&path),
         Command::Overview { path } => cmd_overview(&path),
+        Command::Distill { command } => cmd_distill(&command),
         Command::GenerateClaudeMd {
             path,
             output,
@@ -603,6 +615,68 @@ fn cmd_overview(path: &Path) -> anyhow::Result<()> {
         for (file, count) in &overview.most_depended_on {
             println!("    {:<4} {}", count, display_path(file, &index.root));
         }
+    }
+    Ok(())
+}
+
+/// Run a command and print a distilled rendering of its output.
+///
+/// Three properties this has to preserve, all of which make it a
+/// drop-in wrapper rather than a thing you have to think about:
+///
+/// - **The exit code passes through**, so wrapping a command in a
+///   script doesn't change that script's behavior.
+/// - **stdout and stderr stay separate.** Interleaving them into one
+///   stream to filter would corrupt output for anything that pipes.
+///   They're captured, distilled, and written back to their own
+///   streams.
+/// - **Any problem prints raw.** Handled inside `repowise_distill`,
+///   but the same rule applies to the spawn itself: a command we can't
+///   run is an error about *that*, not a distillation failure.
+fn cmd_distill(command: &[String]) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("no command given"))?;
+
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run {program:?}: {e}"))?;
+
+    let cwd = std::env::current_dir()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let store =
+        repowise_distill::Store::open(repowise_distill::store::store_dir(&cwd, home.as_deref()));
+
+    let stdout_raw = String::from_utf8_lossy(&output.stdout);
+    let stderr_raw = String::from_utf8_lossy(&output.stderr);
+
+    let rendered_out = repowise_distill::render(&stdout_raw, &store);
+    let rendered_err = repowise_distill::render(&stderr_raw, &store);
+
+    if !rendered_out.text.is_empty() {
+        print!("{}", rendered_out.text);
+        if !rendered_out.text.ends_with('\n') {
+            println!();
+        }
+    }
+    if !rendered_err.text.is_empty() {
+        let mut err = std::io::stderr();
+        write!(err, "{}", rendered_err.text)?;
+        if !rendered_err.text.ends_with('\n') {
+            writeln!(err)?;
+        }
+    }
+
+    // Exit-code preservation. `std::process::exit` rather than
+    // returning Err: an anyhow error would print its own message and
+    // use its own code, which would make this wrapper visible to the
+    // script wrapping it.
+    let code = output.status.code().unwrap_or(1);
+    if code != 0 {
+        std::process::exit(code);
     }
     Ok(())
 }

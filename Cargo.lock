@@ -1038,6 +1038,7 @@ dependencies = [
  "repowise-adr",
  "repowise-core",
  "repowise-dashboard",
+ "repowise-distill",
  "repowise-docs",
  "repowise-git",
  "repowise-graph",
@@ -1072,6 +1073,14 @@ dependencies = [
  "repowise-graph",
  "repowise-health",
  "repowise-parser",
+ "tempfile",
+]
+
+[[package]]
+name = "repowise-distill"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "tempfile",
 ]
 

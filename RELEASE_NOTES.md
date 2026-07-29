@@ -6,6 +6,51 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #292 — CLI: `distill` (reversible output compaction)
+**2026-07-29** · closes [#279](https://github.com/baileyrd/rusty_repo_wise/issues/279)
+
+- **Added `repowise distill <command>`** and the new `repowise-distill` crate:
+  the filter engine, the omission store, and the marker format that `expand`,
+  `hook rewrite` and `saved` (#280–#282) all read. First of the four-issue
+  distill cluster.
+- **Reversibility is the design, not a feature.** A tool that discards output to
+  save tokens will eventually discard the one line that mattered. Every dropped
+  byte is stored *before* the marker referencing it is rendered, and the marker
+  names the exact command that brings it back — so it reads as relocation, not
+  loss. A store failure prints the original output rather than emitting a marker
+  with nothing behind it.
+- **Three non-tunable invariants**, enforced by the engine rather than trusted to
+  each filter:
+  - *Errors, failures and summaries always survive.* The engine re-checks its own
+    output and re-admits anything error-classified, so a buggy filter can't
+    violate this. A test asserts it against **every** marker in the table, not a
+    sample.
+  - *Any problem degrades to raw output.* Same fail-open posture `doctor` takes
+    with `Warn` vs `Fail`: a bug must produce "no compaction", never "wrong
+    output".
+  - *Net-positive only.* If the rendering isn't smaller once the marker is
+    counted, the original prints unchanged.
+- **Exit codes pass through**, so wrapping a command in a script doesn't change
+  that script's behavior. **stdout and stderr stay separate** — interleaving them
+  to filter would corrupt output for anything that pipes.
+- **Plain files, not SQLite.** The reference uses a SQLite sidecar; this port has
+  no such dependency and the access pattern is `put(bytes) -> key` /
+  `get(key) -> bytes`, which is what a filesystem already is. Because retrieval
+  is by filename, the hash never needs recomputing — so `DefaultHasher` (already
+  this repo's content-addressing choice) suffices without a crypto-hash crate.
+- **Store growth is bounded from day one**: 7-day TTL plus a 50 MB cap, pruned
+  opportunistically on write. The just-written entry is never evicted, so a
+  freshly printed marker can't dangle.
+- A ref that isn't found reports *why* — malformed vs. evicted — because those
+  need different responses from the reader. Refs are validated as 12 hex digits
+  before touching the filesystem, so a crafted ref can't escape the store
+  directory.
+- 22 new tests. Verified live: exit code 3 preserved, a failure buried in a
+  60-line pass parade surviving, streams staying separate, and a real
+  `cargo test` run going from 35 lines to 9 plus a marker.
+
+---
+
 ## PR #291 — CLI: `generate-claude-md`
 **2026-07-29** · closes [#278](https://github.com/baileyrd/rusty_repo_wise/issues/278)
 

@@ -6,6 +6,40 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #297 — CLI: `watch`
+**2026-07-29** · closes [#284](https://github.com/baileyrd/rusty_repo_wise/issues/284)
+
+- **Added `repowise watch [PATH] [--debounce MS] [-v]`** — debounced file-watch
+  re-indexing. The post-commit hook keeps the index fresh *per commit*; this
+  keeps it fresh *per save*. Final issue of parity round 3.
+- **New dependency: `notify` 8.** Authorized as part of taking round 3's full
+  scope. Pinned to the latest stable major — 9.x is a release candidate and
+  isn't something to ship. Its 27 transitive deps are almost entirely
+  platform-gated backends (inotify / kqueue / windows-sys), so only one set
+  builds on any given target.
+- **Drives `update`, not LLM generation.** The reference's `watch` regenerates
+  wiki prose; this stays in the deterministic tier, so it costs nothing to leave
+  running.
+- **Found and fixed a real self-trigger loop by running it.** The issue warned
+  the watcher would re-index off its own *writes*; excluding `.repowise/` and
+  `.git/` handles that. What actually happened was subtler and worse: a
+  re-index **reads every file in the repo**, and inotify reports each read as an
+  `Access` event on an ordinary source path. Path filtering cannot catch it —
+  those are exactly the paths being watched. The first live run re-indexed 11
+  times in 9 seconds, most of them while completely idle. Fixed by filtering on
+  event kind, with `is_content_change` split out and tested directly. Verified
+  after: **exactly one** re-index for one edit, silence while idle.
+- **A dying watcher is loud.** inotify watch limits can be exhausted on a large
+  repo, after which the process still looks alive while the index silently goes
+  stale — the worst outcome, since the user believes staleness is impossible
+  while this runs. Watcher errors exit non-zero and name the likely cause.
+- Path matching is by component, not substring, so a repo living under something
+  like `~/.git-backups/` is still watchable.
+- 11 new tests. Verified live: 10 rapid saves coalesced into one re-index, a new
+  file picked up (index went 1 → 2 files), and git churn ignored throughout.
+
+---
+
 ## PR #296 — CLI: `corrections`
 **2026-07-29** · closes [#283](https://github.com/baileyrd/rusty_repo_wise/issues/283)
 

@@ -311,6 +311,7 @@ repowise expand <ref> [-q PAT]     # restore the output behind a [repowise#<ref>
 repowise hook rewrite install|uninstall|status  # route recognized commands through distill automatically
 repowise saved [--by program|day] [--missed]    # measured distillation savings; --missed shows what the hook let past
 repowise corrections [--min-count N] [--write]  # recurring command fumbles, from exit codes distill observed
+repowise watch [PATH] [--debounce MS] [-v]      # re-index after each quiet period; Ctrl+C to stop
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)

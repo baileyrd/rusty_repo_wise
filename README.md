@@ -305,6 +305,7 @@ repowise init [PATH]              # build a fresh index (default PATH: .)
 repowise update [PATH]             # re-index (currently a full re-index)
 repowise overview [PATH]           # summary stats: languages, symbols, edges
 repowise search "<query>"  [PATH]  # substring search: --mode symbol|path|hybrid, --kind, --symbol-kind, --limit
+repowise generate-claude-md [PATH] [-o FILE] [--stdout]  # managed codebase-intelligence block in CLAUDE.md/AGENTS.md
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)

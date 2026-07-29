@@ -6,6 +6,39 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #291 — CLI: `generate-claude-md`
+**2026-07-29** · closes [#278](https://github.com/baileyrd/rusty_repo_wise/issues/278)
+
+- **Added `repowise generate-claude-md [PATH] [-o FILE] [--stdout]`**: writes a
+  managed block of codebase intelligence (file/symbol counts, languages, indexed
+  commit, most-depended-on files, lowest health scores, mined decisions) into
+  `.claude/CLAUDE.md`, or anywhere else via `-o` — `AGENTS.md` included.
+- **The marker discipline is the feature, not a detail.** This writes into a file
+  a human also edits. The generated content is derived and cheap to reproduce;
+  the prose around it is neither. So:
+  - No repowise markers in an existing file → **append**. The document is
+    someone else's and is never rewritten.
+  - Both markers present → replace only what's between them.
+  - Markers malformed (opener with no closer, or closer before opener) →
+    **refuse and exit 1, leaving the file byte-identical**. Something truncated
+    or reordered it, and guessing where the block ends is precisely how
+    hand-written prose gets eaten.
+  This reuses the model `hook.rs` already proved out, where `HOOK_MARKER` is what
+  authorizes an overwrite and an unmarked hook is treated as foreign.
+- **The default target is `.claude/CLAUDE.md`, not the repo root.** This repo's
+  own root `CLAUDE.md` is a hand-written governance file; defaulting anywhere
+  near it would be an unpleasant surprise.
+- An unknown indexed commit is stated as unknown rather than omitted, matching
+  the `_meta` rule from #272 — a block that silently drops the field reads as
+  more authoritative than it is.
+- 8 new tests over the splice rules, including that two consecutive runs are
+  byte-identical (markers can't accumulate) and that each malformed shape is
+  refused. Verified live across all five paths: create, replace-with-prose-
+  around-it, append-to-unmarked, refuse-truncated (file hash unchanged), and
+  `--stdout` writing nothing.
+
+---
+
 ## PR #290 — CLI + MCP: `search` filters
 **2026-07-29** · closes [#277](https://github.com/baileyrd/rusty_repo_wise/issues/277)
 

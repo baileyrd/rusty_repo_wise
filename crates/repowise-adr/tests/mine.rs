@@ -228,6 +228,85 @@ fn inferred_decisions_reach_mine_labelled_and_never_masquerade_as_mined() {
     );
 }
 
+/// A manually recorded decision flowing through `mine()` end to end,
+/// text-linked the same way an ADR file or commit message is (it has no
+/// inherent file location the way a code comment or PR does).
+#[test]
+fn manual_decisions_reach_mine_and_get_text_linked() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/queue.rs"), "pub struct TaskQueue;\n").unwrap();
+
+    let mut store = repowise_adr::ManualDecisionStore::load(&root);
+    let recorded = store
+        .record(
+            &root,
+            "Use TaskQueue for background work".to_string(),
+            "TaskQueue keeps retries bounded without a broker.".to_string(),
+            "2026-01-01T00:00:00+00:00".to_string(),
+        )
+        .unwrap();
+
+    let index = RepoIndex {
+        root: root.clone(),
+        files: vec![FileRecord {
+            path: root.join("src/queue.rs"),
+            language: Language::Rust,
+            lines: 1,
+            symbols: vec![Symbol {
+                id: Symbol::make_id(&root.join("src/queue.rs"), "TaskQueue", 1),
+                name: "TaskQueue".to_string(),
+                kind: SymbolKind::Struct,
+                file: root.join("src/queue.rs"),
+                start_line: 1,
+                end_line: 1,
+                parent: None,
+                complexity: 0,
+                max_nesting_depth: 0,
+                bumpy_road_bumps: 0,
+                complex_conditionals: Vec::new(),
+                io_in_loop: Vec::new(),
+                string_concat_in_loop: Vec::new(),
+                resource_construction_in_loop: Vec::new(),
+                lock_in_loop: Vec::new(),
+                list_insert_zero_in_loop: Vec::new(),
+                json_parse_in_loop: Vec::new(),
+                regex_compile_in_loop: Vec::new(),
+                nested_loop_with_io: Vec::new(),
+                nested_loop_quadratic: Vec::new(),
+                serial_await_in_loop: Vec::new(),
+                pd_concat_in_loop: Vec::new(),
+                blocking_sync_in_async: Vec::new(),
+                blocking_io_under_lock: Vec::new(),
+                array_spread_in_reduce: Vec::new(),
+                sql_cartesian_join: Vec::new(),
+                defer_in_loop: Vec::new(),
+                goroutine_in_unbounded_loop: Vec::new(),
+                membership_test_in_loop: Vec::new(),
+                sync_io_calls: Vec::new(),
+                param_count: 0,
+                primitive_param_count: 0,
+                body_hash: None,
+            }],
+            imports: Vec::new(),
+            calls: Vec::new(),
+            field_accesses: Vec::new(),
+        }],
+        other_files: 0,
+        indexed_commit: None,
+    };
+
+    let decisions = mine(&index).unwrap();
+    let manual = decisions
+        .iter()
+        .find(|d| d.id == recorded.id)
+        .expect("the manually recorded decision should be mined");
+    assert!(matches!(manual.source, DecisionSource::Manual { .. }));
+    assert_eq!(manual.title, "Use TaskQueue for background work");
+    assert_eq!(manual.linked_files, vec![root.join("src/queue.rs")]);
+}
+
 /// `mine` and `mine_reporting` must not diverge — the only difference
 /// is that one discards the state.
 #[test]

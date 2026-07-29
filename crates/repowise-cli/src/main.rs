@@ -307,6 +307,22 @@ enum Command {
         #[arg(long)]
         for_file: Option<PathBuf>,
     },
+    /// Record a decision you already made, directly -- the `cli`
+    /// decision source (issue #66's `cli` half; its `session`
+    /// transcript-mining sibling was rejected as not planned, since this
+    /// port has no agent-session-recording feature to mine from -- see
+    /// issue #315). Appends to `.repowise/manual-decisions.json`; nothing
+    /// recorded here is ever edited or removed by a later call.
+    Decide {
+        /// Short title for the decision.
+        title: String,
+        /// Why -- scanned for file paths/symbol names the same way an
+        /// ADR file or commit message already is, so mentioning a file
+        /// links this decision to it automatically.
+        rationale: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -639,6 +655,11 @@ fn main() -> anyhow::Result<()> {
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Docs { path } => cmd_docs(&path),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
+        Command::Decide {
+            title,
+            rationale,
+            path,
+        } => cmd_decide(&path, title, rationale),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2522,6 +2543,9 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
                     display_path(file, &index.root)
                 )
             }
+            repowise_adr::DecisionSource::Manual { recorded_at } => {
+                format!("recorded via `repowise decide` on {recorded_at}")
+            }
         };
         let status = d.status.as_deref().unwrap_or("-");
         // The marker goes in the id column, where it can't be scrolled
@@ -2540,6 +2564,24 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn cmd_decide(path: &Path, title: String, rationale: String) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    if title.trim().is_empty() {
+        anyhow::bail!("title must not be empty");
+    }
+    if rationale.trim().is_empty() {
+        anyhow::bail!("rationale must not be empty");
+    }
+
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    let mut store = repowise_adr::ManualDecisionStore::load(&root);
+    let decision = store.record(&root, title, rationale, recorded_at)?;
+
+    println!("Recorded {} -- {}", decision.id, decision.title);
+    println!("  Run `repowise decisions` to see it alongside every other mined decision.");
     Ok(())
 }
 

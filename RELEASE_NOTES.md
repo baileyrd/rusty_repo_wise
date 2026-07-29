@@ -6,6 +6,48 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #316 — `repowise decide`: manually recorded decisions, the eighth ADR source
+**2026-07-29** · closes [#315](https://github.com/baileyrd/rusty_repo_wise/issues/315) (split from [#66](https://github.com/baileyrd/rusty_repo_wise/issues/66), whose `session` transcript-mining half stays not planned)
+
+- **`repowise decide <TITLE> <RATIONALE> [PATH]`**: records a decision the user
+  typed in directly, no mining, no keyword heuristic, no model in the loop.
+  The eighth and last of the original repowise's decision sources, and the
+  most trustworthy — unlike `Inferred` (#309), there's nothing to
+  anchor-check, since this is the user's own stated intent rather than a
+  guess about what the code implies.
+- **`repowise-adr::manual`**: a new `ManualDecisionStore` under
+  `.repowise/manual-decisions.json`, **append-only** by design — each
+  `repowise decide` call is a single, deliberate, permanent record, unlike
+  the LLM-inferred store, which is re-derived (and so replaced) wholesale on
+  every `repowise generate` run. Sequential `MANUAL-0001`-style ids are
+  assigned at record time, mirroring ADR's own `ADR-XXXX` numbering.
+- **`DecisionSource::Manual { recorded_at }`** added to the exhaustively
+  matched enum, forcing every display surface to label it: `repowise
+  decisions` (`recorded via \`repowise decide\` on <timestamp>`), `get_why`
+  (MCP), the static dashboard (a `manual` badge), and `repowise-server`'s
+  shared `source_label`.
+- **Text-linked like an ADR file or commit message**: a manually recorded
+  decision has no inherently known file location (unlike a code comment or
+  PR), so its rationale is run through the same text-matching pass, linking
+  it to any file/symbol name it mentions.
+- **Splits #66 the same way #311/#62 split their own bundled issues**: the
+  `session` half needed a coding-agent transcript format this port has never
+  had anything to produce — a genuinely absent prerequisite, not a sizing
+  problem — and stays permanently not planned. Only the `cli` half, needing
+  nothing but a new local store and command, is built here.
+- 8 new tests (4 in `repowise-adr::manual` covering the empty-store default,
+  sequential id assignment + persistence, append-only behavior across
+  separate process invocations, and unfiltered mining; 1 new end-to-end
+  `mine()` integration test verifying a manually recorded decision reaches
+  `mine()` labelled and text-linked; plus CLI-level coverage via manual
+  verification). Local gate (all six CI steps by exit status) passes.
+  Verified live: recorded two decisions against a real indexed repo,
+  confirmed sequential ids, append-only persistence across separate CLI
+  invocations, correct text-linking to a file mentioned in the rationale,
+  and rejection of an empty title/rationale.
+
+---
+
 ## PR #314 — Fixed-penalty organizational-signal health markers
 **2026-07-29** · closes [#313](https://github.com/baileyrd/rusty_repo_wise/issues/313)
 

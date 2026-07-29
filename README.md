@@ -206,8 +206,8 @@ per-file wiki pages stay deterministic-only, but an opt-in `repowise-llm`
 crate can layer an LLM-written summary on top of each one (`repowise
 generate`, see "LLM-assisted wiki summaries" below) — a first, narrow slice
 of what was previously a fully-deferred LLM tier; RAG chat and refactor-plan
-codegen remain deferred. ADR mining is also not fully ported (only 6 of the
-original's 8 decision sources are implemented —
+codegen remain deferred. ADR mining is fully ported now (all 8 of the
+original's decision sources are implemented —
 see "Architectural decision mining" below). The MCP server covers all ten of
 the original's flagship tools, and adds three the original doesn't have — see "MCP server" below. The
 dashboard is one static page with no per-file drill-down or live search
@@ -334,6 +334,8 @@ repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
+repowise decide <TITLE> <RATIONALE> [PATH]  # record a decision you already made, directly
+                                    #   (append-only; see "Manually recorded decisions")
 repowise refactor [PATH]           # deterministic refactor candidates: import cycles, god
                                     #   classes, low-cohesion classes, duplicate functions --
                                     #   read-only, never generates a diff (see issue #304)
@@ -1725,7 +1727,7 @@ a caveat.
 
 ## Architectural decision mining
 
-`repowise decisions` mines seven of the original's eight decision sources:
+`repowise decisions` mines all eight of the original's decision sources:
 
 - **`docs/adr/*.md` files**, parsed against this repo's own ADR template
   (`# ADR-XXXX: Title`, then `Status:`/`Date:` lines). An unfilled
@@ -1788,6 +1790,12 @@ a caveat.
 - **Decisions a model inferred from code** — the one source that isn't a
   written artifact, and treated differently everywhere because of it.
   See "LLM-inferred decisions" below.
+- **Decisions typed in directly, via `repowise decide <title> <rationale>`**
+  — not mined from any artifact at all: the user states the decision and
+  why, and it's recorded verbatim. The most trustworthy of the eight
+  sources and the only one with no keyword heuristic, no anchor-checking,
+  and no network call — there's nothing to guess or verify, since it's the
+  user's own stated intent. See "Manually recorded decisions" below.
 
 Each ADR-file/commit-message/changelog decision is linked to the indexed
 files it mentions: either the file's own relative path appearing
@@ -1800,15 +1808,17 @@ won't be linked. Supersession is read directly from an ADR's
 was needed since the
 existing template already has one.
 
-Not implemented from the original's eight sources: Slack and issue
-trackers — this repo doesn't have integrations for either anyway.
-Recency/confidence scoring on mined decisions is also not implemented.
+Not implemented, and outside the eight sources above: mining Slack and
+issue-tracker conversations for decisions — this repo doesn't have
+integrations for either anyway. Recency/confidence scoring on mined
+decisions is also not implemented.
 
 ### LLM-inferred decisions
 
-Six of the seven sources read something a person wrote on purpose. This
-one reads what a *model* inferred from code while `repowise generate`
-was already writing wiki summaries. "We chose X because Y" gets read as
+Seven of the eight sources read something a person wrote or typed on
+purpose. This one reads what a *model* inferred from code while
+`repowise generate` was already writing wiki summaries. "We chose X
+because Y" gets read as
 intent, so a reader has to be able to tell which kind they're looking
 at — and that requirement, not the inference, is most of what this
 source is.
@@ -1863,6 +1873,38 @@ nobody renders:
 
 The model that produced each decision is recorded and shown: a reader
 judging an inferred claim is entitled to know what inferred it.
+
+### Manually recorded decisions
+
+`repowise decide <title> <rationale> [PATH]` records a decision you
+already made, directly — no mining, no keyword heuristic, no model. It's
+the eighth source (issue #66's `cli` half; a bundled `session` half,
+mining a coding agent's transcript, stays not planned since this port has
+no such transcript format to mine — see issue #315).
+
+**Append-only.** Each call is a single, deliberate, permanent record under
+`.repowise/manual-decisions.json`; there is no `repowise decide --edit`
+or `--delete`. A later call can never erase an earlier one, unlike the
+LLM-inferred store above, which is re-derived (and so replaced) wholesale
+on every `repowise generate` run.
+
+**Sequential ids**, `MANUAL-0001`-style, assigned at record time —
+mirroring ADR's own `ADR-XXXX` numbering, needed because a manually-typed
+title/rationale pair has no other guaranteed-unique key.
+
+**No anchor-checking.** Unlike an LLM-inferred decision, there's no model
+in the loop to verify against reality — this is the user's own stated
+intent, taken at face value the same way a hand-written ADR file already
+is. The rationale is still run through the same text-linking pass as an
+ADR file or commit message, so mentioning a file or symbol name in it
+links the decision to that file automatically.
+
+```
+$ repowise decide "Use SQLite for local state" \
+    "No server to run; a file is enough for one machine."
+Recorded MANUAL-0001 -- Use SQLite for local state
+  Run `repowise decisions` to see it alongside every other mined decision.
+```
 
 ## MCP server
 

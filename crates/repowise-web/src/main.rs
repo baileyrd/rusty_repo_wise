@@ -120,6 +120,34 @@ struct Health {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+struct SymbolDetail {
+    found: bool,
+    name: String,
+    kind: String,
+    file: String,
+    start_line: usize,
+    end_line: usize,
+    parent: Option<String>,
+    complexity: usize,
+    max_nesting_depth: usize,
+    callees: Vec<String>,
+    callers: Vec<String>,
+    unresolved_callee_count: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct DecisionDetail {
+    found: bool,
+    id: String,
+    title: String,
+    status: Option<String>,
+    superseded_by: Option<String>,
+    supersedes: Option<String>,
+    body: String,
+    linked_files: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
 struct Stats {
     available: bool,
     shallow: bool,
@@ -728,6 +756,169 @@ fn HealthSection(selected: RwSignal<Option<String>>) -> impl IntoView {
     }
 }
 
+/// Symbol detail (issue #263), addressed by `#/symbols?id=<file>@<line>`.
+#[component]
+fn SymbolDetailSection(id: String, selected: RwSignal<Option<String>>) -> impl IntoView {
+    let (file, line) = match id.rsplit_once('@') {
+        Some((f, l)) => (f.to_string(), l.to_string()),
+        None => (id.clone(), "0".to_string()),
+    };
+    let detail = LocalResource::new(move || {
+        let (f, l) = (file.clone(), line.clone());
+        async move {
+            fetch_json_with_query::<SymbolDetail>("/api/symbol", &[("file", &f), ("line", &l)])
+                .await
+        }
+    });
+
+    view! {
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                detail
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(d) if !d.found => view! {
+                            <h2>"Symbol not found"</h2>
+                            <p class="empty">
+                                "No indexed symbol at that location. The link may be stale, or \
+                                 the index may predate the file's current shape."
+                            </p>
+                            <p><a href="#/symbols">"Back to symbols"</a></p>
+                        }
+                        .into_any(),
+                        Ok(d) => view! {
+                            <h2>{d.name.clone()}</h2>
+                            <p>
+                                {format!(
+                                    "{}{} — {}:{}-{}",
+                                    d.parent.as_ref().map(|p| format!("{p}::")).unwrap_or_default(),
+                                    d.kind, d.file, d.start_line, d.end_line,
+                                )}
+                            </p>
+                            <p>
+                                {format!(
+                                    "Complexity {}, max nesting depth {}.",
+                                    d.complexity, d.max_nesting_depth,
+                                )}
+                            </p>
+                            <p>{file_cell(d.file.clone(), selected)}</p>
+                            <h3>{format!("Calls ({})", d.callees.len())}</h3>
+                            {if d.callees.is_empty() {
+                                view! { <p class="empty">"No resolved calls out of this symbol."</p> }
+                                    .into_any()
+                            } else {
+                                view! {
+                                    <ul>{d.callees.iter().map(|c| view! { <li class="mono">{c.clone()}</li> })
+                                        .collect::<Vec<_>>()}</ul>
+                                }
+                                .into_any()
+                            }}
+                            // An empty callee list must not read as "calls
+                            // nothing" when resolution simply failed.
+                            {(d.unresolved_callee_count > 0)
+                                .then(|| view! {
+                                    <p class="empty">
+                                        {format!(
+                                            "{} further call(s) could not be resolved to an \
+                                             indexed symbol, so they aren't listed.",
+                                            d.unresolved_callee_count,
+                                        )}
+                                    </p>
+                                })}
+                            <h3>{format!("Called by ({})", d.callers.len())}</h3>
+                            {if d.callers.is_empty() {
+                                view! {
+                                    <p class="empty">
+                                        "No resolved in-repo callers. This port's call resolution \
+                                         is heuristic, so that is not proof it's unused."
+                                    </p>
+                                }
+                                .into_any()
+                            } else {
+                                view! {
+                                    <ul>{d.callers.iter().map(|c| view! { <li class="mono">{c.clone()}</li> })
+                                        .collect::<Vec<_>>()}</ul>
+                                }
+                                .into_any()
+                            }}
+                            <p><a href="#/symbols">"Back to symbols"</a></p>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Decision detail (issue #263), addressed by `#/decisions?id=<id>`.
+#[component]
+fn DecisionDetailSection(id: String, selected: RwSignal<Option<String>>) -> impl IntoView {
+    let detail = LocalResource::new(move || {
+        let id = id.clone();
+        async move { fetch_json_with_query::<DecisionDetail>("/api/decision", &[("id", &id)]).await }
+    });
+
+    view! {
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                detail
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(d) if !d.found => view! {
+                            <h2>"Decision not found"</h2>
+                            <p class="empty">"No decision with that id. The link may be stale."</p>
+                            <p><a href="#/decisions">"Back to decisions"</a></p>
+                        }
+                        .into_any(),
+                        Ok(d) => view! {
+                            <h2>{format!("{} — {}", d.id, d.title)}</h2>
+                            // Loudest thing on the page when set: showing a
+                            // superseded decision without saying so reads as
+                            // current guidance.
+                            {d.superseded_by.clone().map(|by| view! {
+                                <p class="error">
+                                    {format!("SUPERSEDED by {by}. Do not treat this as current.")}
+                                    " "
+                                    <a href=format_detail_hash(Route::Decisions, &by)>
+                                        "Open the superseding decision"
+                                    </a>
+                                </p>
+                            })}
+                            {d.supersedes.clone().map(|prev| view! {
+                                <p class="empty">
+                                    {format!("Supersedes {prev}. ")}
+                                    <a href=format_detail_hash(Route::Decisions, &prev)>
+                                        "Open the superseded decision"
+                                    </a>
+                                </p>
+                            })}
+                            {d.status.clone().map(|st| view! { <p>{format!("Status: {st}")}</p> })}
+                            <h3>{format!("Linked files ({})", d.linked_files.len())}</h3>
+                            {if d.linked_files.is_empty() {
+                                view! { <p class="empty">"No linked files."</p> }.into_any()
+                            } else {
+                                view! {
+                                    <ul>
+                                        {d.linked_files.iter().map(|f| view! {
+                                            <li>{file_cell(f.clone(), selected)}</li>
+                                        }).collect::<Vec<_>>()}
+                                    </ul>
+                                }
+                                .into_any()
+                            }}
+                            <h3>"Text"</h3>
+                            <pre class="mono">{d.body.clone()}</pre>
+                            <p><a href="#/decisions">"Back to decisions"</a></p>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// Commit activity (issue #262): a day×hour punch card and a weekly
 /// trend, both as inline SVG.
 ///
@@ -1248,7 +1439,11 @@ fn DecisionsSection() -> impl IntoView {
                                         };
                                         view! {
                                             <tr>
-                                                <td>{d.id}</td>
+                                                <td>
+                                                    <a href=format_detail_hash(
+                                                        Route::Decisions, &d.id,
+                                                    )>{d.id.clone()}</a>
+                                                </td>
                                                 <td>{d.title}</td>
                                                 <td>{status}</td>
                                                 <td>{d.linked_file_count}</td>
@@ -1310,7 +1505,12 @@ fn SymbolsSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                                                 .filter(|s| active.is_empty() || s.kind == active)
                                                 .map(|s| view! {
                                                     <tr>
-                                                        <td>{s.name.clone()}</td>
+                                                        <td>
+                                                            <a href=format_detail_hash(
+                                                                Route::Symbols,
+                                                                &format!("{}@{}", s.file, s.start_line),
+                                                            )>{s.name.clone()}</a>
+                                                        </td>
                                                         <td>{s.kind.clone()}</td>
                                                         <td>{file_cell(s.file.clone(), selected)}</td>
                                                         <td>{s.start_line}</td>
@@ -1556,11 +1756,18 @@ fn route_slug(route: Route) -> &'static str {
 ///
 /// Pure, so every case below is testable without a browser.
 fn parse_hash(hash: &str) -> (Route, Option<String>) {
+    let (route, sel, _) = parse_hash_full(hash);
+    (route, sel)
+}
+
+/// As [`parse_hash`], plus the `id` parameter used by the detail views
+/// (issue #263) to address one symbol or decision.
+fn parse_hash_full(hash: &str) -> (Route, Option<String>, Option<String>) {
     let raw = hash.trim().trim_start_matches('#');
     // Present mode owns `#present/<n>` and is an overlay, not a view;
     // leave the underlying route alone so exiting returns you to it.
     if raw.is_empty() || raw.starts_with("present/") {
-        return (Route::Overview, None);
+        return (Route::Overview, None, None);
     }
     let raw = raw.trim_start_matches('/');
     let (slug, query) = match raw.split_once('?') {
@@ -1568,7 +1775,7 @@ fn parse_hash(hash: &str) -> (Route, Option<String>) {
         None => (raw, None),
     };
     if slug.is_empty() {
-        return (Route::Overview, None);
+        return (Route::Overview, None, None);
     }
 
     let route = ROUTES
@@ -1577,13 +1784,20 @@ fn parse_hash(hash: &str) -> (Route, Option<String>) {
         .map(|(r, _, _)| *r)
         .unwrap_or(Route::NotFound);
 
-    let selected = query.and_then(|q| {
-        q.split('&')
-            .find_map(|pair| pair.strip_prefix("file="))
-            .map(percent_decode)
-            .filter(|f| !f.is_empty())
-    });
-    (route, selected)
+    let param = |key: &str| {
+        query.and_then(|q| {
+            q.split('&')
+                .find_map(|pair| pair.strip_prefix(key))
+                .map(percent_decode)
+                .filter(|v| !v.is_empty())
+        })
+    };
+    (route, param("file="), param("id="))
+}
+
+/// Format a route with an addressed detail `id` (issue #263).
+fn format_detail_hash(route: Route, id: &str) -> String {
+    format!("#/{}?id={}", route_slug(route), percent_encode(id))
 }
 
 /// Format a view and selection back into a hash.
@@ -2835,8 +3049,9 @@ fn App() -> impl IntoView {
 
     // Route comes from the URL hash, so a reload restores the current
     // view instead of resetting to Overview.
-    let current = RwSignal::new(parse_hash(&location_hash()).0);
-    if let Some(file) = parse_hash(&location_hash()).1 {
+    let current = RwSignal::new(parse_hash_full(&location_hash()).0);
+    let detail_id = RwSignal::new(parse_hash_full(&location_hash()).2);
+    if let Some(file) = parse_hash_full(&location_hash()).1 {
         selected.set(Some(file));
     }
 
@@ -2862,6 +3077,11 @@ fn App() -> impl IntoView {
             .trim_start_matches('#')
             .starts_with("present/")
         {
+            return;
+        }
+        // Don't rewrite the hash while a detail view is addressed --
+        // that would drop the `id` and bounce back to the index.
+        if detail_id.get().is_some() {
             return;
         }
         let want = format_hash(route, file.as_deref());
@@ -2894,7 +3114,14 @@ fn App() -> impl IntoView {
             }).collect::<Vec<_>>()}
         </nav>
         <FileDetailPanel wiki_pages=wiki_pages selected=selected />
-        {move || match current.get() {
+        {move || match (current.get(), detail_id.get()) {
+            (Route::Symbols, Some(id)) => {
+                view! { <SymbolDetailSection id=id selected=selected /> }.into_any()
+            }
+            (Route::Decisions, Some(id)) => {
+                view! { <DecisionDetailSection id=id selected=selected /> }.into_any()
+            }
+            (route, _) => match route {
             Route::Overview => view! { <OverviewSection selected=selected /> }.into_any(),
             Route::Health => view! { <HealthSection selected=selected /> }.into_any(),
             Route::Coverage => view! { <CoverageSection selected=selected /> }.into_any(),
@@ -2921,6 +3148,7 @@ fn App() -> impl IntoView {
                 </p>
             }
             .into_any(),
+            },
         }}
     }
 }
@@ -3106,5 +3334,30 @@ mod tests {
     fn an_empty_file_param_is_treated_as_no_selection() {
         assert_eq!(parse_hash("#/files?file=").1, None);
         assert_eq!(format_hash(Route::Files, Some("")), "#/files");
+    }
+
+    #[test]
+    fn a_detail_id_round_trips_through_the_hash() {
+        let h = format_detail_hash(Route::Symbols, "crates/a/src/lib.rs@42");
+        let (route, _, id) = parse_hash_full(&h);
+        assert_eq!(route, Route::Symbols);
+        assert_eq!(id.as_deref(), Some("crates/a/src/lib.rs@42"));
+    }
+
+    #[test]
+    fn a_decision_id_with_awkward_characters_survives() {
+        for id in ["ADR-0001", "commit:abc#123", "a b&c", "x?y"] {
+            let (_, _, got) = parse_hash_full(&format_detail_hash(Route::Decisions, id));
+            assert_eq!(got.as_deref(), Some(id), "id {id}");
+        }
+    }
+
+    #[test]
+    fn an_index_route_carries_no_detail_id() {
+        // Otherwise every index view would try to render a detail page.
+        let (_, _, id) = parse_hash_full("#/symbols");
+        assert_eq!(id, None);
+        let (_, _, id) = parse_hash_full("#/decisions?file=a.rs");
+        assert_eq!(id, None);
     }
 }

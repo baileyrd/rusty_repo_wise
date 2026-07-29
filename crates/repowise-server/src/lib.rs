@@ -434,6 +434,45 @@ struct DeadCodeDto {
 /// Matches the `get_dead_code` MCP tool's own default `limit`.
 const DEAD_CODE_LIMIT: usize = 50;
 
+/// Symbol detail, for `GET /api/symbol` (issue #263).
+#[derive(Serialize)]
+struct SymbolDetailDto {
+    found: bool,
+    name: String,
+    kind: String,
+    file: String,
+    start_line: usize,
+    end_line: usize,
+    parent: Option<String>,
+    complexity: usize,
+    max_nesting_depth: usize,
+    /// Symbols this one calls, and symbols that call it -- both limited
+    /// to what this port's heuristic resolution could actually resolve.
+    callees: Vec<String>,
+    callers: Vec<String>,
+    /// Unresolved calls out of this symbol. Reported so an empty
+    /// `callees` list isn't read as "this calls nothing".
+    unresolved_callee_count: usize,
+}
+
+/// Decision detail, for `GET /api/decision` (issue #263).
+#[derive(Serialize)]
+struct DecisionDetailDto {
+    found: bool,
+    id: String,
+    title: String,
+    status: Option<String>,
+    /// Set when a later decision supersedes this one. Displaying a
+    /// superseded decision without saying so would be actively
+    /// misleading -- it reads as current guidance.
+    superseded_by: Option<String>,
+    /// The decision this one supersedes, if any -- the other direction
+    /// of the same lineage, resolved by scanning the full set.
+    supersedes: Option<String>,
+    body: String,
+    linked_files: Vec<String>,
+}
+
 /// Commit-activity stats, for `GET /api/stats` (issue #262).
 #[derive(Serialize)]
 struct StatsDto {
@@ -843,6 +882,17 @@ async fn get_hotspots(State(state): State<AppState>) -> Result<Json<HotspotsDto>
 }
 
 #[derive(Deserialize)]
+struct SymbolDetailQuery {
+    file: String,
+    line: usize,
+}
+
+#[derive(Deserialize)]
+struct DecisionDetailQuery {
+    id: String,
+}
+
+#[derive(Deserialize)]
 struct DecisionsQuery {
     /// Optional relative file path -- when given, only decisions linked
     /// to that file are returned. Powers the per-file decision-tracker
@@ -1069,6 +1119,134 @@ async fn get_ownership(
         },
     };
     Ok(Json(dto))
+}
+
+async fn get_symbol_detail(
+    State(state): State<AppState>,
+    Query(query): Query<SymbolDetailQuery>,
+) -> Result<Json<SymbolDetailDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let found = index.files.iter().find_map(|f| {
+        (relative(&state.root, &f.path) == query.file)
+            .then(|| f.symbols.iter().find(|s| s.start_line == query.line))
+            .flatten()
+            .map(|s| (f, s))
+    });
+    // An unknown symbol is a reportable state, not a 404 -- the client
+    // renders a not-found view rather than an error banner.
+    let Some((file, sym)) = found else {
+        return Ok(Json(SymbolDetailDto {
+            found: false,
+            name: String::new(),
+            kind: String::new(),
+            file: query.file,
+            start_line: query.line,
+            end_line: 0,
+            parent: None,
+            complexity: 0,
+            max_nesting_depth: 0,
+            callees: Vec::new(),
+            callers: Vec::new(),
+            unresolved_callee_count: 0,
+        }));
+    };
+
+    // Callees come from the symbol's own recorded calls; a call whose
+    // target no symbol matches is counted rather than listed, so an
+    // empty list can't be misread as "this calls nothing".
+    let mut callees: Vec<String> = Vec::new();
+    let mut unresolved_callee_count = 0usize;
+    for call in &file.calls {
+        if call.caller.as_deref() != Some(sym.id.as_str()) {
+            continue;
+        }
+        match index
+            .files
+            .iter()
+            .flat_map(|f| &f.symbols)
+            .find(|s| s.name == call.callee_name)
+        {
+            Some(target) => callees.push(target.name.clone()),
+            None => unresolved_callee_count += 1,
+        }
+    }
+    callees.sort();
+    callees.dedup();
+
+    let mut callers: Vec<String> = index
+        .files
+        .iter()
+        .flat_map(|f| f.calls.iter().map(move |c| (f, c)))
+        .filter(|(_, c)| c.callee_name == sym.name)
+        .filter_map(|(f, c)| {
+            let id = c.caller.as_deref()?;
+            f.symbols
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.name.clone())
+        })
+        .collect();
+    callers.sort();
+    callers.dedup();
+
+    Ok(Json(SymbolDetailDto {
+        found: true,
+        name: sym.name.clone(),
+        kind: sym.kind.label().to_string(),
+        file: relative(&state.root, &file.path),
+        start_line: sym.start_line,
+        end_line: sym.end_line,
+        parent: sym.parent.clone(),
+        complexity: sym.complexity,
+        max_nesting_depth: sym.max_nesting_depth,
+        callees,
+        callers,
+        unresolved_callee_count,
+    }))
+}
+
+async fn get_decision_detail(
+    State(state): State<AppState>,
+    Query(query): Query<DecisionDetailQuery>,
+) -> Result<Json<DecisionDetailDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let decisions = repowise_adr::mine(&index).unwrap_or_default();
+
+    // The reverse lineage link: which decision (if any) this one
+    // supersedes. Only derivable by scanning the whole set, since a
+    // record only stores the forward `superseded_by`.
+    let supersedes = decisions
+        .iter()
+        .find(|d| d.superseded_by.as_deref() == Some(query.id.as_str()))
+        .map(|d| d.id.clone());
+
+    let Some(d) = decisions.into_iter().find(|d| d.id == query.id) else {
+        return Ok(Json(DecisionDetailDto {
+            found: false,
+            id: query.id,
+            title: String::new(),
+            status: None,
+            superseded_by: None,
+            supersedes: None,
+            body: String::new(),
+            linked_files: Vec::new(),
+        }));
+    };
+
+    Ok(Json(DecisionDetailDto {
+        found: true,
+        id: d.id,
+        title: d.title,
+        status: d.status,
+        superseded_by: d.superseded_by,
+        supersedes,
+        body: d.body,
+        linked_files: d
+            .linked_files
+            .iter()
+            .map(|f| relative(&state.root, f))
+            .collect(),
+    }))
 }
 
 async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsDto>, ApiError> {
@@ -1774,6 +1952,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
         .route("/api/ownership", get(get_ownership))
+        .route("/api/symbol", get(get_symbol_detail))
+        .route("/api/decision", get(get_decision_detail))
         .route("/api/stats", get(get_stats))
         .route("/api/files", get(get_files))
         .route("/api/contributors", get(get_contributors))
@@ -2515,6 +2695,51 @@ mod tests {
         // distinguish "no git" from "empty repo".
         assert_eq!(json["files_total"], 1);
         assert_eq!(json["files_sampled"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_symbol_detail_reports_not_found_for_an_unknown_symbol() {
+        // A stale deep link must render a not-found view, not an error.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/symbol?file=nope.rs&line=99").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["found"], false);
+    }
+
+    #[tokio::test]
+    async fn get_symbol_detail_returns_the_symbol_and_its_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/symbol?file=busy.rs&line=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["found"], true);
+        assert_eq!(json["name"], "busy");
+        assert_eq!(json["kind"], "function");
+        assert!(json["complexity"].as_u64().unwrap() > 0);
+        // Nothing calls it and it calls nothing, but both are still
+        // well-formed arrays rather than nulls.
+        assert!(json["callers"].is_array());
+        assert!(json["callees"].is_array());
+    }
+
+    #[tokio::test]
+    async fn get_decision_detail_reports_not_found_for_an_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/decision?id=ADR-9999").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["found"], false);
+        assert_eq!(json["id"], "ADR-9999");
     }
 
     #[tokio::test]

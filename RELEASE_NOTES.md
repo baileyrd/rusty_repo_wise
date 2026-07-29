@@ -6,6 +6,38 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #263 — UI: symbol and decision detail views
+**2026-07-28** · closes [#263](https://github.com/baileyrd/rusty_repo_wise/issues/263)
+
+- **Added:** `GET /api/symbol`, `GET /api/decision`, and two detail views,
+  deep-linkable at `#/symbols?id=<file>@<line>` and `#/decisions?id=<id>`.
+  Completes the UI parity round (7 of 7).
+- **Sequenced after #259 deliberately** — detail pages whose whole purpose is
+  linking someone to one symbol or decision are worth little without deep
+  links, and doing routing first meant not building the plumbing twice.
+- **Detail endpoints rather than fattened list endpoints.** `/api/symbols`
+  carries no complexity or call graph and `/api/decisions` carries only a
+  linked-file *count*; enriching the lists would make every row pay for detail
+  nobody asked for.
+- **An empty callee list never reads as "calls nothing."** The symbol endpoint
+  counts calls it couldn't resolve to an indexed symbol and reports them
+  separately — on `blame_file` that's 2 resolved against **20 unresolved**.
+  "No resolved callers" likewise says outright that heuristic resolution makes
+  it not proof of disuse.
+- **Supersession is shown in both directions.** `superseded_by` already
+  existed; `supersedes` is derived by scanning the set, since a record only
+  stores the forward link. A superseded decision leads with a loud marker and
+  a link to its replacement — showing one silently would read as current
+  guidance, the one way this view could actively mislead.
+- **Unknown ids render not-found views**, not errors — a stale deep link should
+  say it's stale.
+- The hash parser gained a generic `id=` parameter alongside `file=`, and the
+  selection-sync effect skips rewriting while a detail view is addressed, which
+  would otherwise drop the id and bounce back to the index.
+- 6 new tests (3 server, 3 routing; 20 total in the WASM crate).
+
+---
+
 ## PR #259 — UI: one view per section, addressable by URL
 **2026-07-28** · closes [#259](https://github.com/baileyrd/rusty_repo_wise/issues/259)
 

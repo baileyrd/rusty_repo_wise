@@ -1640,8 +1640,21 @@ below):
     substring matching would answer a different question than the one
     asked, so the error names the real limitation instead of reporting an
     unknown mode.
-- **`get_context`** — a file's symbols, resolved dependencies/dependents,
-  and health score/findings in one call. This is the tool that matters
+- **`get_context(file, limit?)`** — a file's symbols, resolved
+  dependencies/dependents, and health score/findings in one call.
+  - **Both lists are capped** (default 50, max 500), with
+    `symbols_total`/`health_findings_total` reporting the true counts so a
+    truncated answer can't be read as a complete one. The cap exists
+    because of a measured failure: uncapped, this tool returned **120 KB
+    for an 8.5 KB file** with 300 small symbols — fourteen times the cost
+    of simply reading it, which made the tool worse than the thing it
+    replaces. Capped, the same call is 15 KB.
+  - **Symbol ids are repo-relative** (`src/lib.rs::name@12`), not the
+    absolute paths the index stores internally. Those leaked the producing
+    machine's directory layout to every caller, and on that dense file
+    accounted for 59% of the symbol list — the same absolute prefix
+    repeated 300 times. `get_symbol` accepts either form, so ids handed
+    out earlier still resolve. This is the tool that matters
   most for the original's stated goal (cutting an agent's token spend on
   context-loading): one round-trip instead of separate search/deps/health
   reads pieced together by the caller.

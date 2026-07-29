@@ -297,6 +297,14 @@ enum Command {
     WorkspaceConformance {
         #[arg(long)]
         workspace: PathBuf,
+        /// Emit the raw conformance report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Treat "nothing resolvable to check" as success. Off by
+        /// default: a gate that can't see anything must not report a
+        /// pass, so opting into that has to be explicit.
+        #[arg(long)]
+        allow_unverified: bool,
     },
     /// Regex-scan every workspace repo's indexed files for HTTP
     /// producer routes (axum/Flask/FastAPI/Express-style route
@@ -450,7 +458,11 @@ fn main() -> anyhow::Result<()> {
             repo,
             file,
         } => cmd_workspace_blast_radius(&workspace, &repo, &file),
-        Command::WorkspaceConformance { workspace } => cmd_workspace_conformance(&workspace),
+        Command::WorkspaceConformance {
+            workspace,
+            json,
+            allow_unverified,
+        } => cmd_workspace_conformance(&workspace, json, allow_unverified),
         Command::WorkspaceContracts { workspace } => cmd_workspace_contracts(&workspace),
     }
 }
@@ -1529,25 +1541,179 @@ fn cmd_workspace_blast_radius(workspace: &Path, repo: &str, file: &Path) -> anyh
 }
 
 /// See `repowise-workspace`'s own docs for the workspace TOML format.
-fn cmd_workspace_conformance(workspace: &Path) -> anyhow::Result<()> {
+/// What a conformance run concluded, and whether it was in a position
+/// to conclude anything.
+///
+/// The third variant is why this is an enum rather than a bool. "No
+/// cycles found" and "no edges to check" produce the same empty cycle
+/// list, and reporting both as a pass is a **false pass**: a Rust-only
+/// resolver pointed at a Python workspace finds nothing every time, and
+/// a CI gate that greens on that is worse than no gate, because it
+/// looks like coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConformanceVerdict {
+    /// Edges were resolved and no cycle exists among them. A real pass.
+    Pass,
+    /// At least one cycle. Fails the gate.
+    Fail,
+    /// Nothing resolvable to check. Neither a pass nor a failure.
+    Unverified,
+}
+
+impl ConformanceVerdict {
+    fn label(&self) -> &'static str {
+        match self {
+            ConformanceVerdict::Pass => "pass",
+            ConformanceVerdict::Fail => "fail",
+            ConformanceVerdict::Unverified => "unverified",
+        }
+    }
+
+    /// Exit code for this verdict.
+    ///
+    /// `Unverified` exits non-zero alongside `Fail`. A gate that can't
+    /// see anything must not report success -- the whole point of
+    /// wiring this into CI is that a green run means something was
+    /// actually checked. Someone who genuinely wants an unresolvable
+    /// workspace to pass can say so with `--allow-unverified`, which
+    /// makes that an explicit, reviewable choice rather than a silent
+    /// default.
+    fn exit_code(&self, allow_unverified: bool) -> i32 {
+        match self {
+            ConformanceVerdict::Pass => 0,
+            ConformanceVerdict::Unverified if allow_unverified => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// Decide the verdict from the metrics the architecture pass already
+/// computed.
+///
+/// Built on `workspace_metrics` rather than `detect_workspace_cycles`
+/// alone so this command and `workspace-metrics` cannot disagree about
+/// whether a workspace has cycles, and so the Rust-only resolvability
+/// signal is shared rather than re-derived.
+fn conformance_verdict(m: &repowise_workspace::WorkspaceMetrics) -> ConformanceVerdict {
+    if !m.cyclic_core.is_empty() {
+        return ConformanceVerdict::Fail;
+    }
+    if m.edge_count == 0 {
+        return ConformanceVerdict::Unverified;
+    }
+    ConformanceVerdict::Pass
+}
+
+fn render_conformance(
+    m: &repowise_workspace::WorkspaceMetrics,
+    verdict: ConformanceVerdict,
+) -> String {
+    let mut out = String::new();
+
+    if !m.unindexed_repos.is_empty() {
+        out.push_str(&format!(
+            "{} repo(s) could not be read and contributed no edges, so any cycle\n\
+             through them is invisible to this check:\n",
+            m.unindexed_repos.len()
+        ));
+        for name in &m.unindexed_repos {
+            out.push_str(&format!("  {name} -- run `repowise update` in it\n"));
+        }
+        out.push('\n');
+    }
+
+    match verdict {
+        ConformanceVerdict::Fail => {
+            out.push_str(&format!(
+                "FAIL: {} circular cross-repo dependency group(s) found.\n",
+                m.cyclic_core.len()
+            ));
+            for cycle in &m.cyclic_core {
+                let mut names = cycle.clone();
+                names.sort();
+                out.push_str(&format!("  {}\n", names.join(" <-> ")));
+            }
+            out.push_str("\nA workspace's repo-level dependency graph should form a DAG.\n");
+        }
+        ConformanceVerdict::Pass => {
+            out.push_str(&format!(
+                "PASS: {} cross-repo dependency edge(s) checked, no cycles.\n",
+                m.edge_count
+            ));
+        }
+        ConformanceVerdict::Unverified => {
+            out.push_str(
+                "UNVERIFIED: no cross-repo dependency edges were resolved, so there was\n\
+                 nothing to check for cycles. This is NOT a pass -- an empty graph and a\n\
+                 clean graph look identical here.\n",
+            );
+            out.push_str(&format!("  reason: {}\n", m.confidence.explanation()));
+            out.push_str(
+                "  Pass --allow-unverified to treat this as success in CI, deliberately.\n",
+            );
+        }
+    }
+
+    out.push_str(
+        "\nCross-repo resolution is Rust-only; other languages' imports are left\n\
+         unresolved, so a clean result bounds what was checked, not what exists.\n",
+    );
+    out
+}
+
+fn conformance_json(
+    m: &repowise_workspace::WorkspaceMetrics,
+    verdict: ConformanceVerdict,
+) -> serde_json::Value {
+    serde_json::json!({
+        "verdict": verdict.label(),
+        "cycles": m.cyclic_core,
+        "edges_checked": m.edge_count,
+        "repo_count": m.repo_count,
+        "unindexed_repos": m.unindexed_repos,
+        "confidence": {
+            "level": m.confidence.label(),
+            "explanation": m.confidence.explanation(),
+        },
+        "resolution_caveat":
+            "cross-repo import resolution is Rust-only; a clean result bounds what was \
+             checked, not what exists",
+    })
+}
+
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
+fn cmd_workspace_conformance(
+    workspace: &Path,
+    json: bool,
+    allow_unverified: bool,
+) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
     if repos.is_empty() {
         println!("No repos configured in {}", workspace.display());
         return Ok(());
     }
-    let cycles = repowise_workspace::detect_workspace_cycles(&repos);
-    if cycles.is_empty() {
-        println!("No circular cross-repo dependencies found.");
-        return Ok(());
+    let metrics = repowise_workspace::workspace_metrics(&repos);
+    let verdict = conformance_verdict(&metrics);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&conformance_json(&metrics, verdict))?
+        );
+    } else {
+        print!("{}", render_conformance(&metrics, verdict));
     }
-    println!("Circular cross-repo dependencies found:");
-    for cycle in &cycles {
-        println!("  {}", cycle.join(" <-> "));
+
+    let code = verdict.exit_code(allow_unverified);
+    if code != 0 {
+        // Exit directly rather than returning Err: the report above is
+        // the output, and anyhow would print a second "Error:" line
+        // that adds nothing.
+        std::process::exit(code);
     }
     Ok(())
 }
 
-/// See `repowise-workspace`'s own docs for the workspace TOML format.
 /// Render the architecture-metrics report.
 ///
 /// Split from `cmd_workspace_metrics` so the wording is testable
@@ -1815,6 +1981,7 @@ fn cmd_workspace_diagnostics(workspace: &Path, json: bool) -> anyhow::Result<()>
     Ok(())
 }
 
+/// See `repowise-workspace`'s own docs for the workspace TOML format.
 fn cmd_workspace_contracts(workspace: &Path) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
     if repos.is_empty() {
@@ -2378,5 +2545,107 @@ mod tests {
             v["complexity_scale"],
             repowise_workspace::WorkspaceMetrics::SCALE
         );
+    }
+
+    fn conf_metrics(
+        edges: usize,
+        cycles: Vec<Vec<String>>,
+        confidence: repowise_workspace::Confidence,
+    ) -> repowise_workspace::WorkspaceMetrics {
+        repowise_workspace::WorkspaceMetrics {
+            repo_count: 3,
+            edge_count: edges,
+            propagation_cost: 0.5,
+            repos_in_cyclic_core: cycles.iter().flatten().count(),
+            cyclic_core: cycles,
+            complexity_score: Some(2.0),
+            unindexed_repos: Vec::new(),
+            confidence,
+        }
+    }
+
+    #[test]
+    fn conformance_fails_on_a_cycle() {
+        let m = conf_metrics(
+            4,
+            vec![vec!["b".to_string(), "a".to_string()]],
+            repowise_workspace::Confidence::Resolved,
+        );
+        let v = conformance_verdict(&m);
+        assert_eq!(v, ConformanceVerdict::Fail);
+        assert_eq!(v.exit_code(false), 1, "a cycle must gate CI");
+        assert_eq!(
+            v.exit_code(true),
+            1,
+            "--allow-unverified must not excuse a real cycle"
+        );
+        let out = render_conformance(&m, v);
+        assert!(out.contains("FAIL"), "{out}");
+        assert!(out.contains("a <-> b"), "{out}");
+    }
+
+    #[test]
+    fn conformance_passes_when_real_edges_were_checked() {
+        let m = conf_metrics(4, Vec::new(), repowise_workspace::Confidence::Resolved);
+        let v = conformance_verdict(&m);
+        assert_eq!(v, ConformanceVerdict::Pass);
+        assert_eq!(v.exit_code(false), 0);
+        let out = render_conformance(&m, v);
+        assert!(
+            out.contains("4 cross-repo dependency edge(s) checked"),
+            "a pass must say how much was checked, or it means nothing:\n{out}"
+        );
+    }
+
+    /// The false pass this command exists to prevent. An empty graph
+    /// and a clean graph produce the same empty cycle list, and a CI
+    /// gate that greens on the former looks like coverage while
+    /// providing none.
+    #[test]
+    fn conformance_will_not_call_an_unresolvable_workspace_a_pass() {
+        let m = conf_metrics(
+            0,
+            Vec::new(),
+            repowise_workspace::Confidence::NoResolvableLanguage,
+        );
+        let v = conformance_verdict(&m);
+        assert_eq!(v, ConformanceVerdict::Unverified);
+        assert_eq!(
+            v.exit_code(false),
+            1,
+            "unverified must not exit 0 by default"
+        );
+        assert_eq!(v.exit_code(true), 0, "but it can be opted into explicitly");
+        let out = render_conformance(&m, v);
+        assert!(out.contains("UNVERIFIED"), "{out}");
+        assert!(out.contains("NOT a pass"), "{out}");
+        assert!(out.contains("--allow-unverified"), "{out}");
+    }
+
+    #[test]
+    fn conformance_warns_that_unread_repos_hide_cycles() {
+        let mut m = conf_metrics(2, Vec::new(), repowise_workspace::Confidence::Resolved);
+        m.unindexed_repos = vec!["ghost".to_string()];
+        let out = render_conformance(&m, conformance_verdict(&m));
+        assert!(
+            out.contains("any cycle\nthrough them is invisible"),
+            "an unread repo can hide the very cycle this gate looks for:\n{out}"
+        );
+    }
+
+    #[test]
+    fn conformance_json_carries_the_verdict_and_what_was_checked() {
+        let m = conf_metrics(
+            0,
+            Vec::new(),
+            repowise_workspace::Confidence::NoResolvableLanguage,
+        );
+        let v = conformance_json(&m, conformance_verdict(&m));
+        assert_eq!(v["verdict"], "unverified");
+        assert_eq!(v["edges_checked"], 0);
+        assert!(v["resolution_caveat"]
+            .as_str()
+            .unwrap()
+            .contains("Rust-only"));
     }
 }

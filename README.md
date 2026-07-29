@@ -339,7 +339,7 @@ repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own mo
                                      #   --top <N> (default 10) how many pairs to list per repo
 repowise workspace-architecture --workspace <FILE>  # cross-repo Rust `use` resolution: which repos depend on which
 repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  # direct cross-repo importers of one file
-repowise workspace-conformance --workspace <FILE>  # circular cross-repo dependencies (repo A imports B imports A)
+repowise workspace-conformance --workspace <FILE> [--json] [--allow-unverified]  # circular cross-repo dependencies; exits non-zero on findings, so it gates CI
 repowise workspace-contracts --workspace <FILE>  # regex-based HTTP producer/consumer route matching across repos
 repowise workspace-diagnostics --workspace <FILE> # why that contract count is what it is (unmatched-by-reason, orphan routes, unread repos)
 repowise workspace-metrics --workspace <FILE>    # propagation cost, cyclic core, 1-10 architecture-complexity score
@@ -2165,8 +2165,24 @@ workspace's repo-level dependency graph should form a DAG; a cycle
 concrete, deterministic "pattern divergence" finding that needs no
 further human-specified rule set to detect.
 
-- `repowise workspace-conformance --workspace <path>` prints any
-  circular cross-repo dependencies found, or a "none found" message.
+- `repowise workspace-conformance --workspace <path> [--json]
+  [--allow-unverified]` is an architecture lint: it reports circular
+  cross-repo dependencies and **exits non-zero on findings, so it gates
+  CI**. A report nothing can act on runs once, when someone remembers;
+  an exit code runs on every change.
+  - It reports one of three verdicts, not two. `PASS` says how many
+    edges were actually checked. `FAIL` lists the cycles. **`UNVERIFIED`
+    is the third**, and it exists because "no cycles found" and "no
+    edges to check" produce the same empty list — a Rust-only resolver
+    pointed at a Python workspace finds nothing every time, and a gate
+    that greens on that is worse than no gate, because it looks like
+    coverage. `UNVERIFIED` exits non-zero by default; `--allow-unverified`
+    opts into treating it as success, which makes that an explicit,
+    reviewable choice rather than a silent default.
+  - Unread repos are called out, since a cycle running through one is
+    invisible to the check.
+  - Built on the same `workspace_metrics` pass as `workspace-metrics`, so
+    the two can't disagree about whether a workspace has cycles.
 - `repowise serve-dashboard --workspace <path>` gains `GET
   /api/workspace-conformance` and the dashboard gets a **Conformance
   section**.

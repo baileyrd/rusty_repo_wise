@@ -53,6 +53,20 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Restore the output behind a `[repowise#<ref>]` omission marker
+    /// left by `repowise distill`. Accepts a bare 12-hex ref or a
+    /// pasted whole marker. Looks in this repo's store first, then the
+    /// user-level fallback.
+    Expand {
+        /// A bare ref, or a pasted `[repowise#...]` marker.
+        reference: String,
+        /// Return only the lines matching this substring (case-
+        /// insensitive). The reason output was distilled is that it was
+        /// large, so grepping inside it is often more useful than
+        /// dumping all of it back.
+        #[arg(long, short)]
+        query: Option<String>,
+    },
     /// Write a managed block of codebase intelligence into
     /// `CLAUDE.md` (default `.claude/CLAUDE.md`), preserving everything
     /// outside the markers. A file with no repowise markers is
@@ -455,6 +469,7 @@ fn main() -> anyhow::Result<()> {
         Command::Update { path } => cmd_update(&path),
         Command::Overview { path } => cmd_overview(&path),
         Command::Distill { command } => cmd_distill(&command),
+        Command::Expand { reference, query } => cmd_expand(&reference, query.as_deref()),
         Command::GenerateClaudeMd {
             path,
             output,
@@ -615,6 +630,94 @@ fn cmd_overview(path: &Path) -> anyhow::Result<()> {
         for (file, count) in &overview.most_depended_on {
             println!("    {:<4} {}", count, display_path(file, &index.root));
         }
+    }
+    Ok(())
+}
+
+/// Build the store for the current directory, plus the user-level
+/// fallback store if one would be different.
+///
+/// Two stores, checked in order, because `distill` writes to whichever
+/// applies: inside a repo, alongside the index; outside one, under
+/// `$HOME`. An `expand` that only checked one would fail to find refs
+/// its own `distill` had just written.
+fn distill_stores() -> anyhow::Result<Vec<repowise_distill::Store>> {
+    let cwd = std::env::current_dir()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let repo_dir = repowise_distill::store::store_dir(&cwd, home.as_deref());
+
+    let mut stores = vec![repowise_distill::Store::open(repo_dir.clone())];
+    if let Some(home) = &home {
+        let fallback = home
+            .join(".repowise")
+            .join(repowise_distill::store::STORE_DIR);
+        if fallback != repo_dir {
+            stores.push(repowise_distill::Store::open(fallback));
+        }
+    }
+    Ok(stores)
+}
+
+fn cmd_expand(reference: &str, query: Option<&str>) -> anyhow::Result<()> {
+    let Some(parsed) = repowise_distill::parse_ref(reference) else {
+        anyhow::bail!(
+            "{reference:?} isn't a repowise omission ref. Expected 12 hex digits, or a \
+             pasted marker like `[repowise#a1b2c3d4e5f6: ...]`."
+        );
+    };
+
+    let stores = distill_stores()?;
+    let mut content = None;
+    for store in &stores {
+        if let Ok(found) = store.get(&parsed) {
+            content = Some(found);
+            break;
+        }
+    }
+
+    let Some(content) = content else {
+        // Distinguishing these matters: the store's size cap and TTL
+        // mean a well-formed ref genuinely can stop existing. Reporting
+        // that as a plain "not found" would send someone looking for a
+        // typo they didn't make.
+        anyhow::bail!(
+            "no stored output for ref {parsed}. It was either never written, or the \
+             omission store evicted it -- entries expire after {} days or when the \
+             store passes its size cap. Searched: {}",
+            repowise_distill::store::TTL.as_secs() / 86_400,
+            stores
+                .iter()
+                .map(|s| s.dir().display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    };
+
+    let Some(query) = query else {
+        print!("{content}");
+        if !content.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    };
+
+    let needle = query.to_lowercase();
+    let matching: Vec<&str> = content
+        .lines()
+        .filter(|l| l.to_lowercase().contains(&needle))
+        .collect();
+
+    if matching.is_empty() {
+        // Not the same as an empty ref, and saying so keeps someone from
+        // concluding the stored output was blank.
+        println!(
+            "No lines matching {query:?} in ref {parsed} ({} line(s) stored).",
+            content.lines().count()
+        );
+        return Ok(());
+    }
+    for line in matching {
+        println!("{line}");
     }
     Ok(())
 }

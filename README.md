@@ -1805,6 +1805,26 @@ FastAPI-backend architecture, minus the Node.js dependency.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+- **Files view** (issue #261) renders `GET /api/files` as a treemap: area
+  proportional to a file's line count, fill by health band. It answers what the
+  ranked tables can't — where the mass of the codebase sits, and whether the
+  big parts are healthy. A "10 worst files" table hides one large mediocre file
+  behind ten small terrible ones.
+
+  Layout is a hand-written [squarified
+  treemap](https://www.win.tue.nl/~vanwijk/stm.pdf) (~60 lines) rather than a
+  charting dependency — a WASM binary shouldn't grow one for this. Slice-and-
+  dice was rejected because it degenerates into unreadable slivers well before
+  this repo's 85 files. The layout is pure and deterministic, so the view
+  doesn't reshuffle between loads, and it's unit-tested for area conservation
+  and in-bounds tiles.
+
+  **`unscored` is its own band**, never folded into "good" — a file with no
+  health score is not a healthy file, and coloring unknown risk green would be
+  worse than leaving it out. Every tile names its band in a `<title>`, so
+  **color is not the only channel** carrying the information, and the legend
+  names the bands rather than only showing swatches.
+
 - **Contributors view** (issue #258) renders `GET /api/contributors`:
   per-author owned lines and share, files touched, and the repo's
   distribution of per-file bus factors. Bus factor is shown in words, not as

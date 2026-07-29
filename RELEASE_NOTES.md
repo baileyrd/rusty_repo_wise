@@ -6,6 +6,33 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #261 — UI: files treemap, and the WASM crate's first tests
+**2026-07-28** · closes [#261](https://github.com/baileyrd/rusty_repo_wise/issues/261)
+
+- **Added:** `GET /api/files` and a `FilesSection` rendering an SVG treemap —
+  area ∝ lines, fill by health band. Third issue of the UI parity round.
+- **My own issue scoped this wrong.** #261 said "frontend only, over existing
+  endpoints", but `/api/health` returns only the **worst 15** files
+  (`WORST_FILES_LIMIT`) and nothing exposed per-file lines for the whole repo.
+  A whole-repo treemap needs a whole-repo endpoint, so this adds one.
+- **Hand-written squarified treemap** (~60 lines) rather than a charting
+  dependency, which a WASM binary shouldn't grow for this. Slice-and-dice was
+  rejected: it degenerates into unreadable slivers well before 85 files.
+- **`unscored` is its own band.** `score` is `Option<f64>` end to end rather
+  than defaulting to 10.0 — a file with no health score is not a healthy file,
+  and coloring unknown risk green is worse than not coloring it.
+- **Color is not the only channel:** every tile names its band in an SVG
+  `<title>`, and the legend names the bands rather than only showing swatches.
+- **`health_available: false` degrades honestly** to sized-but-uncolored tiles
+  with a stated reason, rather than rendering everything grey unexplained.
+- **The WASM crate had no tests at all** — it turns out it compiles fine for the
+  host target, so its pure logic was always testable and simply never tested.
+  Adds 8 tests (area conservation, proportionality, in-bounds tiles,
+  determinism, degenerate inputs, band boundaries) and a `Test (WASM web
+  crate)` CI step alongside the fmt/clippy steps added in #256.
+
+---
+
 ## PR #258 — UI: contributors view (`/api/contributors` + `ContributorsSection`)
 **2026-07-28** · closes [#258](https://github.com/baileyrd/rusty_repo_wise/issues/258)
 

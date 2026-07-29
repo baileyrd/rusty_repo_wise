@@ -434,6 +434,30 @@ struct DeadCodeDto {
 /// Matches the `get_dead_code` MCP tool's own default `limit`.
 const DEAD_CODE_LIMIT: usize = 50;
 
+/// One indexed file, for `GET /api/files` (issue #261).
+#[derive(Serialize)]
+struct FileEntryDto {
+    path: String,
+    language: String,
+    lines: usize,
+    /// `None` when health scoring produced no entry for this file.
+    /// Deliberately optional rather than defaulted to 10.0: a file with
+    /// no score is not a healthy file, and the treemap needs to render
+    /// those distinctly instead of coloring them "good".
+    score: Option<f64>,
+    finding_count: usize,
+}
+
+#[derive(Serialize)]
+struct FilesDto {
+    files: Vec<FileEntryDto>,
+    total_lines: usize,
+    /// False when health scoring was unavailable entirely, so the client
+    /// can degrade to an uncolored list rather than implying every file
+    /// is unscored for its own reason.
+    health_available: bool,
+}
+
 /// How many files `GET /api/contributors` blames before stopping.
 ///
 /// `ownership_of` shells out to `git blame --line-porcelain` **once per
@@ -1027,6 +1051,44 @@ async fn get_ownership(
         },
     };
     Ok(Json(dto))
+}
+
+async fn get_files(State(state): State<AppState>) -> Result<Json<FilesDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let graph = repowise_graph::RepoGraph::build(&index);
+    let report = repowise_health::analyze(&index, &graph);
+
+    let scores: std::collections::HashMap<&Path, (f64, usize)> = report
+        .file_scores
+        .iter()
+        .map(|f| (f.file.as_path(), (f.score, f.finding_count)))
+        .collect();
+    let health_available = !scores.is_empty();
+
+    let mut files: Vec<FileEntryDto> = index
+        .files
+        .iter()
+        .map(|f| {
+            let scored = scores.get(f.path.as_path());
+            FileEntryDto {
+                path: relative(&state.root, &f.path),
+                language: f.language.label().to_string(),
+                lines: f.lines,
+                score: scored.map(|(s, _)| *s),
+                finding_count: scored.map(|(_, c)| *c).unwrap_or(0),
+            }
+        })
+        .collect();
+    // Deterministic order: largest first, path as tiebreak. The treemap
+    // layout is a pure function of this order, so a stable order is what
+    // stops the view reshuffling between loads.
+    files.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.path.cmp(&b.path)));
+
+    Ok(Json(FilesDto {
+        total_lines: files.iter().map(|f| f.lines).sum(),
+        files,
+        health_available,
+    }))
 }
 
 async fn get_contributors(
@@ -1662,6 +1724,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
         .route("/api/ownership", get(get_ownership))
+        .route("/api/files", get(get_files))
         .route("/api/contributors", get(get_contributors))
         .route("/api/coverage", get(get_coverage))
         .route("/api/dead-code", get(get_dead_code))

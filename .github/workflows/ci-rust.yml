@@ -52,6 +52,12 @@ jobs:
       - name: Format (WASM web crate)
         run: cargo fmt --manifest-path crates/repowise-web/Cargo.toml -- --check
 
+      # Runs on the host target, not wasm: the crate's pure logic (the
+      # treemap layout in particular) is testable without a browser, and
+      # the alternative is a frontend with no test coverage at all.
+      - name: Test (WASM web crate)
+        run: cargo test --manifest-path crates/repowise-web/Cargo.toml
+
       # Clippy compiles as it lints, so this subsumes the bare `cargo check`
       # this step replaced.
       - name: Clippy (WASM web crate)

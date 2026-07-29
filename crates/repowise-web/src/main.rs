@@ -120,6 +120,148 @@ struct Health {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+struct FileEntry {
+    path: String,
+    language: String,
+    lines: usize,
+    score: Option<f64>,
+    finding_count: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Files {
+    files: Vec<FileEntry>,
+    total_lines: usize,
+    health_available: bool,
+}
+
+/// One laid-out treemap tile, in SVG user units.
+#[derive(Clone, Debug, PartialEq)]
+struct Tile {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    index: usize,
+}
+
+/// Squarified treemap layout (Bruls, Huizing & van Wijk).
+///
+/// Chosen over slice-and-dice because slice-and-dice degenerates into
+/// slivers as the item count grows -- unreadable at 85 files, let alone
+/// more. Squarified keeps tiles near-square, which is what makes the
+/// area comparison legible in the first place.
+///
+/// Written by hand rather than pulled from a crate: this is the whole
+/// algorithm, and a WASM binary should not grow a charting dependency
+/// for ~60 lines.
+///
+/// Pure and deterministic -- same `values` in the same order gives the
+/// same tiles, which is what stops the view reshuffling between loads.
+/// `values` must be sorted descending by the caller.
+fn squarify(values: &[f64], width: f64, height: f64) -> Vec<Tile> {
+    let total: f64 = values.iter().sum();
+    let mut tiles = Vec::new();
+    if total <= 0.0 || width <= 0.0 || height <= 0.0 {
+        return tiles;
+    }
+
+    // Work in area units scaled so the values fill the rectangle.
+    let scale = width * height / total;
+    let mut rect = (0.0f64, 0.0f64, width, height); // x, y, w, h
+    let mut i = 0usize;
+
+    while i < values.len() {
+        let (rx, ry, rw, rh) = rect;
+        if rw <= 0.0 || rh <= 0.0 {
+            break;
+        }
+        let short = rw.min(rh);
+
+        // Grow a row while doing so improves the worst aspect ratio.
+        let mut row_end = i;
+        let mut row_sum = 0.0f64;
+        let mut best = f64::INFINITY;
+        while row_end < values.len() {
+            let candidate_sum = row_sum + values[row_end] * scale;
+            let row = &values[i..=row_end];
+            let worst = worst_ratio(row, scale, candidate_sum, short);
+            if worst > best {
+                break;
+            }
+            best = worst;
+            row_sum = candidate_sum;
+            row_end += 1;
+        }
+
+        // Lay the row along the shorter side.
+        let thickness = if short > 0.0 { row_sum / short } else { 0.0 };
+        let mut offset = 0.0f64;
+        for (n, v) in values[i..row_end].iter().enumerate() {
+            let area = v * scale;
+            let length = if row_sum > 0.0 { area / thickness } else { 0.0 };
+            let tile = if rw >= rh {
+                Tile {
+                    x: rx,
+                    y: ry + offset,
+                    w: thickness,
+                    h: length,
+                    index: i + n,
+                }
+            } else {
+                Tile {
+                    x: rx + offset,
+                    y: ry,
+                    w: length,
+                    h: thickness,
+                    index: i + n,
+                }
+            };
+            offset += length;
+            tiles.push(tile);
+        }
+
+        rect = if rw >= rh {
+            (rx + thickness, ry, rw - thickness, rh)
+        } else {
+            (rx, ry + thickness, rw, rh - thickness)
+        };
+        i = row_end;
+    }
+    tiles
+}
+
+/// Worst (largest) aspect ratio in a candidate row.
+fn worst_ratio(row: &[f64], scale: f64, row_sum: f64, short: f64) -> f64 {
+    if row_sum <= 0.0 || short <= 0.0 {
+        return f64::INFINITY;
+    }
+    let areas: Vec<f64> = row.iter().map(|v| v * scale).collect();
+    let max = areas.iter().cloned().fold(f64::MIN, f64::max);
+    let min = areas.iter().cloned().fold(f64::MAX, f64::min);
+    let s2 = row_sum * row_sum;
+    let short2 = short * short;
+    ((short2 * max) / s2).max(s2 / (short2 * min))
+}
+
+/// Health band for a file score, as (label, fill).
+///
+/// The label matters as much as the fill: color alone is not an
+/// accessible channel, so every tile carries its band in text via the
+/// SVG `<title>`, and the legend names the bands rather than only
+/// showing swatches.
+fn health_band(score: Option<f64>) -> (&'static str, &'static str) {
+    match score {
+        // Unscored is its own band, never folded into "good" -- a file
+        // with no score is not a healthy file.
+        None => ("unscored", "#9e9e9e"),
+        Some(s) if s >= 8.0 => ("good", "#2e7d32"),
+        Some(s) if s >= 5.0 => ("fair", "#f9a825"),
+        _ => ("poor", "#c62828"),
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
 struct Contributor {
     author: String,
     lines_owned: usize,
@@ -567,6 +709,101 @@ fn HealthSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                             }}
                         }
                         .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Files treemap (issue #261): area proportional to lines, fill by
+/// health band.
+///
+/// Answers what the ranked tables cannot: where the mass of the codebase
+/// sits, and whether the big parts are healthy. A "10 worst files" table
+/// hides a large mediocre file behind ten small terrible ones.
+#[component]
+fn FilesSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let files = LocalResource::new(|| fetch_json::<Files>("/api/files"));
+    const W: f64 = 900.0;
+    const H: f64 = 420.0;
+
+    view! {
+        <h2>"Files"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                files
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(f) if f.files.is_empty() => view! {
+                            <p class="empty">"No indexed files."</p>
+                        }
+                        .into_any(),
+                        Ok(f) => {
+                            let values: Vec<f64> = f.files.iter().map(|e| e.lines as f64).collect();
+                            let tiles = squarify(&values, W, H);
+                            let entries = f.files.clone();
+                            let total_lines = f.total_lines;
+                            let health_available = f.health_available;
+                            view! {
+                                <p>
+                                    {format!(
+                                        "{} file(s), {} total line(s). Area is proportional to \
+                                         lines; fill is the health band.",
+                                        entries.len(), total_lines,
+                                    )}
+                                </p>
+                                // Degrade honestly rather than rendering
+                                // every tile grey with no explanation.
+                                {(!health_available)
+                                    .then(|| view! {
+                                        <p class="empty">
+                                            "Health scoring unavailable -- tiles are sized but \
+                                             not colored."
+                                        </p>
+                                    })}
+                                <p class="empty">
+                                    "Bands: good (>=8), fair (>=5), poor (<5), unscored. \
+                                     Each tile names its band on hover, so color is not the \
+                                     only channel."
+                                </p>
+                                <svg
+                                    viewBox=format!("0 0 {W} {H}")
+                                    style="width: 100%; height: auto; border: 1px solid #8884;"
+                                    role="img"
+                                >
+                                    {tiles.into_iter().filter_map(|t| {
+                                        let e = entries.get(t.index)?.clone();
+                                        let (band, fill) = health_band(e.score);
+                                        let label = match e.score {
+                                            Some(sc) => format!(
+                                                "{} -- {} lines, {} ({:.1}/10), {} marker(s)",
+                                                e.path, e.lines, band, sc, e.finding_count,
+                                            ),
+                                            None => format!(
+                                                "{} -- {} lines, {} ({})",
+                                                e.path, e.lines, band, e.language,
+                                            ),
+                                        };
+                                        let path = e.path.clone();
+                                        Some(view! {
+                                            <g>
+                                                <title>{label}</title>
+                                                <rect
+                                                    x=t.x y=t.y width=t.w height=t.h
+                                                    fill=fill
+                                                    stroke="#fff"
+                                                    stroke-width="1"
+                                                    style="cursor: pointer;"
+                                                    on:click=move |_| selected.set(Some(path.clone()))
+                                                />
+                                            </g>
+                                        })
+                                    }).collect::<Vec<_>>()}
+                                </svg>
+                            }
+                            .into_any()
+                        }
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
                     })
             }}
@@ -2219,6 +2456,7 @@ fn App() -> impl IntoView {
         <CoverageSection selected=selected />
         <HotspotsSection selected=selected />
         <ContributorsSection />
+        <FilesSection selected=selected />
         <DecisionsSection />
         <SymbolsSection selected=selected />
         <GraphSection selected=selected />
@@ -2237,4 +2475,102 @@ fn App() -> impl IntoView {
 fn main() {
     console_error_panic_hook::set_once();
     leptos::mount::mount_to_body(App);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Values must reach `squarify` sorted descending (the server sorts
+    /// them); these fixtures mirror that.
+    fn areas(tiles: &[Tile]) -> Vec<f64> {
+        tiles.iter().map(|t| t.w * t.h).collect()
+    }
+
+    #[test]
+    fn tiles_fill_the_whole_rectangle() {
+        // If the areas don't sum to the canvas, the treemap is lying
+        // about proportion -- the one thing it exists to convey.
+        let values = vec![50.0, 30.0, 12.0, 5.0, 3.0];
+        let tiles = squarify(&values, 400.0, 300.0);
+        assert_eq!(tiles.len(), values.len());
+        let covered: f64 = areas(&tiles).iter().sum();
+        assert!(
+            (covered - 400.0 * 300.0).abs() < 1.0,
+            "covered {covered} of {}",
+            400.0 * 300.0
+        );
+    }
+
+    #[test]
+    fn tile_area_is_proportional_to_its_value() {
+        let values = vec![60.0, 30.0, 10.0];
+        let tiles = squarify(&values, 200.0, 100.0);
+        let total_area = 200.0 * 100.0;
+        for t in &tiles {
+            let expected = values[t.index] / 100.0 * total_area;
+            let actual = t.w * t.h;
+            assert!(
+                (actual - expected).abs() < 1.0,
+                "index {}: expected {expected}, got {actual}",
+                t.index
+            );
+        }
+    }
+
+    #[test]
+    fn every_tile_stays_inside_the_canvas() {
+        let values = vec![40.0, 25.0, 15.0, 10.0, 6.0, 4.0];
+        for t in squarify(&values, 300.0, 200.0) {
+            assert!(t.x >= -0.001 && t.y >= -0.001, "{t:?}");
+            assert!(t.x + t.w <= 300.001, "{t:?}");
+            assert!(t.y + t.h <= 200.001, "{t:?}");
+            assert!(t.w >= 0.0 && t.h >= 0.0, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn layout_is_deterministic() {
+        // The view must not reshuffle between loads.
+        let values = vec![30.0, 20.0, 15.0, 10.0, 5.0];
+        assert_eq!(
+            squarify(&values, 500.0, 400.0),
+            squarify(&values, 500.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn degenerate_inputs_produce_no_tiles_rather_than_panicking() {
+        assert!(squarify(&[], 100.0, 100.0).is_empty());
+        assert!(squarify(&[0.0, 0.0], 100.0, 100.0).is_empty());
+        assert!(squarify(&[10.0], 0.0, 100.0).is_empty());
+        assert!(squarify(&[10.0], 100.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn a_single_file_takes_the_whole_canvas() {
+        let tiles = squarify(&[42.0], 120.0, 80.0);
+        assert_eq!(tiles.len(), 1);
+        assert!((tiles[0].w * tiles[0].h - 120.0 * 80.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn unscored_is_its_own_band_and_never_reads_as_healthy() {
+        // A file with no score is not a good file. Folding it into
+        // "good" would color unknown risk green.
+        let (label, unscored_fill) = health_band(None);
+        assert_eq!(label, "unscored");
+        let (good_label, good_fill) = health_band(Some(9.0));
+        assert_eq!(good_label, "good");
+        assert_ne!(unscored_fill, good_fill);
+    }
+
+    #[test]
+    fn health_bands_split_at_the_documented_boundaries() {
+        assert_eq!(health_band(Some(8.0)).0, "good");
+        assert_eq!(health_band(Some(7.99)).0, "fair");
+        assert_eq!(health_band(Some(5.0)).0, "fair");
+        assert_eq!(health_band(Some(4.99)).0, "poor");
+        assert_eq!(health_band(Some(0.0)).0, "poor");
+    }
 }

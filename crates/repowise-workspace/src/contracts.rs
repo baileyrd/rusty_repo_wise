@@ -192,19 +192,36 @@ fn scan_file(
     found
 }
 
-/// Regex-scans every workspace repo's already-indexed files for
-/// recognized HTTP producer/consumer call shapes, then matches each
-/// consumer call against every OTHER repo's producer routes. See the
-/// module doc comment for why this is coarse and heuristic by design.
-pub fn workspace_contracts(repos: &[ResolvedWorkspaceRepo]) -> ContractsReport {
+/// Everything one pass over the workspace found, including which repos
+/// it couldn't read.
+///
+/// `unindexed_repos` is the field that matters and the reason this
+/// struct exists. The scan skips any repo whose index won't load, which
+/// silently removes both its routes and its calls from consideration --
+/// so a workspace where half the repos were never indexed produces a
+/// short contract list that looks exactly like a workspace whose
+/// services genuinely don't talk to each other. Carrying the skipped
+/// names out of the scan is what lets `workspace_diagnostics` tell
+/// those two apart.
+struct WorkspaceScan {
+    producers: Vec<ProducerRoute>,
+    consumers: Vec<ConsumerCall>,
+    unindexed_repos: Vec<String>,
+}
+
+/// The one scan both `workspace_contracts` and `workspace_diagnostics`
+/// run, so the two can never disagree about what was found.
+fn scan_workspace(repos: &[ResolvedWorkspaceRepo]) -> WorkspaceScan {
     let producer_regexes = producer_patterns();
     let consumer_regexes = consumer_patterns();
 
     let mut producers: Vec<ProducerRoute> = Vec::new();
     let mut consumers: Vec<ConsumerCall> = Vec::new();
+    let mut unindexed_repos: Vec<String> = Vec::new();
 
     for repo in repos {
         let Ok(index) = RepoIndex::load(&repo.path) else {
+            unindexed_repos.push(repo.name.clone());
             continue;
         };
         for file in &index.files {
@@ -226,6 +243,242 @@ pub fn workspace_contracts(repos: &[ResolvedWorkspaceRepo]) -> ContractsReport {
             }
         }
     }
+
+    WorkspaceScan {
+        producers,
+        consumers,
+        unindexed_repos,
+    }
+}
+
+/// Why one consumer call has no cross-repo contract.
+///
+/// The whole point of `workspace diagnostics`. `workspace-contracts`
+/// reports an unmatched consumer as a single undifferentiated finding,
+/// but these four cases mean completely different things and only two
+/// of them are even problems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnmatchedReason {
+    /// A producer in *another* repo serves this path, but registers a
+    /// different HTTP method. A real mismatch worth looking at.
+    MethodMismatch,
+    /// A producer serves this path, but only inside the consumer's own
+    /// repo. **Not a gap**: an intra-repo call was never going to be a
+    /// cross-repo contract. Reported separately precisely so it stops
+    /// being counted as a missing one.
+    SameRepoOnly,
+    /// No producer anywhere in the workspace serves this path. Either a
+    /// genuinely external API, or a producer idiom the pattern table
+    /// doesn't recognize -- this scan cannot tell which, and says so
+    /// rather than picking.
+    NoProducerAnywhere,
+}
+
+impl UnmatchedReason {
+    pub fn label(&self) -> &'static str {
+        match self {
+            UnmatchedReason::MethodMismatch => "method-mismatch",
+            UnmatchedReason::SameRepoOnly => "same-repo-only",
+            UnmatchedReason::NoProducerAnywhere => "no-producer-anywhere",
+        }
+    }
+
+    /// What a reader should actually do about it.
+    pub fn explanation(&self) -> &'static str {
+        match self {
+            UnmatchedReason::MethodMismatch => {
+                "another repo serves this path but registers a different HTTP method"
+            }
+            UnmatchedReason::SameRepoOnly => {
+                "served within the calling repo itself -- not a cross-repo contract, \
+                 and not a gap"
+            }
+            UnmatchedReason::NoProducerAnywhere => {
+                "no repo in this workspace registers this path -- either an external \
+                 API, or a route idiom this scan's pattern table doesn't recognize"
+            }
+        }
+    }
+}
+
+/// One consumer call that produced no contract, and why.
+#[derive(Debug, Clone)]
+pub struct UnmatchedConsumer {
+    pub call: ConsumerCall,
+    pub reason: UnmatchedReason,
+}
+
+/// A route registered by some repo that nothing in the workspace calls.
+///
+/// Ambiguous on purpose: it's either dead surface, or a consumer this
+/// scan's pattern table missed. Reported so a reader can decide, not
+/// labelled as dead code.
+#[derive(Debug, Clone)]
+pub struct OrphanProducer {
+    pub route: ProducerRoute,
+}
+
+/// Per-repo counts of what the scan actually found.
+#[derive(Debug, Clone)]
+pub struct RepoEndpointCounts {
+    pub repo: String,
+    pub producers: usize,
+    pub consumers: usize,
+    /// `false` when this repo's index couldn't be loaded -- its zeros
+    /// above mean "not looked at", not "nothing there".
+    pub indexed: bool,
+}
+
+/// Why the cross-repo contract link count is what it is.
+///
+/// Answers the question `workspace-contracts` leaves open: a short or
+/// empty match list is either an architecture finding or a tooling
+/// artifact, and until now those looked identical.
+#[derive(Debug, Clone, Default)]
+pub struct ContractDiagnostics {
+    pub repos: Vec<RepoEndpointCounts>,
+    pub matches: usize,
+    pub unmatched_consumers: Vec<UnmatchedConsumer>,
+    pub orphan_producers: Vec<OrphanProducer>,
+}
+
+impl ContractDiagnostics {
+    /// Unmatched-consumer counts per reason, highest first.
+    pub fn unmatched_by_reason(&self) -> Vec<(UnmatchedReason, usize)> {
+        let reasons = [
+            UnmatchedReason::NoProducerAnywhere,
+            UnmatchedReason::SameRepoOnly,
+            UnmatchedReason::MethodMismatch,
+        ];
+        let mut out: Vec<(UnmatchedReason, usize)> = reasons
+            .into_iter()
+            .map(|r| {
+                (
+                    r,
+                    self.unmatched_consumers
+                        .iter()
+                        .filter(|u| u.reason == r)
+                        .count(),
+                )
+            })
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        out.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        out
+    }
+
+    /// Repos the scan couldn't read at all.
+    ///
+    /// Checked first when reading a thin report: every one of these
+    /// contributed zero routes and zero calls, so the contract count is
+    /// a floor, not a finding.
+    pub fn unindexed_repos(&self) -> Vec<&str> {
+        self.repos
+            .iter()
+            .filter(|r| !r.indexed)
+            .map(|r| r.repo.as_str())
+            .collect()
+    }
+}
+
+/// Explain the cross-repo contract link count: per-repo producer and
+/// consumer counts, every unmatched consumer classified by *why* it
+/// didn't match, and producers nothing calls.
+///
+/// Shares [`scan_workspace`] with [`workspace_contracts`], so the two
+/// cannot disagree about what was found.
+pub fn workspace_diagnostics(repos: &[ResolvedWorkspaceRepo]) -> ContractDiagnostics {
+    let scan = scan_workspace(repos);
+
+    let counts = repos
+        .iter()
+        .map(|repo| RepoEndpointCounts {
+            repo: repo.name.clone(),
+            producers: scan
+                .producers
+                .iter()
+                .filter(|p| p.repo == repo.name)
+                .count(),
+            consumers: scan
+                .consumers
+                .iter()
+                .filter(|c| c.repo == repo.name)
+                .count(),
+            indexed: !scan.unindexed_repos.contains(&repo.name),
+        })
+        .collect();
+
+    let mut matches = 0usize;
+    let mut unmatched_consumers = Vec::new();
+    // Producer indices that some consumer matched, so orphans are
+    // "nothing matched this", not "nothing matched this path".
+    let mut matched_producers = vec![false; scan.producers.len()];
+
+    for consumer in &scan.consumers {
+        let path_hit = |p: &ProducerRoute| paths_match(&p.path, &consumer.path);
+        let method_hit = |p: &ProducerRoute| match (&p.method, &consumer.method) {
+            (Some(pm), Some(cm)) => pm == cm,
+            _ => true,
+        };
+
+        if let Some(i) = scan
+            .producers
+            .iter()
+            .position(|p| p.repo != consumer.repo && path_hit(p) && method_hit(p))
+        {
+            matches += 1;
+            matched_producers[i] = true;
+            continue;
+        }
+
+        // Ordered most-specific first: a cross-repo producer that only
+        // differs by method is a sharper finding than "nothing serves
+        // this", and an intra-repo hit isn't a finding at all.
+        let reason = if scan
+            .producers
+            .iter()
+            .any(|p| p.repo != consumer.repo && path_hit(p))
+        {
+            UnmatchedReason::MethodMismatch
+        } else if scan
+            .producers
+            .iter()
+            .any(|p| p.repo == consumer.repo && path_hit(p))
+        {
+            UnmatchedReason::SameRepoOnly
+        } else {
+            UnmatchedReason::NoProducerAnywhere
+        };
+
+        unmatched_consumers.push(UnmatchedConsumer {
+            call: consumer.clone(),
+            reason,
+        });
+    }
+
+    let orphan_producers = scan
+        .producers
+        .into_iter()
+        .zip(matched_producers)
+        .filter(|(_, matched)| !matched)
+        .map(|(route, _)| OrphanProducer { route })
+        .collect();
+
+    ContractDiagnostics {
+        repos: counts,
+        matches,
+        unmatched_consumers,
+        orphan_producers,
+    }
+}
+
+/// Regex-scans every workspace repo's already-indexed files for
+/// recognized HTTP producer/consumer call shapes, then matches each
+/// consumer call against every OTHER repo's producer routes. See the
+/// module doc comment for why this is coarse and heuristic by design.
+pub fn workspace_contracts(repos: &[ResolvedWorkspaceRepo]) -> ContractsReport {
+    let scan = scan_workspace(repos);
+    let (producers, consumers) = (scan.producers, scan.consumers);
 
     let mut matches = Vec::new();
     let mut unmatched_consumers = Vec::new();

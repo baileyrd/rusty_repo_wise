@@ -6,6 +6,40 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #287 — CLI: `workspace-diagnostics`
+**2026-07-29** · closes [#274](https://github.com/baileyrd/rusty_repo_wise/issues/274)
+
+- **Added `repowise workspace-diagnostics --workspace <path> [--json]`**, the
+  companion that answers what `workspace-contracts` leaves open: *why* is the
+  contract list short? That number is either an architecture finding or a
+  tooling artifact, and until now the two were indistinguishable.
+- **Unmatched consumers are now classified by reason**, and the existing
+  command's single heading turns out to be wrong for most of them. On a
+  three-repo test workspace, `workspace-contracts` files all three unmatched
+  calls under "no known producer in this workspace" — but `/api/users` **has**
+  a producer (same repo as the caller) and `/api/orders` **has** one (different
+  HTTP verb). Only one of the three genuinely has none. The new reasons:
+  `same-repo-only` (not a cross-repo gap at all), `method-mismatch`,
+  `no-producer-anywhere`.
+- **Repos the scan couldn't read are reported first, loudly.** `workspace_contracts`
+  silently `continue`d past any repo whose index failed to load, dropping its
+  routes *and* its calls. A workspace half-unindexed produced a thin report that
+  looked exactly like services that don't talk to each other. The report now
+  leads with those names and says every count below is a floor, not a finding —
+  and an unread repo's row reads "not indexed — not scanned" rather than
+  "0 producers, 0 consumers".
+- **Orphan producers** (routes nothing calls) are reported as deliberately
+  ambiguous — dead surface *or* a consumer idiom the pattern table missed — not
+  labelled dead code.
+- **One shared scan.** `workspace_contracts` and `workspace_diagnostics` both
+  call `scan_workspace`, so they can't disagree about what was found; a test
+  asserts their match counts stay equal.
+- 10 new tests (5 integration against real multi-repo directories, 5 over the
+  rendering). Verified end to end on a 3-repo workspace with one repo left
+  deliberately unindexed — all four reasons fire correctly.
+
+---
+
 ## PR #286 — MCP: `get_health` tool
 **2026-07-29** · closes [#273](https://github.com/baileyrd/rusty_repo_wise/issues/273)
 

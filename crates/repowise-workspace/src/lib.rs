@@ -45,7 +45,9 @@
 mod contracts;
 
 pub use contracts::{
-    workspace_contracts, ConsumerCall, ContractMatch, ContractsReport, ProducerRoute,
+    workspace_contracts, workspace_diagnostics, ConsumerCall, ContractDiagnostics, ContractMatch,
+    ContractsReport, OrphanProducer, ProducerRoute, RepoEndpointCounts, UnmatchedConsumer,
+    UnmatchedReason,
 };
 
 use repowise_core::RepoIndex;

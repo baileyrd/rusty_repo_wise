@@ -305,6 +305,19 @@ enum Command {
     /// OTHER repos. Coarse and heuristic by design -- no cross-repo
     /// symbol resolution involved, just a fixed pattern table over raw
     /// source text. See `repowise-workspace`'s own docs for the caveat.
+    /// Explain the cross-repo contract link count that
+    /// `workspace-contracts` reports: per-repo producer/consumer
+    /// counts, every unmatched consumer classified by WHY it didn't
+    /// match, and producers nothing in the workspace calls. Answers
+    /// the question a short contract list leaves open -- whether it's
+    /// an architecture finding or just an unindexed repo.
+    WorkspaceDiagnostics {
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Emit the raw diagnostics as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     WorkspaceContracts {
         #[arg(long)]
         workspace: PathBuf,
@@ -413,6 +426,9 @@ fn main() -> anyhow::Result<()> {
             static_dir,
             workspace,
         } => cmd_serve_dashboard(&path, addr, static_dir, workspace),
+        Command::WorkspaceDiagnostics { workspace, json } => {
+            cmd_workspace_diagnostics(&workspace, json)
+        }
         Command::WorkspaceRepos { workspace } => cmd_workspace_repos(&workspace),
         Command::WorkspaceCoChanges { workspace, top } => cmd_workspace_co_changes(&workspace, top),
         Command::WorkspaceArchitecture { workspace } => cmd_workspace_architecture(&workspace),
@@ -1519,6 +1535,155 @@ fn cmd_workspace_conformance(workspace: &Path) -> anyhow::Result<()> {
 }
 
 /// See `repowise-workspace`'s own docs for the workspace TOML format.
+/// Render the contract diagnostics report.
+///
+/// Split from `cmd_workspace_diagnostics` so the wording -- which is
+/// most of this feature's value -- is testable without a workspace on
+/// disk.
+///
+/// Leads with unindexed repos when there are any. That ordering is the
+/// point of the whole command: every other number below is a floor
+/// rather than a finding while a repo is missing from the scan, and
+/// burying that under the counts would let someone read a confidently
+/// wrong conclusion off the top of the output.
+fn render_diagnostics(diag: &repowise_workspace::ContractDiagnostics) -> String {
+    let mut out = String::new();
+    let unindexed = diag.unindexed_repos();
+
+    if !unindexed.is_empty() {
+        out.push_str(&format!(
+            "WARNING: {} of {} repo(s) could not be read, and contributed no routes\n\
+             and no calls to anything below. Every count in this report is a floor,\n\
+             not a finding, until these are indexed:\n",
+            unindexed.len(),
+            diag.repos.len()
+        ));
+        for name in &unindexed {
+            out.push_str(&format!("  {name} -- run `repowise update` in it\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("Per-repo endpoints found:\n");
+    for repo in &diag.repos {
+        if repo.indexed {
+            out.push_str(&format!(
+                "  {:<24} {} producer route(s), {} consumer call(s)\n",
+                repo.repo, repo.producers, repo.consumers
+            ));
+        } else {
+            out.push_str(&format!("  {:<24} not indexed -- not scanned\n", repo.repo));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nMatched cross-repo contracts: {}\n",
+        diag.matches
+    ));
+
+    let by_reason = diag.unmatched_by_reason();
+    if by_reason.is_empty() {
+        out.push_str("\nEvery consumer call matched a producer in another repo.\n");
+    } else {
+        out.push_str("\nConsumer calls with no cross-repo contract, by reason:\n");
+        for (reason, count) in by_reason {
+            out.push_str(&format!(
+                "  {:<22} {:>4}  -- {}\n",
+                reason.label(),
+                count,
+                reason.explanation()
+            ));
+        }
+        out.push_str("\nDetail:\n");
+        for u in &diag.unmatched_consumers {
+            out.push_str(&format!(
+                "  [{}] {} ({} :: {})\n",
+                u.reason.label(),
+                u.call.path,
+                u.call.repo,
+                u.call.file.display()
+            ));
+        }
+    }
+
+    if diag.orphan_producers.is_empty() {
+        out.push_str("\nNo orphan producer routes.\n");
+    } else {
+        out.push_str(&format!(
+            "\nProducer routes nothing in this workspace calls ({}):\n\
+             \x20 Either dead surface, or a consumer idiom this scan doesn't recognize --\n\
+             \x20 this scan can't tell which, so neither is claimed.\n",
+            diag.orphan_producers.len()
+        ));
+        for o in &diag.orphan_producers {
+            out.push_str(&format!(
+                "  {} ({} :: {})\n",
+                o.route.path,
+                o.route.repo,
+                o.route.file.display()
+            ));
+        }
+    }
+
+    out
+}
+
+/// The report as JSON, hand-built rather than derived.
+///
+/// `ContractDiagnostics` deliberately doesn't derive `Serialize`:
+/// `repowise-workspace` is a library crate with no serde dependency,
+/// and the JSON shape here is a CLI output contract, which is a
+/// different thing from the in-memory type and should be free to
+/// diverge from it.
+fn diagnostics_json(diag: &repowise_workspace::ContractDiagnostics) -> serde_json::Value {
+    serde_json::json!({
+        "repos": diag.repos.iter().map(|r| serde_json::json!({
+            "repo": r.repo,
+            "indexed": r.indexed,
+            "producers": r.producers,
+            "consumers": r.consumers,
+        })).collect::<Vec<_>>(),
+        "unindexed_repos": diag.unindexed_repos(),
+        "matches": diag.matches,
+        "unmatched_by_reason": diag.unmatched_by_reason().into_iter().map(|(r, n)| serde_json::json!({
+            "reason": r.label(),
+            "count": n,
+            "explanation": r.explanation(),
+        })).collect::<Vec<_>>(),
+        "unmatched_consumers": diag.unmatched_consumers.iter().map(|u| serde_json::json!({
+            "reason": u.reason.label(),
+            "path": u.call.path,
+            "repo": u.call.repo,
+            "file": u.call.file.display().to_string(),
+            "method": u.call.method,
+        })).collect::<Vec<_>>(),
+        "orphan_producers": diag.orphan_producers.iter().map(|o| serde_json::json!({
+            "path": o.route.path,
+            "repo": o.route.repo,
+            "file": o.route.file.display().to_string(),
+            "method": o.route.method,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn cmd_workspace_diagnostics(workspace: &Path, json: bool) -> anyhow::Result<()> {
+    let repos = repowise_workspace::load_resolved(workspace)?;
+    if repos.is_empty() {
+        println!("No repos configured in {}", workspace.display());
+        return Ok(());
+    }
+    let diag = repowise_workspace::workspace_diagnostics(&repos);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&diagnostics_json(&diag))?
+        );
+    } else {
+        print!("{}", render_diagnostics(&diag));
+    }
+    Ok(())
+}
+
 fn cmd_workspace_contracts(workspace: &Path) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
     if repos.is_empty() {
@@ -1607,6 +1772,9 @@ fn display_path(path: &Path, root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use repowise_workspace::{
+        ContractDiagnostics, OrphanProducer, RepoEndpointCounts, UnmatchedConsumer, UnmatchedReason,
+    };
 
     fn candidate(
         name: &str,
@@ -1841,5 +2009,140 @@ mod tests {
         let none = render_bus_factor(0);
         assert!(none.contains("n/a"), "{none}");
         assert!(none.contains("no blameable lines"), "{none}");
+    }
+
+    fn counts(repo: &str, producers: usize, consumers: usize, indexed: bool) -> RepoEndpointCounts {
+        RepoEndpointCounts {
+            repo: repo.to_string(),
+            producers,
+            consumers,
+            indexed,
+        }
+    }
+
+    fn call(repo: &str, path: &str) -> repowise_workspace::ConsumerCall {
+        repowise_workspace::ConsumerCall {
+            repo: repo.to_string(),
+            file: PathBuf::from("app.js"),
+            method: None,
+            path: path.to_string(),
+        }
+    }
+
+    /// An unindexed repo must be the FIRST thing the report says.
+    /// Every count below it is a floor rather than a finding while a
+    /// repo is missing from the scan, and burying that under the
+    /// numbers is how someone reads a confidently wrong conclusion off
+    /// the top of the output.
+    #[test]
+    fn diagnostics_leads_with_unread_repos() {
+        let diag = ContractDiagnostics {
+            repos: vec![counts("api", 3, 0, true), counts("web", 0, 0, false)],
+            matches: 0,
+            unmatched_consumers: Vec::new(),
+            orphan_producers: Vec::new(),
+        };
+        let out = render_diagnostics(&diag);
+        let warn = out
+            .find("WARNING")
+            .expect("unread repos must be called out");
+        let counts_at = out.find("Per-repo endpoints").unwrap();
+        assert!(warn < counts_at, "the warning must come first:\n{out}");
+        assert!(out.contains("floor"), "{out}");
+        assert!(out.contains("repowise update"), "{out}");
+        assert!(
+            out.contains("web") && out.contains("not indexed -- not scanned"),
+            "an unread repo's row must not read as '0 producers, 0 consumers':\n{out}"
+        );
+    }
+
+    /// A clean workspace must not print the warning at all -- a banner
+    /// that shows up unconditionally is one nobody reads.
+    #[test]
+    fn diagnostics_stays_quiet_when_every_repo_was_read() {
+        let diag = ContractDiagnostics {
+            repos: vec![counts("api", 2, 0, true), counts("web", 0, 2, true)],
+            matches: 2,
+            unmatched_consumers: Vec::new(),
+            orphan_producers: Vec::new(),
+        };
+        let out = render_diagnostics(&diag);
+        assert!(!out.contains("WARNING"), "{out}");
+        assert!(out.contains("Every consumer call matched"), "{out}");
+        assert!(out.contains("No orphan producer routes"), "{out}");
+    }
+
+    #[test]
+    fn diagnostics_groups_unmatched_consumers_by_reason_with_an_explanation() {
+        let diag = ContractDiagnostics {
+            repos: vec![counts("api", 1, 2, true)],
+            matches: 0,
+            unmatched_consumers: vec![
+                UnmatchedConsumer {
+                    call: call("api", "/api/local"),
+                    reason: UnmatchedReason::SameRepoOnly,
+                },
+                UnmatchedConsumer {
+                    call: call("api", "/api/gone"),
+                    reason: UnmatchedReason::NoProducerAnywhere,
+                },
+            ],
+            orphan_producers: Vec::new(),
+        };
+        let out = render_diagnostics(&diag);
+        assert!(out.contains("same-repo-only"), "{out}");
+        assert!(out.contains("no-producer-anywhere"), "{out}");
+        // The explanation is the point: a bare count of "2 unmatched"
+        // is exactly the undifferentiated number this command exists
+        // to break apart.
+        assert!(out.contains("not a cross-repo contract"), "{out}");
+        assert!(out.contains("pattern table doesn't recognize"), "{out}");
+    }
+
+    #[test]
+    fn diagnostics_refuses_to_call_orphan_producers_dead() {
+        let diag = ContractDiagnostics {
+            repos: vec![counts("api", 1, 0, true)],
+            matches: 0,
+            unmatched_consumers: Vec::new(),
+            orphan_producers: vec![OrphanProducer {
+                route: repowise_workspace::ProducerRoute {
+                    repo: "api".to_string(),
+                    file: PathBuf::from("routes.rs"),
+                    method: None,
+                    path: "/api/unused".to_string(),
+                },
+            }],
+        };
+        let out = render_diagnostics(&diag);
+        assert!(out.contains("/api/unused"), "{out}");
+        assert!(
+            out.contains("Either dead surface, or a consumer idiom this scan doesn't recognize"),
+            "an orphan route is ambiguous and the report must not resolve it:\n{out}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_json_carries_the_reasons_not_just_the_counts() {
+        let diag = ContractDiagnostics {
+            repos: vec![counts("api", 0, 1, true), counts("web", 0, 0, false)],
+            matches: 0,
+            unmatched_consumers: vec![UnmatchedConsumer {
+                call: call("api", "/api/gone"),
+                reason: UnmatchedReason::NoProducerAnywhere,
+            }],
+            orphan_producers: Vec::new(),
+        };
+        let v = diagnostics_json(&diag);
+        assert_eq!(v["unindexed_repos"][0], "web");
+        assert_eq!(
+            v["unmatched_by_reason"][0]["reason"],
+            "no-producer-anywhere"
+        );
+        assert!(v["unmatched_by_reason"][0]["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("external"));
+        assert_eq!(v["unmatched_consumers"][0]["path"], "/api/gone");
     }
 }

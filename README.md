@@ -341,6 +341,7 @@ repowise workspace-architecture --workspace <FILE>  # cross-repo Rust `use` reso
 repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  # direct cross-repo importers of one file
 repowise workspace-conformance --workspace <FILE>  # circular cross-repo dependencies (repo A imports B imports A)
 repowise workspace-contracts --workspace <FILE>  # regex-based HTTP producer/consumer route matching across repos
+repowise workspace-diagnostics --workspace <FILE> # why that contract count is what it is (unmatched-by-reason, orphan routes, unread repos)
 ```
 
 ## Health scoring
@@ -2189,6 +2190,30 @@ route-shaped string that isn't actually a route) are both expected.
   producer/consumer pairs and any consumer calls with no known producer
   in the workspace (not necessarily a problem — may be a genuinely
   external API, or a producer this heuristic doesn't recognize).
+- `repowise workspace-diagnostics --workspace <path> [--json]` explains
+  that link count, because a short match list is ambiguous on its own:
+  it's either an architecture finding or a tooling artifact, and those
+  look identical. It reports:
+  - **Repos it couldn't read, first and loudly.** The scan skips any repo
+    whose index won't load, removing its routes *and* its calls from
+    consideration. A workspace where half the repos were never indexed
+    produces a thin report that looks exactly like services that don't
+    talk to each other. Every count is a floor, not a finding, until
+    those are indexed — and an unread repo's row says "not indexed —
+    not scanned" rather than "0 producers, 0 consumers".
+  - **Each unmatched consumer classified by *why*.** `same-repo-only`
+    (served inside the calling repo — **not a cross-repo gap at all**),
+    `method-mismatch` (another repo serves the path under a different
+    verb), `no-producer-anywhere` (external API, or an idiom the pattern
+    table missed — this scan can't tell which and doesn't guess).
+    `workspace-contracts` files all of these under one heading, which
+    for the first two is actively wrong: they *do* have a known producer.
+  - **Producer routes nothing calls.** Ambiguous by design — dead surface
+    or a missed consumer idiom — and reported as such rather than
+    labelled dead code.
+
+  Both commands share one scan, so they can never disagree about what was
+  found; a test asserts their match counts stay equal.
 - `repowise serve-dashboard --workspace <path>` gains `GET
   /api/workspace-contracts` and the dashboard gets a **Contracts
   section**.

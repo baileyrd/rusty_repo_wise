@@ -148,3 +148,224 @@ fn workspace_contracts_matches_route_templates_against_a_literal_path() {
     assert_eq!(report.matches.len(), 1);
     assert_eq!(report.matches[0].path, "/api/users/42");
 }
+
+/// Create a repo directory with the given files, indexed.
+fn repo_with(root: &Path, name: &str, files: &[(&str, &str)]) -> ResolvedWorkspaceRepo {
+    let path = root.join(name);
+    fs::create_dir_all(&path).unwrap();
+    for (file, source) in files {
+        fs::write(path.join(file), source).unwrap();
+    }
+    index_dir(&path);
+    ResolvedWorkspaceRepo {
+        name: name.to_string(),
+        path,
+    }
+}
+
+/// The distinction this command exists for: a consumer call served
+/// only inside its own repo is NOT a missing cross-repo contract, and
+/// must not be counted as one.
+#[test]
+fn diagnostics_separates_same_repo_calls_from_genuinely_unserved_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    let app = repo_with(
+        &root,
+        "app",
+        &[
+            (
+                "routes.rs",
+                r#"fn r() { Router::new().route("/api/local", get(h)); }"#,
+            ),
+            (
+                "client.js",
+                r#"async function a() {
+    await fetch("/api/local");
+    await fetch("/api/nowhere");
+}"#,
+            ),
+        ],
+    );
+    let repos = vec![app];
+
+    let diag = repowise_workspace::workspace_diagnostics(&repos);
+
+    let reasons: Vec<_> = diag
+        .unmatched_consumers
+        .iter()
+        .map(|u| (u.call.path.as_str(), u.reason))
+        .collect();
+    assert!(
+        reasons.contains(&(
+            "/api/local",
+            repowise_workspace::UnmatchedReason::SameRepoOnly
+        )),
+        "a route served by the calling repo itself is not a cross-repo gap: {reasons:?}"
+    );
+    assert!(
+        reasons.contains(&(
+            "/api/nowhere",
+            repowise_workspace::UnmatchedReason::NoProducerAnywhere
+        )),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn diagnostics_reports_a_cross_repo_path_hit_with_a_different_method_as_a_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    let server = repo_with(
+        &root,
+        "server",
+        &[(
+            "routes.rs",
+            r#"fn r() { Router::new().route("/api/thing", post(h)); }"#,
+        )],
+    );
+    let client = repo_with(
+        &root,
+        "client",
+        &[(
+            "app.js",
+            r#"async function a() { await axios.get("/api/thing"); }"#,
+        )],
+    );
+
+    let diag = repowise_workspace::workspace_diagnostics(&vec![server, client]);
+
+    assert_eq!(
+        diag.unmatched_consumers.len(),
+        1,
+        "{:?}",
+        diag.unmatched_consumers
+    );
+    assert_eq!(
+        diag.unmatched_consumers[0].reason,
+        repowise_workspace::UnmatchedReason::MethodMismatch,
+        "a path served cross-repo under a different verb is sharper than 'nothing serves this'"
+    );
+}
+
+/// The failure mode that motivated this command: an unindexed repo
+/// contributes nothing at all, and a thin report then looks like an
+/// architecture finding.
+#[test]
+fn diagnostics_names_repos_it_could_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    let indexed = repo_with(
+        &root,
+        "indexed",
+        &[(
+            "routes.rs",
+            r#"fn r() { Router::new().route("/api/x", get(h)); }"#,
+        )],
+    );
+    // Exists on disk but was never indexed.
+    let never = root.join("never");
+    fs::create_dir_all(&never).unwrap();
+    fs::write(
+        never.join("app.js"),
+        r#"async function a() { await fetch("/api/x"); }"#,
+    )
+    .unwrap();
+
+    let diag = repowise_workspace::workspace_diagnostics(&vec![
+        indexed,
+        ResolvedWorkspaceRepo {
+            name: "never".to_string(),
+            path: never,
+        },
+    ]);
+
+    assert_eq!(diag.unindexed_repos(), vec!["never"]);
+    assert_eq!(
+        diag.matches, 0,
+        "the call in the unindexed repo was never scanned"
+    );
+    // And the report must not present that zero as a finding -- the
+    // per-repo row says "not indexed" rather than "0 consumers".
+    let never_row = diag.repos.iter().find(|r| r.repo == "never").unwrap();
+    assert!(!never_row.indexed);
+    assert_eq!(never_row.consumers, 0);
+}
+
+#[test]
+fn diagnostics_reports_producers_nothing_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    let server = repo_with(
+        &root,
+        "server",
+        &[(
+            "routes.rs",
+            r#"fn r() {
+    Router::new().route("/api/used", get(a));
+    Router::new().route("/api/unused", get(b));
+}"#,
+        )],
+    );
+    let client = repo_with(
+        &root,
+        "client",
+        &[(
+            "app.js",
+            r#"async function a() { await fetch("/api/used"); }"#,
+        )],
+    );
+
+    let diag = repowise_workspace::workspace_diagnostics(&vec![server, client]);
+
+    let orphans: Vec<_> = diag
+        .orphan_producers
+        .iter()
+        .map(|o| o.route.path.as_str())
+        .collect();
+    assert!(orphans.contains(&"/api/unused"), "{orphans:?}");
+    assert!(
+        !orphans.contains(&"/api/used"),
+        "a matched producer isn't an orphan: {orphans:?}"
+    );
+}
+
+/// Diagnostics and contracts share one scan, so their match counts must
+/// agree. If they ever diverge, one of the two is lying about the same
+/// workspace.
+#[test]
+fn diagnostics_match_count_agrees_with_workspace_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    let server = repo_with(
+        &root,
+        "server",
+        &[(
+            "routes.rs",
+            r#"fn r() { Router::new().route("/api/shared", get(h)); }"#,
+        )],
+    );
+    let client = repo_with(
+        &root,
+        "client",
+        &[(
+            "app.js",
+            r#"async function a() { await fetch("/api/shared"); }"#,
+        )],
+    );
+    let repos = vec![server, client];
+
+    let contracts = workspace_contracts(&repos);
+    let diag = repowise_workspace::workspace_diagnostics(&repos);
+
+    assert_eq!(contracts.matches.len(), diag.matches);
+    assert_eq!(
+        contracts.unmatched_consumers.len(),
+        diag.unmatched_consumers.len()
+    );
+}

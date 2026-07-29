@@ -6,6 +6,37 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #286 — MCP: `get_health` tool
+**2026-07-29** · closes [#273](https://github.com/baileyrd/rusty_repo_wise/issues/273)
+
+- **Added `get_health`**, the last of the reference's ten flagship MCP tools
+  this port could implement. Only `get_answer` remains, and it needs an LLM
+  (#61). The backend was already finished — `repowise-health` computes the
+  scores and the `health` CLI renders them — so this is the agent-facing entry
+  point that was missing.
+- **Two modes.** No `targets` → repo mode: lowest-scoring files plus findings
+  by kind. With `targets` → per-file scores and findings.
+- **Two averages, and the gap between them is the point.** `average_score` is
+  line-weighted, `average_score_unweighted` is the plain file mean, and
+  `average_score_weighting` names which is which. On this repo they read **0.70
+  weighted against 1.54 unweighted** — which says the bad scores sit in the big
+  files, not the long tail. Neither number alone conveys that.
+- **Repo-wide averages are omitted in targeted mode**, not zeroed. Beside a
+  two-file answer they would read as those two files' average.
+- **Nothing is dropped silently.** A target that produced no score is named in
+  `unresolved` with a reason — `not_indexed` (on disk, absent from the index)
+  or `no_such_path` — because those need different fixes and an absent row
+  looks like neither. An empty `files` list means healthy *or* means we
+  couldn't look, and the response now says which.
+- **The cap reports itself**: `files_total` carries the pre-truncation count,
+  so a 3-row answer can't be misread as "there are only 3".
+- Verified over real MCP stdio against this repo: 74 files, both `unresolved`
+  reasons firing on real paths, and the unweighted average matching `repowise
+  health`'s own output (1.5) — the two surfaces agree.
+- 6 new tests (49 total in the crate).
+
+---
+
 ## PR #272 — MCP: `_meta` response envelope (staleness, timing, provenance)
 **2026-07-29** · closes [#272](https://github.com/baileyrd/rusty_repo_wise/issues/272)
 

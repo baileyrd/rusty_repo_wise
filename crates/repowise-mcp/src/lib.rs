@@ -4,7 +4,7 @@
 //!
 //! Implements `get_overview`, `search_codebase`, `get_context`,
 //! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`,
-//! `get_dead_code`, plus `list_repos`, `get_architecture` and
+//! `get_dead_code`, `get_health`, plus `list_repos`, `get_architecture` and
 //! `get_blast_radius` (the last three have no counterpart in the
 //! reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
@@ -486,6 +486,94 @@ struct DeadCodeOutput {
     total_matching: usize,
 }
 
+/// Default rows in `get_health`'s ranked lists.
+const HEALTH_DEFAULT_LIMIT: usize = 20;
+
+/// Hard cap on `get_health`'s ranked lists, matching the reference.
+/// A caller asking for 5000 worst files doesn't want them; it wants a
+/// ranked list, and an unbounded one is a token bill, not an answer.
+const HEALTH_MAX_LIMIT: usize = 50;
+
+fn default_health_limit() -> usize {
+    HEALTH_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+struct HealthParams {
+    /// File paths to score individually. Omit (or pass an empty list)
+    /// for repo-wide mode: KPIs plus the lowest-scoring files.
+    #[serde(default)]
+    targets: Vec<String>,
+    /// Max rows in every ranked list. Default 20, capped at 50.
+    #[serde(default = "default_health_limit")]
+    limit: usize,
+}
+
+/// A requested target that produced no score, and why.
+///
+/// The reason matters more than the fact. "This file isn't in the
+/// index" (run `repowise update`) and "there is no such path" are
+/// different problems with different fixes, and collapsing them into an
+/// absent row makes both look like "healthy, nothing to report".
+#[derive(Serialize, schemars::JsonSchema)]
+struct UnresolvedTarget {
+    target: String,
+    /// `not_indexed` — the path exists on disk but isn't in the index.
+    /// `no_such_path` — nothing on disk matches it.
+    reason: &'static str,
+    hint: &'static str,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct FileHealthOutput {
+    file: String,
+    /// 0.0 (unhealthy) to 10.0 (no markers triggered).
+    score: f64,
+    lines: usize,
+    findings: Vec<HealthFindingOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct FindingKindCount {
+    kind: String,
+    count: usize,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct HealthOutput {
+    /// `"repo"` (no targets given) or `"targeted"`.
+    mode: &'static str,
+    /// Line-count-weighted mean score across every indexed file.
+    /// `None` when there are no indexed files to average.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    average_score: Option<f64>,
+    /// Plain per-file mean, unweighted. Reported alongside
+    /// `average_score` because the gap between them is the signal: when
+    /// the weighted number is materially lower, the problem is in big
+    /// files, not the long tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    average_score_unweighted: Option<f64>,
+    /// Names what `average_score` is weighted by, so the two averages
+    /// above can't be mistaken for each other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    average_score_weighting: Option<&'static str>,
+    /// Repo mode: the worst files, capped by `limit`. Targeted mode:
+    /// one entry per resolved target, worst first.
+    files: Vec<FileHealthOutput>,
+    /// How many files the list above was drawn from, before `limit`.
+    /// Lets a caller tell "there are only 3" from "there are 300 and
+    /// you're seeing 20".
+    files_total: usize,
+    /// Repo-wide finding counts by marker kind. Present in repo mode.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    findings_by_kind: Vec<FindingKindCount>,
+    /// Targets that produced no score, each with a reason. Empty in
+    /// repo mode. An empty `files` list with entries here means "we
+    /// couldn't look", not "everything is fine".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unresolved: Vec<UnresolvedTarget>,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 struct RepoStatusOutput {
     name: String,
@@ -582,6 +670,43 @@ struct BlastRadiusOutput {
     /// transitive) cross-repo-import the target file -- files that
     /// would need review if the target's public API changed.
     importers: Vec<CrossRepoEdgeOutput>,
+}
+
+/// Line-count-weighted mean health score.
+///
+/// Weighted rather than a plain file mean because a repo's health is
+/// dominated by where its code actually is: a thousand tiny perfect
+/// files shouldn't wash out one enormous bad one. Reported alongside
+/// the unweighted mean, since the *gap* between them is the actionable
+/// part — when weighted is materially lower, the problem is in big
+/// files.
+///
+/// `None` when there is nothing to average. Files with zero lines
+/// contribute zero weight, so a repo of only empty files falls back to
+/// the unweighted mean rather than dividing by zero.
+fn weighted_average_score(
+    report: &repowise_health::HealthReport,
+    index: &RepoIndex,
+) -> Option<f64> {
+    if report.file_scores.is_empty() {
+        return None;
+    }
+    let mut weighted = 0.0f64;
+    let mut total_lines = 0usize;
+    for fh in &report.file_scores {
+        let lines = index
+            .files
+            .iter()
+            .find(|f| f.path == fh.file)
+            .map(|f| f.lines)
+            .unwrap_or(0);
+        weighted += fh.score * lines as f64;
+        total_lines += lines;
+    }
+    if total_lines == 0 {
+        return Some(report.average_score);
+    }
+    Some(weighted / total_lines as f64)
 }
 
 fn display_rel(path: &Path, root: &Path) -> String {
@@ -940,6 +1065,113 @@ impl RepowiseServer {
     }
 
     #[tool(
+        name = "get_health",
+        description = "Deterministic code-health marker scores. With no `targets`, returns repo-wide KPIs and the lowest-scoring files -- use this to find what to fix first. With `targets`, returns each file's score and its individual findings. Requires a prior `repowise init`/`update`."
+    )]
+    fn get_health(
+        &self,
+        Parameters(HealthParams { targets, limit }): Parameters<HealthParams>,
+    ) -> Result<Json<Envelope<HealthOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, graph, cached) = self.load()?;
+        let report = repowise_health::analyze(&index, &graph);
+        let limit = limit.clamp(1, HEALTH_MAX_LIMIT);
+
+        let render = |fh: &repowise_health::FileHealth| FileHealthOutput {
+            file: display_rel(&fh.file, &index.root),
+            score: fh.score,
+            lines: index
+                .files
+                .iter()
+                .find(|f| f.path == fh.file)
+                .map(|f| f.lines)
+                .unwrap_or(0),
+            findings: report
+                .findings
+                .iter()
+                .filter(|f| f.file == fh.file)
+                .map(|f| HealthFindingOutput {
+                    kind: f.kind.label().to_string(),
+                    symbol: f.symbol.clone(),
+                    line: f.line,
+                    detail: f.detail.clone(),
+                })
+                .collect(),
+        };
+
+        if targets.is_empty() {
+            // `analyze` returns file_scores sorted worst-first already.
+            let files: Vec<_> = report.file_scores.iter().take(limit).map(render).collect();
+            return Ok(self.indexed(
+                HealthOutput {
+                    mode: "repo",
+                    average_score: weighted_average_score(&report, &index),
+                    average_score_unweighted: (!report.file_scores.is_empty())
+                        .then_some(report.average_score),
+                    average_score_weighting: (!report.file_scores.is_empty()).then_some("lines"),
+                    files,
+                    files_total: report.file_scores.len(),
+                    findings_by_kind: report
+                        .findings_by_kind()
+                        .into_iter()
+                        .map(|(kind, count)| FindingKindCount {
+                            kind: kind.label().to_string(),
+                            count,
+                        })
+                        .collect(),
+                    unresolved: Vec::new(),
+                },
+                &index,
+                started,
+                cached,
+            ));
+        }
+
+        let mut files = Vec::new();
+        let mut unresolved = Vec::new();
+        for target in &targets {
+            let resolved = self.resolve_file(target);
+            match report.file_scores.iter().find(|fh| fh.file == resolved) {
+                Some(fh) => files.push(render(fh)),
+                // Distinguishing these two is the point: one is fixed by
+                // re-indexing, the other by correcting the path. An
+                // absent row would look like neither.
+                None if resolved.exists() => unresolved.push(UnresolvedTarget {
+                    target: target.clone(),
+                    reason: "not_indexed",
+                    hint: "the path exists but isn't in the index -- run `repowise update`",
+                }),
+                None => unresolved.push(UnresolvedTarget {
+                    target: target.clone(),
+                    reason: "no_such_path",
+                    hint: "nothing on disk matches this path",
+                }),
+            }
+        }
+        files.sort_by(|a, b| a.score.total_cmp(&b.score));
+        let files_total = files.len();
+
+        Ok(self.indexed(
+            HealthOutput {
+                mode: "targeted",
+                // Repo-wide averages would be a non-sequitur next to a
+                // two-file answer, and worse, could be read as those
+                // files' average.
+                average_score: None,
+                average_score_unweighted: None,
+                average_score_weighting: None,
+                files,
+                files_total,
+                findings_by_kind: Vec::new(),
+                unresolved,
+            },
+            &index,
+            started,
+            cached,
+        ))
+    }
+
+    #[tool(
         name = "get_dead_code",
         description = "Confidence-tiered dead-code candidates: functions/methods with zero resolved in-repo callers, tiered `low`/`medium`/`high` by how much two cheap risk factors (an ambiguous same-named symbol elsewhere, or an unresolved import that might have targeted this file) undercut that signal — see repowise_health::find_dead_code for the exact logic. `min_confidence` filters to that tier and above; `safe_only` narrows to `high` only, the closest this tool gets to the reference's 'safe to delete' designation. Even `high` confidence is a claim about this port's own static call graph, NOT a runtime-safety guarantee: reflection, dynamic dispatch, and entry points are invisible to it. `limit` caps the returned list (default 50); `total_matching` in the response reports how many matched before truncation."
     )]
@@ -1205,6 +1437,193 @@ mod tests {
         let mut index = RepoIndex::load(root).unwrap();
         index.indexed_commit = repowise_git::head_sha(root);
         index.save(root).unwrap();
+    }
+
+    /// A file big enough and gnarly enough to trigger markers, so the
+    /// health tests aren't asserting against a uniformly perfect repo.
+    fn messy_source() -> String {
+        let mut s =
+            String::from("pub fn tangled(a: i32, b: i32, c: i32, d: i32, e: i32) -> i32 {\n");
+        for i in 0..12 {
+            s.push_str(&format!(
+                "    if a > {i} {{ if b > {i} {{ if c > {i} {{ if d > {i} {{ return e; }} }} }} }}\n"
+            ));
+        }
+        s.push_str("    0\n}\n");
+        s
+    }
+
+    #[test]
+    fn get_health_repo_mode_ranks_worst_first_and_reports_both_averages() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("messy.rs"), messy_source()).unwrap();
+        std::fs::write(root.join("clean.rs"), "pub fn ok() -> i32 { 1 }\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_health(Parameters(HealthParams {
+                targets: Vec::new(),
+                limit: HEALTH_DEFAULT_LIMIT,
+            }))
+            .unwrap();
+
+        assert_eq!(data.mode, "repo");
+        assert_eq!(data.files_total, 2);
+        assert_eq!(data.files.len(), 2);
+        assert!(
+            data.files[0].score <= data.files[1].score,
+            "worst file must come first: {:?}",
+            data.files
+                .iter()
+                .map(|f| (&f.file, f.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(data.average_score_weighting, Some("lines"));
+        assert!(data.average_score.is_some());
+        assert!(data.average_score_unweighted.is_some());
+        // Line counts ride along so a caller can see why the two
+        // averages differ without a second round-trip.
+        assert!(data.files.iter().all(|f| f.lines > 0));
+    }
+
+    #[test]
+    fn get_health_repo_mode_caps_the_list_but_reports_the_true_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for i in 0..8 {
+            std::fs::write(
+                root.join(format!("f{i}.rs")),
+                format!("pub fn f{i}() -> i32 {{ {i} }}\n"),
+            )
+            .unwrap();
+        }
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_health(Parameters(HealthParams {
+                targets: Vec::new(),
+                limit: 3,
+            }))
+            .unwrap();
+
+        assert_eq!(data.files.len(), 3, "limit applies");
+        assert_eq!(
+            data.files_total, 8,
+            "but the true count must still be reported, or 3 reads as 'there are only 3'"
+        );
+    }
+
+    #[test]
+    fn get_health_clamps_an_absurd_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_health(Parameters(HealthParams {
+                targets: Vec::new(),
+                limit: 100_000,
+            }))
+            .unwrap();
+        assert_eq!(data.files.len(), 1);
+        assert_eq!(data.files_total, 1);
+    }
+
+    #[test]
+    fn get_health_targeted_mode_scores_just_the_named_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("messy.rs"), messy_source()).unwrap();
+        std::fs::write(root.join("clean.rs"), "pub fn ok() -> i32 { 1 }\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_health(Parameters(HealthParams {
+                targets: vec!["messy.rs".to_string()],
+                limit: HEALTH_DEFAULT_LIMIT,
+            }))
+            .unwrap();
+
+        assert_eq!(data.mode, "targeted");
+        assert_eq!(data.files.len(), 1);
+        assert!(data.files[0].file.ends_with("messy.rs"));
+        assert!(data.unresolved.is_empty());
+        // Repo-wide averages must not ride along on a single-file
+        // answer -- they'd read as that file's average.
+        assert_eq!(data.average_score, None);
+        assert_eq!(data.average_score_unweighted, None);
+    }
+
+    /// The reason `unresolved` exists: an empty `files` list with no
+    /// explanation reads as "healthy", when the truth is "we couldn't
+    /// look". The two reasons need different fixes, so they're reported
+    /// separately rather than as one generic miss.
+    #[test]
+    fn get_health_names_unresolved_targets_with_distinct_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        build_and_save_index(&root);
+        // Exists on disk, deliberately created after indexing.
+        std::fs::write(root.join("late.rs"), "pub fn late() {}\n").unwrap();
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_health(Parameters(HealthParams {
+                targets: vec!["late.rs".to_string(), "ghost.rs".to_string()],
+                limit: HEALTH_DEFAULT_LIMIT,
+            }))
+            .unwrap();
+
+        assert!(data.files.is_empty());
+        assert_eq!(data.files_total, 0);
+        let reasons: Vec<_> = data.unresolved.iter().map(|u| u.reason).collect();
+        assert!(
+            reasons.contains(&"not_indexed"),
+            "a file present on disk but absent from the index needs a re-index, \
+             and the response must say so: {reasons:?}"
+        );
+        assert!(
+            reasons.contains(&"no_such_path"),
+            "a path that doesn't exist is a different problem: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn weighted_average_is_dragged_down_by_a_large_bad_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("messy.rs"), messy_source()).unwrap();
+        for i in 0..6 {
+            std::fs::write(
+                root.join(format!("tiny{i}.rs")),
+                format!("pub fn t{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_health(Parameters(HealthParams {
+                targets: Vec::new(),
+                limit: HEALTH_DEFAULT_LIMIT,
+            }))
+            .unwrap();
+
+        let weighted = data.average_score.unwrap();
+        let plain = data.average_score_unweighted.unwrap();
+        assert!(
+            weighted < plain,
+            "one large low-scoring file among tiny clean ones should pull the \
+             line-weighted mean below the file mean (weighted {weighted}, plain {plain})"
+        );
     }
 
     /// The wiring test: `Meta`'s own unit tests cover the decision

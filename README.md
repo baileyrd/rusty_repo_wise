@@ -1805,6 +1805,26 @@ FastAPI-backend architecture, minus the Node.js dependency.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+- **One view per section, addressable** (issue #259). Every section used to
+  render stacked on a single scrolling page; each now has its own route at
+  `#/<view>` (`#/health`, `#/coverage`, `#/files`, …), with a nav to switch
+  between them. Reload restores the current view instead of resetting to
+  Overview, and the selected file rides along as `?file=<path>` so a
+  drill-down survives a refresh and can be linked to.
+
+  **Hash routing, not path routing, and deliberately.** `serve-dashboard`
+  serves static files, so `/health` would 404 on reload unless the server grew
+  a catch-all rewrite to `index.html`. A hash survives a reload with no server
+  change at all — and the app already used a hash for present mode, so this
+  follows the existing convention rather than adding a second one. It also
+  needs **no new dependency**: no router crate, and a six-character
+  percent-encoder for the paths that would otherwise split the hash.
+
+  An address matching no view renders an explicit **not-found** state rather
+  than silently falling back to Overview — a stale bookmark should say so.
+  `#present/<n>` is left alone as an overlay, so entering and leaving present
+  mode returns you to the view you were on.
+
 - **Activity view** (issue #262) renders `GET /api/stats`: a day×hour commit
   punch card and a weekly-commit trend, both hand-drawn as inline SVG (no
   charting dependency in a WASM binary).

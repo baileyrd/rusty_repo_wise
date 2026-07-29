@@ -6,6 +6,35 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #259 — UI: one view per section, addressable by URL
+**2026-07-28** · closes [#259](https://github.com/baileyrd/rusty_repo_wise/issues/259)
+
+- **Split the single stacked page into one route per section.** All 19 sections
+  previously rendered together on one scrolling page; each is now its own view
+  at `#/<slug>`, with a nav and only the current view mounted.
+- **Reload restores the view**, and the selected file rides along as
+  `?file=<path>`, so a drill-down survives a refresh and can be shared.
+- **Hash routing, not path routing.** `serve-dashboard` serves static files, so
+  `/health` would 404 on reload without a server-side catch-all rewrite. A hash
+  needs no server change, and present mode already used one — so this follows
+  the existing convention instead of adding a second. **No new dependency**: no
+  router crate, and a six-character percent-encoder rather than a URL-encoding
+  crate.
+- **`ROUTES` is the single source of truth** for the nav, the parser and the
+  formatter, so a view can't be added to one and forgotten in another. A test
+  round-trips every entry, which is what makes a dead nav link impossible.
+- **Unknown addresses render a not-found state**, not a silent redirect to
+  Overview — a stale bookmark should say so.
+- **Present mode keeps working, and its exit is fixed as a side effect.**
+  `#present/<n>` is treated as an overlay rather than a view, so it never
+  clobbers the underlying route; exiting used to blank the hash and now
+  restores the view you were on.
+- 7 new routing tests (17 total in the WASM crate), including paths containing
+  `#`, `?`, `&`, `%`, `+` and spaces — each would otherwise split the hash and
+  lose the tail.
+
+---
+
 ## PR #262 — UI: activity view (punch card + weekly trend)
 **2026-07-28** · closes [#262](https://github.com/baileyrd/rusty_repo_wise/issues/262)
 

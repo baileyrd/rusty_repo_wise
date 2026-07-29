@@ -1,3 +1,4 @@
+mod agent_md;
 mod doctor;
 mod export;
 mod hook;
@@ -40,6 +41,22 @@ enum Command {
     Overview {
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// Write a managed block of codebase intelligence into
+    /// `CLAUDE.md` (default `.claude/CLAUDE.md`), preserving everything
+    /// outside the markers. A file with no repowise markers is
+    /// appended to, never rewritten; a file whose markers are malformed
+    /// is refused rather than guessed at.
+    GenerateClaudeMd {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Write somewhere other than `.claude/CLAUDE.md`. Use
+        /// `AGENTS.md` for agents that read that instead.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Print the generated block to stdout and write nothing.
+        #[arg(long)]
+        stdout: bool,
     },
     /// Search the index by symbol name (default), file path, or both.
     /// Case-insensitive substring match. `--mode semantic` is
@@ -426,6 +443,11 @@ fn main() -> anyhow::Result<()> {
         Command::Init { path } => cmd_init(&path),
         Command::Update { path } => cmd_update(&path),
         Command::Overview { path } => cmd_overview(&path),
+        Command::GenerateClaudeMd {
+            path,
+            output,
+            stdout,
+        } => cmd_generate_claude_md(&path, output.as_deref(), stdout),
         Command::Search {
             query,
             path,
@@ -582,6 +604,35 @@ fn cmd_overview(path: &Path) -> anyhow::Result<()> {
             println!("    {:<4} {}", count, display_path(file, &index.root));
         }
     }
+    Ok(())
+}
+
+fn cmd_generate_claude_md(path: &Path, output: Option<&Path>, stdout: bool) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let graph = RepoGraph::build(&index);
+    let block = agent_md::render_block(&index, &graph, &root);
+
+    if stdout {
+        println!("{block}");
+        return Ok(());
+    }
+
+    let target = match output {
+        Some(p) if p.is_absolute() => p.to_path_buf(),
+        Some(p) => root.join(p),
+        None => root.join(agent_md::DEFAULT_OUTPUT),
+    };
+
+    let existing = std::fs::read_to_string(&target).ok();
+    let (content, action) =
+        agent_md::splice(existing.as_deref(), &block).map_err(|e| anyhow::anyhow!(e))?;
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&target, content)?;
+    println!("{} {}", action.label(), target.display());
     Ok(())
 }
 

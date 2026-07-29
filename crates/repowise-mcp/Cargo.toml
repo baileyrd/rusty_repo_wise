@@ -12,6 +12,7 @@ repowise-git = { path = "../repowise-git" }
 repowise-adr = { path = "../repowise-adr" }
 repowise-workspace = { path = "../repowise-workspace" }
 repowise-distill = { path = "../repowise-distill" }
+repowise-llm = { path = "../repowise-llm" }
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 schemars = "1"

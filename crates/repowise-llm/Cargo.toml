@@ -13,4 +13,5 @@ serde_json.workspace = true
 ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
+repowise-parser = { path = "../repowise-parser" }
 tempfile = "3"

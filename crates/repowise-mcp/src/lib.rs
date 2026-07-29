@@ -647,6 +647,38 @@ struct HealthOutput {
     unresolved: Vec<UnresolvedTarget>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+struct AnswerParams {
+    /// A natural-language question about the codebase.
+    question: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct AnswerOutput {
+    /// `false` when no LLM endpoint is configured. `answer` is absent,
+    /// and the reason says so -- an unconfigured feature must not return
+    /// an empty-but-confident answer.
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answer: Option<String>,
+    /// Why no answer, when `available` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
+    /// Repo-relative files the answer drew on, best first.
+    ///
+    /// **Empty means the answer is ungrounded.** Retrieval found nothing
+    /// to cite, so whatever the model said came from its own priors
+    /// rather than from this codebase -- exactly the case a caller most
+    /// needs to distinguish, and the one that reads most confidently.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cited: Vec<String>,
+    /// `semantic` or `keyword`.
+    retrieval_mode: String,
+    /// Present only when retrieval degraded to keyword matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retrieval_caveat: Option<String>,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 struct RepoStatusOutput {
     name: String,
@@ -1268,6 +1300,70 @@ impl RepowiseServer {
             .collect();
 
         Ok(self.indexed(WhyOutput { decisions }, &index, started, cached))
+    }
+
+    #[tool(
+        name = "get_answer",
+        description = "Answer a natural-language question about this codebase, with citations. Retrieves relevant files by embedding similarity, then answers from them. Requires an LLM endpoint (REPOWISE_LLM_BASE_URL); reports `available: false` with a reason when unconfigured rather than guessing. NOTE: retrieval re-embeds the whole index on every call, so this is a considered question tool, not a cheap lookup -- use search_codebase for finding things by name."
+    )]
+    fn get_answer(
+        &self,
+        Parameters(AnswerParams { question }): Parameters<AnswerParams>,
+    ) -> Result<Json<Envelope<AnswerOutput>>, ErrorData> {
+        let started = Instant::now();
+        if question.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "question must not be empty",
+                None,
+            ));
+        }
+        let (index, _graph, cached) = self.load()?;
+
+        // Unconfigured is a real, reportable state -- not an error, and
+        // certainly not an empty answer. An agent needs to distinguish
+        // "this feature is off" from "the codebase has nothing to say".
+        let Some(config) = repowise_llm::LlmConfig::from_env() else {
+            return Ok(self.indexed(
+                AnswerOutput {
+                    available: false,
+                    answer: None,
+                    unavailable_reason: Some(
+                        "no LLM endpoint configured -- set REPOWISE_LLM_BASE_URL (and \
+                         REPOWISE_LLM_MODEL / REPOWISE_LLM_API_KEY as needed). Every \
+                         other tool on this server works without it."
+                            .to_string(),
+                    ),
+                    cited: Vec::new(),
+                    retrieval_mode: String::new(),
+                    retrieval_caveat: None,
+                },
+                &index,
+                started,
+                cached,
+            ));
+        };
+
+        let retrieval = repowise_llm::retrieve(&self.root, &index, &question, &config);
+        let turns = vec![
+            repowise_llm::Turn::system(retrieval.context.clone()),
+            repowise_llm::Turn::user(question),
+        ];
+        let answer = repowise_llm::complete_messages(&config, &turns)
+            .map_err(|e| ErrorData::internal_error(format!("the LLM request failed: {e}"), None))?;
+
+        Ok(self.indexed(
+            AnswerOutput {
+                available: true,
+                answer: Some(answer),
+                unavailable_reason: None,
+                cited: retrieval.cited,
+                retrieval_mode: retrieval.mode.label().to_string(),
+                retrieval_caveat: retrieval.mode.caveat().map(str::to_string),
+            },
+            &index,
+            started,
+            cached,
+        ))
     }
 
     #[tool(
@@ -2943,5 +3039,54 @@ mod tests {
             "the default cap should be a large win on a dense file \
              (capped {capped}, uncapped {uncapped})"
         );
+    }
+
+    /// Unconfigured is a reportable state, not an error and not an
+    /// empty answer. An agent must be able to tell "the feature is off"
+    /// from "the codebase has nothing to say".
+    #[test]
+    fn get_answer_reports_unavailable_without_an_llm_endpoint() {
+        // The env var is process-global; this asserts the behaviour for
+        // the unset case, which is how CI runs.
+        if std::env::var_os("REPOWISE_LLM_BASE_URL").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), "pub fn helper() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_answer(Parameters(AnswerParams {
+                question: "how does this work".to_string(),
+            }))
+            .unwrap();
+
+        assert!(!data.available);
+        assert!(data.answer.is_none(), "must not fabricate an answer");
+        let reason = data.unavailable_reason.expect("must say why");
+        assert!(reason.contains("REPOWISE_LLM_BASE_URL"), "{reason}");
+        assert!(
+            reason.contains("Every other tool"),
+            "an agent shouldn't conclude the whole server is broken: {reason}"
+        );
+    }
+
+    #[test]
+    fn get_answer_rejects_an_empty_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), "pub fn helper() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let err = server
+            .get_answer(Parameters(AnswerParams {
+                question: "   ".to_string(),
+            }))
+            .err()
+            .expect("an empty question is invalid params");
+        assert!(err.message.contains("must not be empty"), "{}", err.message);
     }
 }

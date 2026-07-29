@@ -6,6 +6,43 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #295 — CLI: `saved`
+**2026-07-29** · closes [#282](https://github.com/baileyrd/rusty_repo_wise/issues/282)
+
+- **Added `repowise saved [--by program|day] [--since-days N] [--missed]`**, plus
+  an append-only ledger `distill` and the rewrite hook write to. Last of the
+  four-issue distill cluster.
+- **Every figure is measured, none modelled.** Bytes that went into a
+  distillation and bytes that came out, for commands that actually ran.
+- **MCP responses are deliberately not counted, and the report says so.** The
+  reference credits them against "the raw file exploration they replaced" —
+  which is a counterfactual, since nobody knows what the agent would have read
+  instead. The issue itself flagged this. Rather than fold a guess into a
+  measured total, this port leaves it out and explains why in the output. A
+  number that silently mixed observed bytes with an estimate would be the same
+  failure this repo has avoided everywhere else.
+- **Token counts are labelled as approximate** (bytes/4, no model-specific
+  tokenizer) and the report says to treat them as an order of magnitude, "not an
+  invoice". A precise-looking integer derived from a rule of thumb is worse than
+  an obviously rounded one.
+- **`--missed` is the feature auditing its own coverage** — the difference
+  between "the hook is working" and "the hook is installed". It separates
+  `not-rewritable` (a candidate for widening the closed set) from `shell-syntax`
+  (deliberate, and will never be rewritten however often it appears). Those mean
+  opposite things and a combined count would be useless.
+- **Both empty states distinguish "measured nothing" from "saved nothing"**: an
+  empty ledger says there was nothing to measure, and an empty `--missed` says
+  nothing is being *observed* because the hook isn't installed.
+- The ledger is tab-separated text, not JSON — no serde dependency needed for a
+  four-field schema, and a malformed line is skipped rather than failing the
+  whole report. Command names are sanitized so a tab or newline in a command
+  can't forge extra fields or extra records.
+- 13 new tests. Verified live end to end: two real distillations recorded 4398
+  bytes saved (~1099 tokens), and the rewrite hook observing five commands
+  produced a correct `--missed` breakdown.
+
+---
+
 ## PR #294 — CLI: `hook rewrite`
 **2026-07-29** · closes [#281](https://github.com/baileyrd/rusty_repo_wise/issues/281)
 

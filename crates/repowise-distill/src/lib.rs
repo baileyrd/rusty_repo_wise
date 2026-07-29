@@ -15,6 +15,7 @@
 //! the savings report all read.
 
 pub mod filter;
+pub mod ledger;
 pub mod rewrite;
 pub mod store;
 

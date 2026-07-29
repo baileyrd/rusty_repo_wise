@@ -15,9 +15,11 @@
 //! the savings report all read.
 
 pub mod filter;
+pub mod rewrite;
 pub mod store;
 
 pub use filter::{distill, Distilled};
+pub use rewrite::{decide, Decision, SkipReason};
 pub use store::{parse_ref, Missing, Store};
 
 /// Render the inline marker that stands in for omitted content.

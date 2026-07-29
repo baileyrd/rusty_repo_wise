@@ -460,6 +460,38 @@ enum HookAction {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Manage the command-rewrite hook, which routes recognized
+    /// commands through `repowise distill` automatically.
+    Rewrite {
+        #[command(subcommand)]
+        action: RewriteAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RewriteAction {
+    /// Install the rewrite hook script. Refuses to overwrite a script
+    /// this tool didn't write.
+    Install {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Remove the rewrite hook script. Refuses to remove one this tool
+    /// didn't write.
+    Uninstall {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Report whether the rewrite hook is installed, and exactly which
+    /// commands it will rewrite.
+    Status {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Read a command line on stdin and print the command to run.
+    /// Called by the installed hook; prints the input unchanged unless
+    /// the command is one of a closed set of recognized shapes.
+    Apply,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1474,6 +1506,39 @@ fn cmd_hook(action: HookAction) -> anyhow::Result<()> {
         HookAction::Install { path } => hook::install(&path.canonicalize()?)?,
         HookAction::Uninstall { path } => hook::uninstall(&path.canonicalize()?)?,
         HookAction::Status { path } => hook::status(&path.canonicalize()?)?,
+        HookAction::Rewrite { action } => return cmd_hook_rewrite(action),
+    };
+    println!("{message}");
+    Ok(())
+}
+
+/// `apply` reads stdin and writes stdout with no trailing newline --
+/// it's called from a shell script that captures its output as a
+/// command line, so a stray newline would end up inside the command.
+fn cmd_hook_rewrite(action: RewriteAction) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+
+    let message = match action {
+        RewriteAction::Install { path } => hook::rewrite_install(&path.canonicalize()?)?,
+        RewriteAction::Uninstall { path } => hook::rewrite_uninstall(&path.canonicalize()?)?,
+        RewriteAction::Status { path } => hook::rewrite_status(&path.canonicalize()?)?,
+        RewriteAction::Apply => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let out = match repowise_distill::decide(&input) {
+                repowise_distill::Decision::Rewrite { .. } => {
+                    repowise_distill::rewrite::rewrite(&input)
+                }
+                // Every skip path returns the input verbatim. This is
+                // the fail-open contract: the hook must be incapable of
+                // changing a command it doesn't understand.
+                repowise_distill::Decision::Skip(_) => input.trim().to_string(),
+            };
+            let mut stdout = std::io::stdout();
+            write!(stdout, "{out}")?;
+            stdout.flush()?;
+            return Ok(());
+        }
     };
     println!("{message}");
     Ok(())

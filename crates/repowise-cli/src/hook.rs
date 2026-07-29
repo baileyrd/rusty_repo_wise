@@ -144,6 +144,128 @@ fn make_executable(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Marker for the command-rewrite hook script.
+const REWRITE_MARKER: &str = "# installed by repowise (repowise hook rewrite install)";
+
+/// Where the rewrite hook script lives.
+///
+/// Under `.repowise/` rather than `.git/hooks/`: this isn't a git hook.
+/// Nothing in git fires on "an agent is about to run a command", so this
+/// is a script an agent harness is pointed at, and putting it among the
+/// git hooks would imply an integration that doesn't exist.
+pub fn rewrite_hook_path(root: &Path) -> PathBuf {
+    root.join(".repowise").join("rewrite-command.sh")
+}
+
+/// The rewrite hook body.
+///
+/// Two properties do all the work here, and both are about what happens
+/// when this *fails*:
+///
+/// - It only ever prints a replacement command; it never runs anything
+///   itself. A hook that executed would be a second, hidden execution
+///   path for every command an agent runs.
+/// - Every failure path echoes the original command unchanged. If
+///   `repowise` is missing, errors, or returns nonsense, the caller
+///   gets back exactly what it passed in. A hook that can break
+///   arbitrary commands when repowise has a bug is not shippable --
+///   the same fail-open rule `distill` applies to filter errors.
+fn rewrite_hook_script() -> String {
+    format!(
+        "#!/bin/sh\n\
+         {REWRITE_MARKER}\n\
+         # Reads a command line on stdin, prints the command to actually run.\n\
+         #\n\
+         # Fail-open by construction: on ANY problem -- repowise missing,\n\
+         # a nonzero exit, empty output -- the original command is echoed\n\
+         # back unchanged. This sits in front of every command an agent\n\
+         # runs, so it must never be able to break one.\n\
+         original=$(cat)\n\
+         [ -z \"$original\" ] && exit 0\n\
+         rewritten=$(printf '%s' \"$original\" | repowise hook rewrite apply 2>/dev/null) || {{\n\
+         \x20 printf '%s' \"$original\"\n\
+         \x20 exit 0\n\
+         }}\n\
+         if [ -z \"$rewritten\" ]; then\n\
+         \x20 printf '%s' \"$original\"\n\
+         else\n\
+         \x20 printf '%s' \"$rewritten\"\n\
+         fi\n"
+    )
+}
+
+fn classify_rewrite(path: &Path) -> HookState {
+    match std::fs::read_to_string(path) {
+        Err(_) => HookState::Absent,
+        Ok(body) if body.contains(REWRITE_MARKER) => HookState::Ours,
+        Ok(_) => HookState::Foreign,
+    }
+}
+
+pub fn rewrite_install(root: &Path) -> anyhow::Result<String> {
+    let path = rewrite_hook_path(root);
+    if classify_rewrite(&path) == HookState::Foreign {
+        anyhow::bail!(
+            "a script already exists at {} and was not written by repowise -- \
+             refusing to overwrite it",
+            path.display()
+        );
+    }
+    std::fs::create_dir_all(path.parent().unwrap_or(root))?;
+    std::fs::write(&path, rewrite_hook_script())?;
+    make_executable(&path)?;
+    Ok(format!(
+        "installed command-rewrite hook at {}\n\
+         \n\
+         Point your agent's command hook at it. It reads a command line on stdin\n\
+         and prints the command to run -- unchanged unless the command is one of:\n\
+         \x20 {}\n\
+         Compound commands, pipes, redirects and substitutions are never rewritten.\n\
+         Any failure echoes the original command back, so this cannot break a command.",
+        path.display(),
+        repowise_distill::rewrite::rewritable_programs().join(", ")
+    ))
+}
+
+pub fn rewrite_uninstall(root: &Path) -> anyhow::Result<String> {
+    let path = rewrite_hook_path(root);
+    match classify_rewrite(&path) {
+        HookState::Absent => Ok("no command-rewrite hook to remove".to_string()),
+        HookState::Foreign => anyhow::bail!(
+            "the script at {} was not written by repowise -- refusing to remove it",
+            path.display()
+        ),
+        HookState::Ours => {
+            std::fs::remove_file(&path)?;
+            Ok(format!(
+                "removed command-rewrite hook at {}",
+                path.display()
+            ))
+        }
+    }
+}
+
+pub fn rewrite_status(root: &Path) -> anyhow::Result<String> {
+    let path = rewrite_hook_path(root);
+    Ok(match classify_rewrite(&path) {
+        HookState::Absent => {
+            "command-rewrite hook: not installed -- run `repowise hook rewrite install`".to_string()
+        }
+        HookState::Ours => format!(
+            "command-rewrite hook: installed at {}\n\
+             rewrites only: {}\n\
+             never rewrites: compound commands, pipes, redirects, substitutions",
+            path.display(),
+            repowise_distill::rewrite::rewritable_programs().join(", ")
+        ),
+        HookState::Foreign => format!(
+            "command-rewrite hook: a foreign script exists at {} (not written by \
+             repowise, left untouched)",
+            path.display()
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

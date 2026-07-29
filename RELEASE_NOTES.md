@@ -6,6 +6,43 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #294 — CLI: `hook rewrite`
+**2026-07-29** · closes [#281](https://github.com/baileyrd/rusty_repo_wise/issues/281)
+
+- **Added `repowise hook rewrite install|uninstall|status|apply`**, which routes
+  recognized commands through `repowise distill` automatically. Manual `distill`
+  is opt-in per command, so in practice it gets used on the commands someone
+  remembered to wrap; the hook is what makes the saving automatic.
+- **A closed set, not a heuristic.** This sits in the path of *every command an
+  agent runs*, so the rule is inverted from most matching in this repo: never
+  rewrite unless the program is one of a small named set. Anything unrecognized
+  runs untouched. A missed rewrite costs tokens; a wrong one costs correctness.
+- **Shell syntax disqualifies a command outright.** Pipes, redirects,
+  substitutions, `&&`, `;`, newlines — any of these and the command isn't parsed
+  at all. A partial understanding of shell syntax is how a wrapper starts
+  executing things nobody typed. Wrapping `cargo test && rm -rf /` would be
+  exactly that.
+- **Fail-open by construction, verified with `repowise` off `PATH`.** Every
+  failure path in the hook script echoes the original command back unchanged:
+  repowise missing, nonzero exit, empty output. A hook that could break arbitrary
+  commands when repowise has a bug isn't shippable — the same rule `distill`
+  applies to filter errors.
+- **The script only ever prints a command; it never runs one.** A hook that
+  executed would be a second, hidden execution path for every agent command.
+- Reuses `hook.rs`'s existing safety model — a script without our marker is
+  foreign and refused, for both install and uninstall.
+- **`status` prints the exact program list**, not a count: someone installing
+  something into the path of every command they run is entitled to see precisely
+  what it will touch.
+- Lives under `.repowise/`, not `.git/hooks/` — nothing in git fires on "an agent
+  is about to run a command", and filing it with the git hooks would imply an
+  integration that doesn't exist.
+- 8 new tests, including that every shell-metacharacter form is refused and that
+  a prefix match (`cargofoo`) isn't a match. Verified live across all five
+  decision paths plus the missing-`repowise` fallback.
+
+---
+
 ## PR #293 — CLI: `expand`
 **2026-07-29** · closes [#280](https://github.com/baileyrd/rusty_repo_wise/issues/280)
 

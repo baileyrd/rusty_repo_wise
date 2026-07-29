@@ -6,6 +6,31 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #305 — Correct the `--mode semantic` explanation
+**2026-07-29** · relates to [#302](https://github.com/baileyrd/rusty_repo_wise/issues/302)
+
+- **Fixes an inaccurate claim shipped in #290/#277.** `repowise search --mode
+  semantic` failed with *"needs embeddings, which this port doesn't have (see
+  issue #61)"*. That is wrong: `repowise_llm::embed` and `cosine_similarity`
+  exist, and `POST /api/chat` has used them for real semantic retrieval since
+  #63.
+- **The real gap is persistence, not capability.** `/api/chat` re-embeds the
+  entire corpus on every call — a defensible tradeoff for an occasional chat
+  message, and an indefensible one for `search`, which is meant to be cheap and
+  frequent. The message and the module doc now say that, and point at #302.
+- The error still refuses rather than degrading; only the *reason* changes.
+- A test now asserts the message does **not** repeat the old claim, so the
+  correction can't quietly regress.
+
+**How this happened, since it's the interesting part:** the original wording was
+copied from issue #61's framing rather than checked against the code. #61
+asserted the port had no LLM tier; by then it had shipped one twice over. Reading
+the issue instead of the crate is what produced a confidently wrong error message
+in a user-facing tool — the same class of mistake as the clippy gate that grepped
+for `^error:` and never matched.
+
+---
+
 ## PR #300 — MCP: trim `get_context` on symbol-dense files
 **2026-07-29** · follow-up to [#299](https://github.com/baileyrd/rusty_repo_wise/pull/299)
 

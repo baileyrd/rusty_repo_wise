@@ -1635,11 +1635,15 @@ below):
   - The response echoes back the `filters` it applied, so an empty result
     is readable — "nothing matches" and "your filters excluded
     everything" are otherwise indistinguishable.
-  - **`semantic`/`concept` mode is rejected, not degraded.** It needs
-    embeddings this port doesn't have (#61). A silent fallback to
-    substring matching would answer a different question than the one
-    asked, so the error names the real limitation instead of reporting an
-    unknown mode.
+  - **`semantic`/`concept` mode is rejected, not degraded.** A silent
+    fallback to substring matching would answer a different question than
+    the one asked, so the error names the real limitation instead of
+    reporting an unknown mode.
+    - The limitation is **persistence, not capability**. `repowise-llm`
+      computes embeddings and `POST /api/chat` already uses them for real
+      semantic retrieval; what's missing is a *stored* index, since that
+      endpoint re-embeds the whole corpus per call. Fine for an occasional
+      chat message, far too expensive for search. Tracked as #302.
 - **`get_context(file, limit?)`** — a file's symbols, resolved
   dependencies/dependents, and health score/findings in one call.
   - **Both lists are capped** (default 50, max 500), with

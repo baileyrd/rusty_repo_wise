@@ -1579,18 +1579,18 @@ could have shipped subtly wrong:
   `embedded` of `total`, and say explicitly that unranked files are
   *absent from the results*, not ranked low.
 
-Two honest limitations:
+One honest limitation:
 
 - **It ranks per-file symbol summaries, not source.** This port's index
   stores structure, not file contents, so the embedded document for a
   file is its path plus its symbol names and kinds. That finds files
   whose *API* is about the query; it will not find a concept that only
   appears inside function bodies. Both surfaces say so in their output.
-- **`get_answer` / `POST /api/chat` don't use this index yet** — they
-  still re-embed the corpus per call. Wiring them up isn't a
-  wire-up: a partially covered index would ground an answer in a subset
-  of the repo while its citations looked complete, which needs a
-  decision about what to do with the uncovered files first.
+
+`get_answer` / `POST /api/chat` (question answering, as opposed to
+`search --mode semantic`'s ranking) also read this index now — see that
+tool's own entry above for how partial coverage is handled there without
+a caveat.
 
 ## Architectural decision mining
 
@@ -1822,14 +1822,25 @@ below):
     retrieval failure rather than as evidence the codebase lacks the
     thing. The healthy path carries no caveat, so the caveat stays worth
     reading.
-  - **Retrieval re-embeds the whole index on every call.** A persisted
-    embedding index now exists (see "Semantic search" below), but
-    `get_answer`'s retrieval doesn't read from it yet — a partially
-    covered index would quietly ground an answer in a *subset* of the
-    repo while its citations looked complete, which needs deciding
-    before wiring, not after. Until then this is a considered-question
-    tool, not a cheap lookup; use `search_codebase` to find things by
-    name.
+  - **Retrieval reuses the persisted embedding index** (see "Semantic
+    search" below) and embeds only the files it doesn't cover, in the
+    same single batched call that also embeds the question. Cost is
+    never worse than re-embedding everything and usually much
+    cheaper — a fully covered index costs one input instead of N+1.
+    Coverage at answer time is always complete regardless: whatever the
+    stored index lacks is filled in on the spot, so there's no partial-
+    coverage caveat to give, the same "prevented, not reported" shape as
+    the index's own staleness guarantee. Nothing is written back —
+    `init`/`update` remain the only writers of the stored index, and
+    top-up vectors live only for the call.
+  - **`vectors_reused` / `vectors_embedded_now`** (present in `semantic`
+    mode only) report the split, as a performance fact rather than a
+    warning — there's nothing wrong with either number, since the
+    answer's grounding doesn't depend on which files came from the
+    stored index vs. this call. Useful for answering "why was that
+    question slow" without guessing. This is still a considered-question
+    tool rather than a cheap lookup; use `search_codebase` to find things
+    by name.
 - **`get_health(targets?, limit?)`** — the same deterministic markers as
   `repowise health`, for agents. With no `targets`, repo mode: the
   lowest-scoring files (capped by `limit`, default 20, max 50, with
@@ -2043,22 +2054,27 @@ FastAPI-backend architecture, minus the Node.js dependency.
   `get_dead_code` MCP tool's own shape (`total_matching` before the
   50-candidate cap). `POST /api/chat` takes `{"history": [{"role",
   "content"}, ...]}` (the whole conversation so far) and returns
-  `{"available": bool, "reply": string | null}` — `available: false`
-  when `REPOWISE_LLM_BASE_URL` isn't set, the same opt-in convention
-  `repowise generate` (issue #61) already uses. When available, the
-  latest user message is grounded with real embeddings-based retrieval
-  (issue #63): `repowise-llm::embed` calls the same endpoint's
-  OpenAI-compatible `POST /v1/embeddings` to embed the question and
-  every indexed file's symbol list in one batched request, ranks files
-  by cosine similarity, and includes the top 10 in the system prompt.
-  No vector index or persistence — every chat call re-embeds the whole
-  corpus, an honest cost/latency tradeoff for a first slice. Falls back
-  to the previous lightweight keyword search over file paths and symbol
-  names if the embeddings call itself fails (e.g. an endpoint that
-  doesn't implement `/v1/embeddings` at all), so a chat reply is never
-  blocked by that. `REPOWISE_EMBEDDING_MODEL` selects the embedding
-  model/route alias (default `"embed"`), separate from
-  `REPOWISE_LLM_MODEL`. `GET /api/reindex` / `POST /api/reindex` (issue #65's
+  `{"available": bool, "reply": string | null, "cited": [...],
+  "retrieval_mode": string, "retrieval_caveat": string | null,
+  "vectors_reused": number | null, "vectors_embedded_now": number |
+  null}` — `available: false` when `REPOWISE_LLM_BASE_URL` isn't set, the
+  same opt-in convention `repowise generate` (issue #61) already uses.
+  When available, the latest user message is grounded with real
+  embeddings-based retrieval (issue #63), shared with `get_answer` via
+  `repowise-llm::retrieval` (one implementation, so the two surfaces
+  can't drift): the question is embedded alongside whatever indexed
+  files the persisted embedding index (built by `init`/`update`) doesn't
+  already cover, ranked by cosine similarity against the reused-or-fresh
+  vectors, top 10 included in the system prompt. `vectors_reused` /
+  `vectors_embedded_now` report the split — a performance fact, since
+  coverage at answer time is always complete regardless of how much of
+  the index a call had to fill in. Falls back to the previous
+  lightweight keyword search over file paths and symbol names if the
+  embeddings call itself fails (e.g. an endpoint that doesn't implement
+  `/v1/embeddings` at all), so a chat reply is never blocked by that.
+  `REPOWISE_EMBEDDING_MODEL` selects the embedding model/route alias
+  (default `"embed"`), separate from `REPOWISE_LLM_MODEL`.
+  `GET /api/reindex` / `POST /api/reindex` (issue #65's
   live job banner) expose a background reindex job: `POST` starts one
   (`repowise_parser::build_index`, the same implementation
   `init`/`update` use, so there's exactly one indexing codepath) unless

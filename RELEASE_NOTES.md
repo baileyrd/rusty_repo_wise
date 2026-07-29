@@ -6,6 +6,47 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #310 — Retrieval reuses the persisted embedding index
+**2026-07-29** · closes [#308](https://github.com/baileyrd/rusty_repo_wise/issues/308)
+
+- **`get_answer` and `POST /api/chat` no longer re-embed the whole corpus per
+  call.** Both share `repowise_llm::retrieval`, which now reuses vectors from
+  the embedding index #302 persisted and embeds only the files that index
+  doesn't cover, in the same single batched call that also embeds the question.
+- **#308 previously framed this as an open question with four options and no
+  clear winner. It wasn't.** Re-reading the actual retrieval code: the "cost is
+  unbounded" objection to topping up was false (one batched call either way,
+  never worse than pre-#308 and usually cheaper), and the "partial coverage
+  looks complete" problem the issue was trying to solve is *prevented* by
+  topping up, not just better reported by it. The issue was rewritten before
+  this landed, with the old text kept in a collapsed section for the record.
+- **Nothing is written back.** `init`/`update` remain the only writers of the
+  stored index; top-up vectors live only for the call. No write-on-read race,
+  no failure on a read-only checkout, and the "does this ever converge"
+  question has a clean answer (`repowise update`) with a bounded cost
+  (today's old behavior) in the meantime.
+- **`vectors_reused` / `vectors_embedded_now`** report the split on both
+  surfaces, in `semantic` mode only. A performance fact, not a caveat — there's
+  nothing to warn about, since coverage at answer time is complete regardless
+  of the split.
+- **Fixes a latent bug this surfaced.** `retrieval::file_document` and
+  `embedding_index::document` were byte-identical duplicates that agreed by
+  luck. Since entries are keyed by a hash of the exact text embedded, a
+  one-character drift between them would have caused a silent total cache
+  miss with no error. Deleted the duplicate; retrieval now calls
+  `embedding_index::document` directly.
+- Also fixes a doc comment in `repowise-server` left stale by #306's move of
+  retrieval logic into `repowise-llm` — it still named
+  `build_chat_context_with_embeddings`/`CHAT_CONTEXT_LIMIT`, functions that no
+  longer exist in this crate.
+- 5 new tests (3 in `repowise-llm`, 2 in `repowise-server`), each verified to
+  actually catch the regression it guards: inspecting the real embeddings
+  request body, not just the response, since a wrong document count still gets
+  a same-shaped response back. Verified live over real MCP stdio against a stub
+  endpoint across all three coverage states (partial, full, none).
+
+---
+
 ## PR #309 — LLM-inferred architectural decisions
 **2026-07-29** · closes [#303](https://github.com/baileyrd/rusty_repo_wise/issues/303)
 

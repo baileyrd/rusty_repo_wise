@@ -3,6 +3,7 @@ mod doctor;
 mod export;
 mod hook;
 mod impacted;
+mod watch;
 
 use clap::{Parser, Subcommand};
 use repowise_core::{RepoIndex, Symbol, SymbolKind};
@@ -52,6 +53,21 @@ enum Command {
         /// The command and its arguments.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
+    },
+    /// Watch for file changes and re-index after a quiet period.
+    /// Ctrl+C to stop. Drives the same deterministic re-index as
+    /// `repowise update` -- no LLM generation, so it costs nothing to
+    /// leave running.
+    Watch {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Quiet period in milliseconds after the last change before
+        /// re-indexing.
+        #[arg(long, default_value_t = watch::DEFAULT_DEBOUNCE_MS)]
+        debounce: u64,
+        /// Print each triggering path rather than only a count.
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Report recurring command fumbles: the same program run twice,
     /// the first failing and a later variant succeeding. Reads the
@@ -534,6 +550,11 @@ fn main() -> anyhow::Result<()> {
         Command::Overview { path } => cmd_overview(&path),
         Command::Distill { command } => cmd_distill(&command),
         Command::Expand { reference, query } => cmd_expand(&reference, query.as_deref()),
+        Command::Watch {
+            path,
+            debounce,
+            verbose,
+        } => cmd_watch(&path, debounce, verbose),
         Command::Corrections {
             min_count,
             since_days,
@@ -731,6 +752,110 @@ fn distill_stores() -> anyhow::Result<Vec<repowise_distill::Store>> {
         }
     }
     Ok(stores)
+}
+
+/// Watch `root` and re-index after each quiet period.
+///
+/// Runs until interrupted. The debounce is a *quiet period*, not a
+/// fixed interval: the timer restarts on every accepted event, so a
+/// burst of saves produces one re-index after the burst rather than one
+/// per save.
+fn cmd_watch(path: &Path, debounce_ms: u64, verbose: bool) -> anyhow::Result<()> {
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc;
+
+    let root = path.canonicalize()?;
+    let debounce = watch::debounce_duration(debounce_ms);
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        // Send both events and errors down one channel so a backend
+        // failure surfaces in the loop rather than being dropped in a
+        // callback nobody reads.
+        let _ = tx.send(res);
+    })?;
+    watcher.watch(&root, RecursiveMode::Recursive)?;
+
+    println!(
+        "Watching {} (debounce {}ms). Ctrl+C to stop.",
+        root.display(),
+        debounce_ms
+    );
+
+    let mut pending: Vec<PathBuf> = Vec::new();
+    loop {
+        // Block indefinitely when idle; once something is pending, wait
+        // only for the rest of the quiet period.
+        let received = if pending.is_empty() {
+            rx.recv().map_err(|_| ()).map(Some)
+        } else {
+            match rx.recv_timeout(debounce) {
+                Ok(v) => Ok(Some(v)),
+                Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+            }
+        };
+
+        match received {
+            // Channel closed: the watcher thread is gone. The index
+            // would silently stop updating while this process still
+            // looks alive, so this is fatal and loud.
+            Err(()) => {
+                anyhow::bail!(
+                    "the filesystem watcher stopped unexpectedly -- the index is no \
+                     longer being updated. Re-run `repowise watch`, or use `repowise \
+                     hook install` for per-commit updates instead."
+                );
+            }
+            Ok(Some(Ok(event))) => {
+                // Kind first: a re-index reads every file, and reads
+                // arrive as events on ordinary source paths that no
+                // path filter can distinguish from real edits.
+                if !watch::is_content_change(&event.kind) {
+                    continue;
+                }
+                for p in event.paths {
+                    if watch::should_reindex(&p, &root) {
+                        if verbose {
+                            println!("  changed: {}", p.display());
+                        }
+                        pending.push(p);
+                    }
+                }
+            }
+            Ok(Some(Err(e))) => {
+                // A watcher error is not a warning. On Linux this is
+                // usually an exhausted inotify limit, after which
+                // changes are missed silently -- exactly when the user
+                // most believes the index is current.
+                anyhow::bail!(
+                    "filesystem watch error: {e}\n\
+                     Changes may be going unnoticed, so the index cannot be trusted \
+                     to be current. On Linux this is often an exhausted inotify watch \
+                     limit (see /proc/sys/fs/inotify/max_user_watches)."
+                );
+            }
+            // Quiet period elapsed with something pending.
+            Ok(None) => {
+                let count = pending.len();
+                pending.clear();
+                match build_stamped_index(&root) {
+                    Ok(index) => match index.save(&index.root) {
+                        Ok(_) => println!(
+                            "re-indexed after {count} change(s): {} file(s)",
+                            index.files.len()
+                        ),
+                        // A failed write is reported and the loop
+                        // continues: a transient error shouldn't end a
+                        // long-running watch, but it must not look like
+                        // a success either.
+                        Err(e) => eprintln!("re-index succeeded but writing the index failed: {e}"),
+                    },
+                    Err(e) => eprintln!("re-index failed: {e}"),
+                }
+            }
+        }
+    }
 }
 
 /// Render the fumble report.

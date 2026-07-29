@@ -6,6 +6,31 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #271 — Docs: CI and branch protection
+**2026-07-29**
+
+- **Fixed a dangling reference.** `.github/workflows/ci-rust.yml` pointed at
+  `references/ci-and-branch-protection.md`, a path that has never existed in
+  this repo. Added the document at `docs/ci-and-branch-protection.md` and
+  repointed the comment, rather than deleting the pointer — the thing it
+  promised to explain is real and undocumented.
+- **Documents the failure mode that actually bit us.** CI's steps are
+  sequential, so a Format failure means Clippy, Test and the WASM steps never
+  ran. A red run showing only a fmt violation is not evidence the tests pass.
+  Commit `894d0a6` left `main` red on exactly that for two days.
+- **Names `check` as the status check context** in both the doc and the
+  workflow comment, since renaming the job would silently detach any protection
+  rule matching on it.
+- **Records that protection is not applied.** `main` currently reports
+  `protected: false`; applying it needs admin credentials no automation here
+  has. The doc gives the `gh api` call, explains each field, and points at the
+  command rather than at itself as the source of truth — including that merge
+  method is a repository setting, not part of protection.
+- Linked from CONTRIBUTING.md, whose "no direct pushes" and "CI must be green"
+  rules are the ones this gate would enforce.
+
+---
+
 ## PR #263 — UI: symbol and decision detail views
 **2026-07-28** · closes [#263](https://github.com/baileyrd/rusty_repo_wise/issues/263)
 

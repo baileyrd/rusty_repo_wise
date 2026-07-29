@@ -30,3 +30,8 @@
 - Reviewers: check for scope creep, missing tests, and unexplained non-obvious decisions.
 - Merge with a **merge commit** ("Create a merge commit" — merge and sync). Do **not**
   squash-merge or rebase-merge: full commit history is preserved deliberately.
+
+The first two rules are GitHub settings, not properties of the code. See
+[docs/ci-and-branch-protection.md](docs/ci-and-branch-protection.md) for what CI
+checks, how to make it a required status check, and how to verify the rule is
+actually applied.

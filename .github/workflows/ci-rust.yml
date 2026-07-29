@@ -2,7 +2,8 @@ name: CI
 
 # Runs on every PR and on pushes to the default branch. The "on green CI, merge"
 # rule depends on this workflow being the required status check — set it as required
-# under branch protection (see references/ci-and-branch-protection.md).
+# under branch protection (see docs/ci-and-branch-protection.md). The job name
+# below, `check`, is the status check context that rule has to name.
 on:
   pull_request:
   push:

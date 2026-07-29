@@ -57,6 +57,7 @@ fn build_index(root: &std::path::Path) -> RepoIndex {
             field_accesses: Vec::new(),
         }],
         other_files: 0,
+        indexed_commit: None,
     }
 }
 

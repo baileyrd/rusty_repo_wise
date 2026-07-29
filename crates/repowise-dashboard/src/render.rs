@@ -329,6 +329,7 @@ mod tests {
             root: root.to_path_buf(),
             files: vec![],
             other_files: 0,
+            indexed_commit: None,
         }
     }
 
@@ -590,6 +591,7 @@ mod tests {
                 field_accesses: vec![],
             }],
             other_files: 0,
+            indexed_commit: None,
         };
         let mut wiki_pages = HashSet::new();
         wiki_pages.insert(file.clone());

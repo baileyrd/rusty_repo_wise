@@ -2,9 +2,11 @@
 //! dependency graph, and health scoring as agent-facing tools over
 //! stdio, using the official `rmcp` SDK.
 //!
-//! Implements 8 of the original repowise's ~10 MCP tools —
-//! `get_overview`, `search_codebase`, `get_context`, `get_risk`,
-//! `get_change_risk`, `get_symbol`, `get_why`, `get_dead_code` — the ones
+//! Implements `get_overview`, `search_codebase`, `get_context`,
+//! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`,
+//! `get_dead_code`, plus `list_repos`, `get_architecture` and
+//! `get_blast_radius` (the last three have no counterpart in the
+//! reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
 //! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
@@ -20,10 +22,13 @@
 //! points — this port has no way to assess); see
 //! `repowise_health::find_dead_code` for the exact tiering logic.
 //!
-//! Every tool call re-loads `.repowise/index.json` and rebuilds the
-//! dependency graph fresh — no in-memory caching across calls. Simple
-//! and always-correct; if this ever needs to serve large repos with high
-//! call volume, that's the first thing to revisit.
+//! Every tool response carries a `_meta` block (see the [`meta`] module)
+//! reporting how long the call took and — for tools that answer from the
+//! index — which commit that index was built against, whether HEAD has
+//! moved past it, and how old it is. Without it, an answer from a
+//! months-old index is indistinguishable from one built against HEAD,
+//! which is the one way this server can mislead a caller while appearing
+//! to work perfectly.
 //!
 //! `list_repos` was the first slice of issue #64 (multi-repo/workspace
 //! support): when this server was started with `--workspace <path>`, it
@@ -58,7 +63,21 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
+
+mod meta;
+
+pub use meta::{Envelope, Meta};
+
+/// Elapsed milliseconds since `started`, saturating.
+///
+/// `u64` milliseconds rather than the raw `Duration` because this
+/// crosses the wire as JSON, and saturating rather than `as` so a
+/// pathologically long call reports a large number instead of wrapping
+/// around to a small one.
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 struct CacheEntry {
     mtime: SystemTime,
@@ -99,7 +118,13 @@ impl RepowiseServer {
         }
     }
 
-    fn load(&self) -> Result<(RepoIndex, RepoGraph), ErrorData> {
+    /// Load the index and graph, reporting whether the in-memory cache
+    /// answered.
+    ///
+    /// The third element feeds `_meta.cached`. It's returned from here
+    /// rather than inferred by callers because this is the only place
+    /// that knows — a caller can't tell a cache hit from a fast disk.
+    fn load(&self) -> Result<(RepoIndex, RepoGraph, bool), ErrorData> {
         let index_path = self.root.join(".repowise").join("index.json");
         let current_mtime = std::fs::metadata(&index_path)
             .and_then(|m| m.modified())
@@ -108,7 +133,7 @@ impl RepowiseServer {
         if let (Some(mtime), Ok(guard)) = (current_mtime, self.cache.lock()) {
             if let Some(entry) = guard.as_ref() {
                 if entry.mtime == mtime {
-                    return Ok((entry.index.clone(), entry.graph.clone()));
+                    return Ok((entry.index.clone(), entry.graph.clone(), true));
                 }
             }
         }
@@ -129,7 +154,30 @@ impl RepowiseServer {
             });
         }
 
-        Ok((index, graph))
+        Ok((index, graph, false))
+    }
+
+    /// Wrap a payload from a tool that answered **from the index**, so
+    /// the response carries that index's provenance and freshness.
+    fn indexed<T>(
+        &self,
+        data: T,
+        index: &RepoIndex,
+        started: Instant,
+        cached: bool,
+    ) -> Json<Envelope<T>> {
+        Json(Envelope::new(
+            data,
+            Meta::build(&self.root, index, elapsed_ms(started), cached),
+        ))
+    }
+
+    /// Wrap a payload from a tool that did **not** consult this
+    /// server's index — git-only (`get_change_risk`) or workspace tools
+    /// reading other repos entirely. See [`Meta::timing_only`] for why
+    /// these deliberately carry no staleness fields.
+    fn untracked<T>(&self, data: T, started: Instant) -> Json<Envelope<T>> {
+        Json(Envelope::new(data, Meta::timing_only(elapsed_ms(started))))
     }
 
     fn resolve_file(&self, file: &str) -> PathBuf {
@@ -549,39 +597,45 @@ impl RepowiseServer {
         name = "get_overview",
         description = "Summary stats about the indexed codebase: file/language/symbol counts, dependency-graph edge counts, and the most depended-on files. Requires a prior `repowise init`/`update`."
     )]
-    fn get_overview(&self) -> Result<Json<OverviewOutput>, ErrorData> {
-        let (index, graph) = self.load()?;
+    fn get_overview(&self) -> Result<Json<Envelope<OverviewOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, graph, cached) = self.load()?;
         let overview = graph.overview(&index);
-        Ok(Json(OverviewOutput {
-            file_count: overview.file_count,
-            other_file_count: overview.other_file_count,
-            total_lines: overview.total_lines,
-            by_language: overview
-                .by_language
-                .into_iter()
-                .map(|(language, file_count)| LanguageCount {
-                    language,
-                    file_count,
-                })
-                .collect(),
-            symbol_counts: overview
-                .symbol_counts
-                .into_iter()
-                .map(|(kind, count)| SymbolKindCount { kind, count })
-                .collect(),
-            import_edges: overview.import_edges,
-            call_edges: overview.call_edges,
-            unresolved_imports: overview.unresolved_imports,
-            unresolved_calls: overview.unresolved_calls,
-            most_depended_on: overview
-                .most_depended_on
-                .into_iter()
-                .map(|(file, dependent_count)| DependedOnFile {
-                    file: display_rel(&file, &index.root),
-                    dependent_count,
-                })
-                .collect(),
-        }))
+        Ok(self.indexed(
+            OverviewOutput {
+                file_count: overview.file_count,
+                other_file_count: overview.other_file_count,
+                total_lines: overview.total_lines,
+                by_language: overview
+                    .by_language
+                    .into_iter()
+                    .map(|(language, file_count)| LanguageCount {
+                        language,
+                        file_count,
+                    })
+                    .collect(),
+                symbol_counts: overview
+                    .symbol_counts
+                    .into_iter()
+                    .map(|(kind, count)| SymbolKindCount { kind, count })
+                    .collect(),
+                import_edges: overview.import_edges,
+                call_edges: overview.call_edges,
+                unresolved_imports: overview.unresolved_imports,
+                unresolved_calls: overview.unresolved_calls,
+                most_depended_on: overview
+                    .most_depended_on
+                    .into_iter()
+                    .map(|(file, dependent_count)| DependedOnFile {
+                        file: display_rel(&file, &index.root),
+                        dependent_count,
+                    })
+                    .collect(),
+            },
+            &index,
+            started,
+            cached,
+        ))
     }
 
     #[tool(
@@ -591,11 +645,12 @@ impl RepowiseServer {
     fn search_codebase(
         &self,
         Parameters(SearchParams { query }): Parameters<SearchParams>,
-    ) -> Result<Json<SearchOutput>, ErrorData> {
+    ) -> Result<Json<Envelope<SearchOutput>>, ErrorData> {
+        let started = Instant::now();
         if query.trim().is_empty() {
             return Err(ErrorData::invalid_params("query must not be empty", None));
         }
-        let (index, graph) = self.load()?;
+        let (index, graph, cached) = self.load()?;
         let mut matches: Vec<SymbolMatch> = graph
             .search(&query)
             .into_iter()
@@ -608,7 +663,7 @@ impl RepowiseServer {
             })
             .collect();
         matches.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
-        Ok(Json(SearchOutput { matches }))
+        Ok(self.indexed(SearchOutput { matches }, &index, started, cached))
     }
 
     #[tool(
@@ -618,8 +673,9 @@ impl RepowiseServer {
     fn get_context(
         &self,
         Parameters(ContextParams { file }): Parameters<ContextParams>,
-    ) -> Result<Json<ContextOutput>, ErrorData> {
-        let (index, graph) = self.load()?;
+    ) -> Result<Json<Envelope<ContextOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, graph, cached) = self.load()?;
         let target = self.resolve_file(&file);
 
         let Some(record) = index.files.iter().find(|f| f.path == target) else {
@@ -676,14 +732,19 @@ impl RepowiseServer {
             })
             .collect();
 
-        Ok(Json(ContextOutput {
-            file: display_rel(&target, &index.root),
-            symbols,
-            dependencies,
-            dependents,
-            health_score: file_health,
-            health_findings,
-        }))
+        Ok(self.indexed(
+            ContextOutput {
+                file: display_rel(&target, &index.root),
+                symbols,
+                dependencies,
+                dependents,
+                health_score: file_health,
+                health_findings,
+            },
+            &index,
+            started,
+            cached,
+        ))
     }
 
     #[tool(
@@ -693,8 +754,9 @@ impl RepowiseServer {
     fn get_risk(
         &self,
         Parameters(RiskParams { file, top_n }): Parameters<RiskParams>,
-    ) -> Result<Json<RiskOutput>, ErrorData> {
-        let (index, graph) = self.load()?;
+    ) -> Result<Json<Envelope<RiskOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, graph, cached) = self.load()?;
         let health = repowise_health::analyze(&index, &graph);
         // Not every indexed root is a git repository (or has git
         // available at all) — degrade to "no git data" rather than
@@ -714,7 +776,7 @@ impl RepowiseServer {
                 ));
             }
             let risk = file_risk(&target, &index, analytics.as_ref(), &health);
-            return Ok(Json(RiskOutput { files: vec![risk] }));
+            return Ok(self.indexed(RiskOutput { files: vec![risk] }, &index, started, cached));
         }
 
         let files = analytics
@@ -725,7 +787,7 @@ impl RepowiseServer {
             .take(top_n)
             .map(|h| file_risk(&h.file, &index, analytics.as_ref(), &health))
             .collect();
-        Ok(Json(RiskOutput { files }))
+        Ok(self.indexed(RiskOutput { files }, &index, started, cached))
     }
 
     #[tool(
@@ -735,21 +797,25 @@ impl RepowiseServer {
     fn get_change_risk(
         &self,
         Parameters(ChangeRiskParams { revspec }): Parameters<ChangeRiskParams>,
-    ) -> Result<Json<ChangeRiskOutput>, ErrorData> {
+    ) -> Result<Json<Envelope<ChangeRiskOutput>>, ErrorData> {
+        let started = Instant::now();
         let risk = repowise_git::change_risk(&self.root, revspec.as_deref()).map_err(|e| {
             ErrorData::invalid_params(format!("failed to compute change risk: {e}"), None)
         })?;
-        Ok(Json(ChangeRiskOutput {
-            revspec: risk.revspec,
-            lines_added: risk.lines_added,
-            lines_deleted: risk.lines_deleted,
-            files_touched: risk.files_touched,
-            subsystems_touched: risk.subsystems_touched,
-            concentration: risk.concentration,
-            author: risk.author,
-            author_prior_commits: risk.author_prior_commits,
-            score: risk.score,
-        }))
+        Ok(self.untracked(
+            ChangeRiskOutput {
+                revspec: risk.revspec,
+                lines_added: risk.lines_added,
+                lines_deleted: risk.lines_deleted,
+                files_touched: risk.files_touched,
+                subsystems_touched: risk.subsystems_touched,
+                concentration: risk.concentration,
+                author: risk.author,
+                author_prior_commits: risk.author_prior_commits,
+                score: risk.score,
+            },
+            started,
+        ))
     }
 
     #[tool(
@@ -762,8 +828,9 @@ impl RepowiseServer {
             symbol_id,
             context_lines,
         }): Parameters<GetSymbolParams>,
-    ) -> Result<Json<GetSymbolOutput>, ErrorData> {
-        let (index, _graph) = self.load()?;
+    ) -> Result<Json<Envelope<GetSymbolOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, _graph, cached) = self.load()?;
 
         let Some(sym) = index
             .files
@@ -792,15 +859,20 @@ impl RepowiseServer {
             .clamp(1, end_line.max(1));
         let snippet = lines[(start_line - 1)..end_line].join("\n");
 
-        Ok(Json(GetSymbolOutput {
-            id: sym.id.clone(),
-            name: sym.name.clone(),
-            kind: sym.kind.label().to_string(),
-            file: display_rel(&sym.file, &index.root),
-            start_line,
-            end_line,
-            source: snippet,
-        }))
+        Ok(self.indexed(
+            GetSymbolOutput {
+                id: sym.id.clone(),
+                name: sym.name.clone(),
+                kind: sym.kind.label().to_string(),
+                file: display_rel(&sym.file, &index.root),
+                start_line,
+                end_line,
+                source: snippet,
+            },
+            &index,
+            started,
+            cached,
+        ))
     }
 
     #[tool(
@@ -810,8 +882,9 @@ impl RepowiseServer {
     fn get_why(
         &self,
         Parameters(WhyParams { targets }): Parameters<WhyParams>,
-    ) -> Result<Json<WhyOutput>, ErrorData> {
-        let (index, _graph) = self.load()?;
+    ) -> Result<Json<Envelope<WhyOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, _graph, cached) = self.load()?;
         let mut decisions = repowise_adr::mine(&index).map_err(|e| {
             ErrorData::internal_error(format!("failed to mine decisions: {e}"), None)
         })?;
@@ -863,7 +936,7 @@ impl RepowiseServer {
             })
             .collect();
 
-        Ok(Json(WhyOutput { decisions }))
+        Ok(self.indexed(WhyOutput { decisions }, &index, started, cached))
     }
 
     #[tool(
@@ -877,8 +950,9 @@ impl RepowiseServer {
             safe_only,
             limit,
         }): Parameters<DeadCodeParams>,
-    ) -> Result<Json<DeadCodeOutput>, ErrorData> {
-        let (index, graph) = self.load()?;
+    ) -> Result<Json<Envelope<DeadCodeOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, graph, cached) = self.load()?;
         let candidates = repowise_health::find_dead_code(&index, &graph);
 
         let threshold = if safe_only {
@@ -922,17 +996,23 @@ impl RepowiseServer {
             })
             .collect();
 
-        Ok(Json(DeadCodeOutput {
-            candidates,
-            total_matching,
-        }))
+        Ok(self.indexed(
+            DeadCodeOutput {
+                candidates,
+                total_matching,
+            },
+            &index,
+            started,
+            cached,
+        ))
     }
 
     #[tool(
         name = "list_repos",
         description = "List every repo configured in the workspace file this server was started with (`--workspace <path>`), each with its name, path, and indexed status (file counts if a prior `repowise init`/`update` has run there). Returns an empty list if no --workspace was given."
     )]
-    fn list_repos(&self) -> Result<Json<ListReposOutput>, ErrorData> {
+    fn list_repos(&self) -> Result<Json<Envelope<ListReposOutput>>, ErrorData> {
+        let started = Instant::now();
         let repos = self
             .workspace_repos
             .as_ref()
@@ -944,21 +1024,25 @@ impl RepowiseServer {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(Json(ListReposOutput { repos }))
+        Ok(self.untracked(ListReposOutput { repos }, started))
     }
 
     #[tool(
         name = "get_architecture",
         description = "Workspace-wide cross-repo Rust import resolution: which workspace repos depend on which others, and the individual `use` sites behind each dependency. Rust-only (the only language this port anchors to a Cargo.toml-derived crate name); every other language's cross-repo imports are left unresolved. Returns empty lists (not an error) when no --workspace was given, same degrade-gracefully shape as list_repos."
     )]
-    fn get_architecture(&self) -> Result<Json<ArchitectureOutput>, ErrorData> {
+    fn get_architecture(&self) -> Result<Json<Envelope<ArchitectureOutput>>, ErrorData> {
+        let started = Instant::now();
         let Some(repos) = self.workspace_repos.as_ref() else {
-            return Ok(Json(ArchitectureOutput {
-                repos: Vec::new(),
-                repo_edges: Vec::new(),
-                edges: Vec::new(),
-                total_edges: 0,
-            }));
+            return Ok(self.untracked(
+                ArchitectureOutput {
+                    repos: Vec::new(),
+                    repo_edges: Vec::new(),
+                    edges: Vec::new(),
+                    total_edges: 0,
+                },
+                started,
+            ));
         };
 
         let report = repowise_workspace::workspace_architecture(repos);
@@ -970,20 +1054,23 @@ impl RepowiseServer {
             .map(CrossRepoEdgeOutput::from)
             .collect();
 
-        Ok(Json(ArchitectureOutput {
-            repos: report
-                .repos
-                .into_iter()
-                .map(RepoStatusOutput::from)
-                .collect(),
-            repo_edges: report
-                .repo_edges
-                .into_iter()
-                .map(RepoEdgeSummaryOutput::from)
-                .collect(),
-            edges,
-            total_edges,
-        }))
+        Ok(self.untracked(
+            ArchitectureOutput {
+                repos: report
+                    .repos
+                    .into_iter()
+                    .map(RepoStatusOutput::from)
+                    .collect(),
+                repo_edges: report
+                    .repo_edges
+                    .into_iter()
+                    .map(RepoEdgeSummaryOutput::from)
+                    .collect(),
+                edges,
+                total_edges,
+            },
+            started,
+        ))
     }
 
     #[tool(
@@ -993,7 +1080,8 @@ impl RepowiseServer {
     fn get_blast_radius(
         &self,
         Parameters(BlastRadiusParams { repo, file }): Parameters<BlastRadiusParams>,
-    ) -> Result<Json<BlastRadiusOutput>, ErrorData> {
+    ) -> Result<Json<Envelope<BlastRadiusOutput>>, ErrorData> {
+        let started = Instant::now();
         let Some(repos) = self.workspace_repos.as_ref() else {
             return Err(ErrorData::invalid_params(
                 "no workspace configured; start the MCP server with --workspace",
@@ -1024,7 +1112,7 @@ impl RepowiseServer {
             .map(CrossRepoEdgeOutput::from)
             .collect();
 
-        Ok(Json(BlastRadiusOutput { importers }))
+        Ok(self.untracked(BlastRadiusOutput { importers }, started))
     }
 }
 
@@ -1101,8 +1189,108 @@ mod tests {
             root: root.to_path_buf(),
             files,
             other_files,
+            // Unstamped, matching what most of these tests exercise:
+            // a plain directory with no git behind it.
+            indexed_commit: None,
         };
         index.save(root).unwrap();
+    }
+
+    /// Build and save an index stamped with the repo's current HEAD, the
+    /// way `repowise-cli`'s init/update does. Needed for anything that
+    /// exercises `_meta`'s staleness comparison, which has nothing to
+    /// compare without a stamp.
+    fn build_and_save_stamped_index(root: &Path) {
+        build_and_save_index(root);
+        let mut index = RepoIndex::load(root).unwrap();
+        index.indexed_commit = repowise_git::head_sha(root);
+        index.save(root).unwrap();
+    }
+
+    /// The wiring test: `Meta`'s own unit tests cover the decision
+    /// table, but nothing there proves the block actually reaches a real
+    /// tool response with real values in it.
+    #[test]
+    fn tool_response_carries_meta_with_the_indexed_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+        std::fs::write(root.join("lib.rs"), "pub fn helper() -> i32 { 1 }\n").unwrap();
+        git(&root, &["add", "lib.rs"]);
+        git(&root, &["commit", "-q", "-m", "Add lib"]);
+        build_and_save_stamped_index(&root);
+
+        let server = RepowiseServer::new(root.clone(), None);
+        let Json(envelope) = server.get_overview().unwrap();
+
+        assert_eq!(
+            envelope.meta.indexed_commit,
+            repowise_git::head_sha(&root),
+            "the response should name the commit it was built from"
+        );
+        assert_eq!(
+            envelope.meta.stale_warning, None,
+            "an index stamped at HEAD is not stale"
+        );
+        assert_eq!(envelope.meta.live_head, None, "nothing to report: no drift");
+        // The payload must still be reachable and correct -- flattening
+        // is what keeps this additive for existing callers.
+        assert_eq!(envelope.data.file_count, 1);
+    }
+
+    /// The case the whole feature exists for: HEAD moved on, the index
+    /// didn't, and the answer must say so instead of reading as current.
+    #[test]
+    fn tool_response_warns_when_head_has_moved_past_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+        std::fs::write(root.join("lib.rs"), "pub fn helper() -> i32 { 1 }\n").unwrap();
+        git(&root, &["add", "lib.rs"]);
+        git(&root, &["commit", "-q", "-m", "Add lib"]);
+        build_and_save_stamped_index(&root);
+        let indexed = repowise_git::head_sha(&root).unwrap();
+
+        // Move HEAD without re-indexing -- exactly what happens between
+        // a `repowise update` and the next few commits.
+        std::fs::write(root.join("other.rs"), "pub fn later() {}\n").unwrap();
+        git(&root, &["add", "other.rs"]);
+        git(&root, &["commit", "-q", "-m", "Add other"]);
+        let live = repowise_git::head_sha(&root).unwrap();
+        assert_ne!(indexed, live, "the test needs HEAD to have actually moved");
+
+        let server = RepowiseServer::new(root.clone(), None);
+        let Json(envelope) = server.get_overview().unwrap();
+
+        assert_eq!(envelope.meta.indexed_commit.as_deref(), Some(&*indexed));
+        assert_eq!(envelope.meta.live_head.as_deref(), Some(&*live));
+        let warning = envelope
+            .meta
+            .stale_warning
+            .expect("a moved HEAD must produce a warning");
+        assert!(warning.contains(&indexed), "{warning}");
+        assert!(warning.contains(&live), "{warning}");
+    }
+
+    /// `get_change_risk` answers from git alone. Attaching this index's
+    /// age to it would make a current answer look doubtful.
+    #[test]
+    fn git_only_tools_report_timing_without_index_staleness() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+        std::fs::write(root.join("lib.rs"), "pub fn helper() -> i32 { 1 }\n").unwrap();
+        git(&root, &["add", "lib.rs"]);
+        git(&root, &["commit", "-q", "-m", "Add lib"]);
+
+        let server = RepowiseServer::new(root.clone(), None);
+        let Json(envelope) = server
+            .get_change_risk(Parameters(ChangeRiskParams::default()))
+            .unwrap();
+
+        assert_eq!(envelope.meta.indexed_commit, None);
+        assert_eq!(envelope.meta.index_age_days, None);
+        assert_eq!(envelope.meta.stale_warning, None);
     }
 
     #[test]
@@ -1113,7 +1301,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(overview) = server.get_overview().unwrap();
+        let Json(Envelope { data: overview, .. }) = server.get_overview().unwrap();
         assert_eq!(overview.file_count, 1);
         assert_eq!(
             overview
@@ -1134,7 +1322,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(result) = server
+        let Json(Envelope { data: result, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "helperfunc".to_string(),
             }))
@@ -1172,7 +1360,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(ctx) = server
+        let Json(Envelope { data: ctx, .. }) = server
             .get_context(Parameters(ContextParams {
                 file: "lib.rs".to_string(),
             }))
@@ -1249,7 +1437,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(risk) = server
+        let Json(Envelope { data: risk, .. }) = server
             .get_risk(Parameters(RiskParams {
                 file: Some("lib.rs".to_string()),
                 top_n: 10,
@@ -1284,7 +1472,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(risk) = server
+        let Json(Envelope { data: risk, .. }) = server
             .get_risk(Parameters(RiskParams {
                 file: None,
                 top_n: 1,
@@ -1304,7 +1492,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(risk) = server
+        let Json(Envelope { data: risk, .. }) = server
             .get_risk(Parameters(RiskParams {
                 file: Some("lib.rs".to_string()),
                 top_n: 10,
@@ -1346,7 +1534,7 @@ mod tests {
         git(&root, &["commit", "-q", "-am", "Grow lib"]);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(risk) = server
+        let Json(Envelope { data: risk, .. }) = server
             .get_change_risk(Parameters(ChangeRiskParams { revspec: None }))
             .unwrap();
 
@@ -1372,7 +1560,7 @@ mod tests {
         git(&root, &["commit", "-q", "-am", "Grow a"]);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(risk) = server
+        let Json(Envelope { data: risk, .. }) = server
             .get_change_risk(Parameters(ChangeRiskParams {
                 revspec: Some("base..HEAD".to_string()),
             }))
@@ -1408,14 +1596,14 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(search) = server
+        let Json(Envelope { data: search, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "target".to_string(),
             }))
             .unwrap();
         let symbol_id = search.matches[0].id.clone();
 
-        let Json(sym) = server
+        let Json(Envelope { data: sym, .. }) = server
             .get_symbol(Parameters(GetSymbolParams {
                 symbol_id,
                 context_lines: 0,
@@ -1441,7 +1629,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(search) = server
+        let Json(Envelope { data: search, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "target".to_string(),
             }))
@@ -1451,7 +1639,7 @@ mod tests {
         // Requesting far more context than the file has on either side
         // should clamp to the file's real bounds (lines 1..7) rather than
         // panicking or going out of range.
-        let Json(sym) = server
+        let Json(Envelope { data: sym, .. }) = server
             .get_symbol(Parameters(GetSymbolParams {
                 symbol_id,
                 context_lines: 100,
@@ -1513,7 +1701,7 @@ mod tests {
         build_two_decision_fixture(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(why) = server
+        let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams { targets: vec![] }))
             .unwrap();
 
@@ -1527,7 +1715,7 @@ mod tests {
         build_two_decision_fixture(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(why) = server
+        let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams {
                 targets: vec!["src/queue.rs".to_string()],
             }))
@@ -1545,14 +1733,14 @@ mod tests {
         build_two_decision_fixture(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(search) = server
+        let Json(Envelope { data: search, .. }) = server
             .search_codebase(Parameters(SearchParams {
                 query: "OtherThing".to_string(),
             }))
             .unwrap();
         let symbol_id = search.matches[0].id.clone();
 
-        let Json(why) = server
+        let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams {
                 targets: vec![symbol_id],
             }))
@@ -1569,7 +1757,7 @@ mod tests {
         build_two_decision_fixture(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(why) = server
+        let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams {
                 targets: vec!["src/nonexistent.rs".to_string()],
             }))
@@ -1586,7 +1774,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(dead) = server
+        let Json(Envelope { data: dead, .. }) = server
             .get_dead_code(Parameters(DeadCodeParams::default()))
             .unwrap();
 
@@ -1607,12 +1795,12 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(all) = server
+        let Json(Envelope { data: all, .. }) = server
             .get_dead_code(Parameters(DeadCodeParams::default()))
             .unwrap();
         assert_eq!(all.total_matching, 3);
 
-        let Json(safe) = server
+        let Json(Envelope { data: safe, .. }) = server
             .get_dead_code(Parameters(DeadCodeParams {
                 min_confidence: None,
                 safe_only: true,
@@ -1633,7 +1821,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(dead) = server
+        let Json(Envelope { data: dead, .. }) = server
             .get_dead_code(Parameters(DeadCodeParams {
                 min_confidence: None,
                 safe_only: false,
@@ -1670,7 +1858,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(output) = server.list_repos().unwrap();
+        let Json(Envelope { data: output, .. }) = server.list_repos().unwrap();
 
         assert!(output.repos.is_empty());
     }
@@ -1698,7 +1886,7 @@ mod tests {
                 },
             ]),
         );
-        let Json(output) = server.list_repos().unwrap();
+        let Json(Envelope { data: output, .. }) = server.list_repos().unwrap();
 
         assert_eq!(output.repos.len(), 2);
         assert_eq!(output.repos[0].name, "indexed");
@@ -1758,7 +1946,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(output) = server.get_architecture().unwrap();
+        let Json(Envelope { data: output, .. }) = server.get_architecture().unwrap();
 
         assert!(output.repos.is_empty());
         assert!(output.edges.is_empty());
@@ -1772,7 +1960,7 @@ mod tests {
         let workspace_repos = two_repo_workspace(&root);
 
         let server = RepowiseServer::new(root.clone(), Some(workspace_repos));
-        let Json(output) = server.get_architecture().unwrap();
+        let Json(Envelope { data: output, .. }) = server.get_architecture().unwrap();
 
         assert_eq!(output.repos.len(), 2);
         assert_eq!(output.total_edges, 1);
@@ -1824,7 +2012,7 @@ mod tests {
         let workspace_repos = two_repo_workspace(&root);
 
         let server = RepowiseServer::new(root, Some(workspace_repos));
-        let Json(output) = server
+        let Json(Envelope { data: output, .. }) = server
             .get_blast_radius(Parameters(BlastRadiusParams {
                 repo: "repo-a".to_string(),
                 file: "src/foo.rs".to_string(),
@@ -1845,12 +2033,16 @@ mod tests {
         let server = RepowiseServer::new(root, None);
 
         // First load populates cache
-        let (idx1, _) = server.load().unwrap();
+        let (idx1, _, cached1) = server.load().unwrap();
         assert_eq!(idx1.files.len(), 1);
+        assert!(!cached1, "the first load has nothing to hit");
 
-        // Second load hits cache
-        let (idx2, _) = server.load().unwrap();
+        // Second load hits cache. Asserting the *flag*, not just that
+        // the data matches -- equal data proves nothing here, since a
+        // full re-read would produce exactly the same index.
+        let (idx2, _, cached2) = server.load().unwrap();
         assert_eq!(idx2.files.len(), 1);
         assert_eq!(idx1.files[0].path, idx2.files[0].path);
+        assert!(cached2, "the second load should have hit the cache");
     }
 }

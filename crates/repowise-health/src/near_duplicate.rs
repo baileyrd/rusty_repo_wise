@@ -328,6 +328,7 @@ mod tests {
             root: root.to_path_buf(),
             files,
             other_files: 0,
+            indexed_commit: None,
         }
     }
 

@@ -634,6 +634,22 @@ pub struct RepoIndex {
     pub root: PathBuf,
     pub files: Vec<FileRecord>,
     pub other_files: usize,
+    /// The commit `HEAD` pointed at when this index was built, as a
+    /// 12-character SHA prefix — the anchor for "is this index still
+    /// describing the current tree?".
+    ///
+    /// `None` means *unknown*, not *matching*: the repo has no git, no
+    /// commits, or the index predates this field. Consumers must report
+    /// unknown as unknown; treating it as "up to date" would make every
+    /// index built before this field existed claim to be current
+    /// forever.
+    ///
+    /// `#[serde(default)]` so an index written before this field was
+    /// added still loads instead of failing to parse — a re-index is a
+    /// reasonable thing to ask for, a hard load error on an old index
+    /// is not.
+    #[serde(default)]
+    pub indexed_commit: Option<String>,
 }
 
 impl RepoIndex {

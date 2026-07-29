@@ -119,6 +119,7 @@ fn mines_and_links_adrs_and_decision_commits() {
             field_accesses: Vec::new(),
         }],
         other_files: 0,
+        indexed_commit: None,
     };
 
     let decisions = mine(&index).unwrap();

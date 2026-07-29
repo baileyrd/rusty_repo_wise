@@ -108,6 +108,7 @@ mod tests {
                 },
             ],
             other_files: 0,
+            indexed_commit: None,
         };
 
         let body = "We decided to introduce TaskQueue instead of a naive Vec.";

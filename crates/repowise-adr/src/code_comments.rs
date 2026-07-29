@@ -190,6 +190,7 @@ mod tests {
                 field_accesses: Vec::new(),
             }],
             other_files: 0,
+            indexed_commit: None,
         }
     }
 

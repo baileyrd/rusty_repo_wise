@@ -95,6 +95,7 @@ fn index(files: Vec<FileRecord>) -> RepoIndex {
         root: PathBuf::from("/fixture"),
         files,
         other_files: 0,
+        indexed_commit: None,
     }
 }
 

@@ -29,6 +29,7 @@ fn index_dir(root: &Path) -> RepoIndex {
         root: root.to_path_buf(),
         files,
         other_files,
+        indexed_commit: None,
     };
     index.save(root).unwrap();
     index
@@ -154,6 +155,7 @@ fn workspace_architecture_resolves_same_repo_imports_first_even_with_a_naming_co
         root: repo_a_path.clone(),
         files,
         other_files: 0,
+        indexed_commit: None,
     };
     combined.save(&repo_a_path).unwrap();
 

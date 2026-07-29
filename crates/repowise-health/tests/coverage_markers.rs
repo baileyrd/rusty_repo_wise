@@ -49,6 +49,7 @@ fn index_with_four_dependents() -> RepoIndex {
             file("d.rs", vec!["core.rs"]),
         ],
         other_files: 0,
+        indexed_commit: None,
     }
 }
 
@@ -115,6 +116,7 @@ fn untested_hotspot_needs_all_three_signals() {
         root: PathBuf::from("/repo"),
         files: vec![file("core.rs", vec![])],
         other_files: 0,
+        indexed_commit: None,
     };
     let lonely_graph = RepoGraph::build(&lonely);
     let few_deps = analyze_with_context(

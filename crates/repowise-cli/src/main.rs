@@ -196,8 +196,12 @@ enum Command {
         #[arg(long)]
         for_file: Option<PathBuf>,
     },
-    /// Run an MCP server over stdio exposing get_overview/search_codebase/
-    /// get_context. Requires a prior `repowise init`/`update`.
+    /// Run an MCP server over stdio exposing the agent-facing tools
+    /// (get_overview, search_codebase, get_context, get_risk,
+    /// get_change_risk, get_symbol, get_why, get_dead_code, and the
+    /// workspace tools). Every response carries a `_meta` block with
+    /// timing and index-staleness. Requires a prior `repowise
+    /// init`/`update`.
     Serve {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -421,8 +425,22 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Build an index and stamp it with the commit it describes.
+///
+/// The stamping happens here rather than in `repowise-parser` because
+/// the parser has no git dependency by design. Both `init` and `update`
+/// go through this, so the two can't disagree about whether an index
+/// gets stamped — an unstamped index reads as "unknown commit" forever
+/// downstream, and that difference should never come down to which
+/// command someone happened to run.
+fn build_stamped_index(root: &Path) -> anyhow::Result<RepoIndex> {
+    let mut index = repowise_parser::build_index(root)?;
+    index.indexed_commit = repowise_git::head_sha(&index.root);
+    Ok(index)
+}
+
 fn cmd_init(path: &Path) -> anyhow::Result<()> {
-    let index = repowise_parser::build_index(path)?;
+    let index = build_stamped_index(path)?;
     let saved_to = index.save(&index.root)?;
     println!(
         "Indexed {} file(s) ({} other file(s) skipped) under {}",
@@ -437,7 +455,7 @@ fn cmd_init(path: &Path) -> anyhow::Result<()> {
 fn cmd_update(path: &Path) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let previous = RepoIndex::load(&root).ok();
-    let index = repowise_parser::build_index(&root)?;
+    let index = build_stamped_index(&root)?;
     let saved_to = index.save(&index.root)?;
     match previous {
         Some(prev) => {

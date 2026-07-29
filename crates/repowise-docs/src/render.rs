@@ -173,6 +173,7 @@ mod tests {
             root: root.clone(),
             files: vec![a_file.clone(), b_file],
             other_files: 0,
+            indexed_commit: None,
         };
         let graph = RepoGraph::build(&index);
 

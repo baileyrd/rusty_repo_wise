@@ -1461,6 +1461,181 @@ fn FileDetailPanel(wiki_pages: WikiPages, selected: RwSignal<Option<String>>) ->
     }
 }
 
+/// Current location hash, or empty when unavailable.
+fn location_hash() -> String {
+    web_sys::window()
+        .and_then(|w| w.location().hash().ok())
+        .unwrap_or_default()
+}
+
+/// Update the hash without pushing a history entry.
+///
+/// `replaceState` rather than assigning `location.hash`: selecting a
+/// file shouldn't add a back-button step for every click, matching what
+/// present mode already does for slides.
+fn replace_hash(hash: &str) {
+    if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(hash));
+    }
+}
+
+/// One view. Every section that used to render stacked on a single
+/// page is now reachable at its own route (issue #259).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Route {
+    Overview,
+    Health,
+    Coverage,
+    Hotspots,
+    Contributors,
+    Files,
+    Stats,
+    Decisions,
+    Symbols,
+    Graph,
+    DeadCode,
+    Chat,
+    Usage,
+    Settings,
+    Workspace,
+    CoChanges,
+    SystemMap,
+    Conformance,
+    Contracts,
+    /// A hash that matches no known view. Rendered as an explicit
+    /// not-found state rather than a blank page or a silent redirect --
+    /// a stale bookmark should say so.
+    NotFound,
+}
+
+/// Every routable view, in nav order, as `(route, slug, label)`.
+///
+/// Single source of truth: the nav, the parser, and the formatter all
+/// read this table, so a view can't be added to one and forgotten in
+/// another.
+const ROUTES: &[(Route, &str, &str)] = &[
+    (Route::Overview, "overview", "Overview"),
+    (Route::Health, "health", "Code health"),
+    (Route::Coverage, "coverage", "Coverage"),
+    (Route::Hotspots, "hotspots", "Hotspots"),
+    (Route::Contributors, "contributors", "Contributors"),
+    (Route::Files, "files", "Files"),
+    (Route::Stats, "stats", "Activity"),
+    (Route::Decisions, "decisions", "Decisions"),
+    (Route::Symbols, "symbols", "Symbols"),
+    (Route::Graph, "graph", "Graph"),
+    (Route::DeadCode, "dead-code", "Dead code"),
+    (Route::Chat, "chat", "Chat"),
+    (Route::Usage, "usage", "Usage"),
+    (Route::Settings, "settings", "Settings"),
+    (Route::Workspace, "workspace", "Workspace"),
+    (Route::CoChanges, "co-changes", "Co-changes"),
+    (Route::SystemMap, "system-map", "System map"),
+    (Route::Conformance, "conformance", "Conformance"),
+    (Route::Contracts, "contracts", "Contracts"),
+];
+
+fn route_slug(route: Route) -> &'static str {
+    ROUTES
+        .iter()
+        .find(|(r, _, _)| *r == route)
+        .map(|(_, slug, _)| *slug)
+        .unwrap_or("overview")
+}
+
+/// Parse a location hash into a view and an optional selected file.
+///
+/// Shape: `#/<slug>` with an optional `?file=<percent-encoded path>`.
+///
+/// **Hash routing, not path routing**, and deliberately: `repowise
+/// serve-dashboard` serves static files, so `/health` would 404 on
+/// reload unless the server grew a catch-all rewrite to `index.html`.
+/// A hash survives a reload with no server change at all, and the app
+/// already used a hash for present mode -- so this follows the existing
+/// convention rather than introducing a second one.
+///
+/// Pure, so every case below is testable without a browser.
+fn parse_hash(hash: &str) -> (Route, Option<String>) {
+    let raw = hash.trim().trim_start_matches('#');
+    // Present mode owns `#present/<n>` and is an overlay, not a view;
+    // leave the underlying route alone so exiting returns you to it.
+    if raw.is_empty() || raw.starts_with("present/") {
+        return (Route::Overview, None);
+    }
+    let raw = raw.trim_start_matches('/');
+    let (slug, query) = match raw.split_once('?') {
+        Some((s, q)) => (s, Some(q)),
+        None => (raw, None),
+    };
+    if slug.is_empty() {
+        return (Route::Overview, None);
+    }
+
+    let route = ROUTES
+        .iter()
+        .find(|(_, s, _)| *s == slug)
+        .map(|(r, _, _)| *r)
+        .unwrap_or(Route::NotFound);
+
+    let selected = query.and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("file="))
+            .map(percent_decode)
+            .filter(|f| !f.is_empty())
+    });
+    (route, selected)
+}
+
+/// Format a view and selection back into a hash.
+fn format_hash(route: Route, selected: Option<&str>) -> String {
+    let mut out = format!("#/{}", route_slug(route));
+    if let Some(file) = selected.filter(|f| !f.is_empty()) {
+        out.push_str("?file=");
+        out.push_str(&percent_encode(file));
+    }
+    out
+}
+
+/// Minimal percent-encoding for the characters that would otherwise
+/// break a hash query: `%`, `&`, `#`, `?`, `+`, and space.
+///
+/// Hand-rolled rather than adding a dependency for six characters.
+/// Paths are the only thing encoded here and they don't contain the
+/// wider set a general URL encoder would need to handle.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'%' => out.push_str("%25"),
+            b'&' => out.push_str("%26"),
+            b'#' => out.push_str("%23"),
+            b'?' => out.push_str("%3F"),
+            b'+' => out.push_str("%2B"),
+            b' ' => out.push_str("%20"),
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 /// How long typing must pause before a search request is issued.
 ///
 /// Without this every keystroke was one HTTP request: typing "parser"
@@ -2658,6 +2833,43 @@ fn App() -> impl IntoView {
     let selected = RwSignal::new(None::<String>);
     let present_step = RwSignal::new(parse_present_hash());
 
+    // Route comes from the URL hash, so a reload restores the current
+    // view instead of resetting to Overview.
+    let current = RwSignal::new(parse_hash(&location_hash()).0);
+    if let Some(file) = parse_hash(&location_hash()).1 {
+        selected.set(Some(file));
+    }
+
+    // Back/forward and manual edits both fire `hashchange`.
+    window_event_listener_untyped("hashchange", move |_| {
+        let (route, file) = parse_hash(&location_hash());
+        // A present-mode hash must not move the underlying view.
+        if !location_hash()
+            .trim_start_matches('#')
+            .starts_with("present/")
+        {
+            current.set(route);
+            selected.set(file);
+        }
+    });
+
+    // Keep the hash in step when a section sets the selection (e.g.
+    // clicking a treemap tile), so that state survives a reload too.
+    Effect::new(move |_| {
+        let file = selected.get();
+        let route = current.get();
+        if location_hash()
+            .trim_start_matches('#')
+            .starts_with("present/")
+        {
+            return;
+        }
+        let want = format_hash(route, file.as_deref());
+        if location_hash() != want {
+            replace_hash(&want);
+        }
+    });
+
     view! {
         <h1>"repowise dashboard"</h1>
         <p class="subtitle">"live server"</p>
@@ -2668,26 +2880,48 @@ fn App() -> impl IntoView {
         }>"Present"</button>
         <SearchBox selected=selected />
         <PresentMode step=present_step selected=selected />
+        <nav class="view-nav">
+            {ROUTES.iter().map(|(r, slug, label)| {
+                let route = *r;
+                let slug = *slug;
+                view! {
+                    <a
+                        href=move || format_hash(route, selected.get().as_deref())
+                        class:active=move || current.get() == route
+                        data-slug=slug
+                    >{*label}</a>
+                }
+            }).collect::<Vec<_>>()}
+        </nav>
         <FileDetailPanel wiki_pages=wiki_pages selected=selected />
-        <OverviewSection selected=selected />
-        <HealthSection selected=selected />
-        <CoverageSection selected=selected />
-        <HotspotsSection selected=selected />
-        <ContributorsSection />
-        <FilesSection selected=selected />
-        <StatsSection />
-        <DecisionsSection />
-        <SymbolsSection selected=selected />
-        <GraphSection selected=selected />
-        <DeadCodeSection selected=selected />
-        <ChatSection />
-        <UsageSection />
-        <SettingsSection />
-        <WorkspaceSection />
-        <CoChangesSection />
-        <SystemMapSection />
-        <ConformanceSection />
-        <ContractsSection />
+        {move || match current.get() {
+            Route::Overview => view! { <OverviewSection selected=selected /> }.into_any(),
+            Route::Health => view! { <HealthSection selected=selected /> }.into_any(),
+            Route::Coverage => view! { <CoverageSection selected=selected /> }.into_any(),
+            Route::Hotspots => view! { <HotspotsSection selected=selected /> }.into_any(),
+            Route::Contributors => view! { <ContributorsSection /> }.into_any(),
+            Route::Files => view! { <FilesSection selected=selected /> }.into_any(),
+            Route::Stats => view! { <StatsSection /> }.into_any(),
+            Route::Decisions => view! { <DecisionsSection /> }.into_any(),
+            Route::Symbols => view! { <SymbolsSection selected=selected /> }.into_any(),
+            Route::Graph => view! { <GraphSection selected=selected /> }.into_any(),
+            Route::DeadCode => view! { <DeadCodeSection selected=selected /> }.into_any(),
+            Route::Chat => view! { <ChatSection /> }.into_any(),
+            Route::Usage => view! { <UsageSection /> }.into_any(),
+            Route::Settings => view! { <SettingsSection /> }.into_any(),
+            Route::Workspace => view! { <WorkspaceSection /> }.into_any(),
+            Route::CoChanges => view! { <CoChangesSection /> }.into_any(),
+            Route::SystemMap => view! { <SystemMapSection /> }.into_any(),
+            Route::Conformance => view! { <ConformanceSection /> }.into_any(),
+            Route::Contracts => view! { <ContractsSection /> }.into_any(),
+            Route::NotFound => view! {
+                <h2>"Not found"</h2>
+                <p class="empty">
+                    "No view matches that address. It may be a stale link -- pick a view above."
+                </p>
+            }
+            .into_any(),
+        }}
     }
 }
 
@@ -2807,5 +3041,70 @@ mod tests {
     fn a_real_query_is_sent_even_with_surrounding_whitespace() {
         assert!(should_query("parser"));
         assert!(should_query("  parser  "));
+    }
+
+    #[test]
+    fn every_route_in_the_table_round_trips() {
+        // The table is the single source of truth for nav, parser and
+        // formatter; a slug that doesn't round-trip is a dead link.
+        for (route, slug, label) in ROUTES {
+            assert!(!label.is_empty(), "{slug} has no label");
+            let (parsed, sel) = parse_hash(&format_hash(*route, None));
+            assert_eq!(parsed, *route, "slug {slug}");
+            assert_eq!(sel, None);
+        }
+    }
+
+    #[test]
+    fn an_empty_or_missing_hash_lands_on_overview() {
+        assert_eq!(parse_hash("").0, Route::Overview);
+        assert_eq!(parse_hash("#").0, Route::Overview);
+        assert_eq!(parse_hash("#/").0, Route::Overview);
+    }
+
+    #[test]
+    fn an_unknown_route_is_not_found_rather_than_a_silent_redirect() {
+        // A stale bookmark should say so, not quietly show Overview as
+        // though nothing were wrong.
+        assert_eq!(parse_hash("#/nope").0, Route::NotFound);
+        assert_eq!(parse_hash("#/health/extra").0, Route::NotFound);
+    }
+
+    #[test]
+    fn present_mode_does_not_clobber_the_underlying_view() {
+        // `#present/<n>` is an overlay, not a view. Parsing it as a
+        // route would make exiting present mode land somewhere random.
+        assert_eq!(parse_hash("#present/0").0, Route::Overview);
+        assert_eq!(parse_hash("#present/3").0, Route::Overview);
+    }
+
+    #[test]
+    fn the_selected_file_survives_a_round_trip() {
+        let h = format_hash(Route::Health, Some("crates/repowise-cli/src/main.rs"));
+        let (route, sel) = parse_hash(&h);
+        assert_eq!(route, Route::Health);
+        assert_eq!(sel.as_deref(), Some("crates/repowise-cli/src/main.rs"));
+    }
+
+    #[test]
+    fn a_path_with_hash_query_or_space_characters_round_trips() {
+        // These would otherwise split the hash and lose the tail.
+        for path in [
+            "a b/c.rs",
+            "weird#name.rs",
+            "q?.rs",
+            "a&b.rs",
+            "100%.rs",
+            "a+b.rs",
+        ] {
+            let (_, sel) = parse_hash(&format_hash(Route::Files, Some(path)));
+            assert_eq!(sel.as_deref(), Some(path), "path {path}");
+        }
+    }
+
+    #[test]
+    fn an_empty_file_param_is_treated_as_no_selection() {
+        assert_eq!(parse_hash("#/files?file=").1, None);
+        assert_eq!(format_hash(Route::Files, Some("")), "#/files");
     }
 }

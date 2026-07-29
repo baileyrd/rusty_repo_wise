@@ -8,6 +8,7 @@ license.workspace = true
 repowise-core = { path = "../repowise-core" }
 repowise-graph = { path = "../repowise-graph" }
 repowise-health = { path = "../repowise-health" }
+repowise-refactor = { path = "../repowise-refactor" }
 repowise-git = { path = "../repowise-git" }
 repowise-adr = { path = "../repowise-adr" }
 repowise-workspace = { path = "../repowise-workspace" }

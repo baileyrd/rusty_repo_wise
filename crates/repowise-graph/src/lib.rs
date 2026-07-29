@@ -17,6 +17,7 @@ pub use cross_repo::{
     cross_repo_import_edges, detect_repo_cycles, rust_module_map, CrossRepoImportEdge,
 };
 
+use petgraph::algo::kosaraju_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
@@ -380,6 +381,63 @@ impl RepoGraph {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// Groups of files whose (best-effort resolved) imports form a
+    /// cycle: A imports B imports ... imports A. A file that imports
+    /// itself counts too (a self-loop, reported as a one-file group).
+    ///
+    /// This is the single-repo counterpart to
+    /// `cross_repo::detect_repo_cycles` -- same technique (Kosaraju
+    /// strongly-connected components over a directed graph), applied to
+    /// this repo's own file-level `Imports` edges rather than
+    /// workspace-level repo-to-repo edges. Nothing computed this before:
+    /// `dependencies_of`/`dependents_of` answer "what does this one file
+    /// touch", not "is there a cycle anywhere", and a cycle is exactly
+    /// the shape a `--mode symbol`/path search can't see because no
+    /// single file's own dependency list looks wrong in isolation.
+    ///
+    /// Groups of 1 are only ever a genuine self-import; an acyclic file
+    /// is simply absent, not returned as a trivial group of itself --
+    /// SCC computation always produces one, so it's filtered here rather
+    /// than pushed onto every caller.
+    pub fn file_import_cycles(&self) -> Vec<Vec<PathBuf>> {
+        let mut sub = DiGraph::<PathBuf, ()>::new();
+        let mut sub_index: HashMap<PathBuf, NodeIndex> = HashMap::new();
+        let mut self_loops: HashSet<PathBuf> = HashSet::new();
+
+        for edge in self.graph.edge_references() {
+            if *edge.weight() != EdgeKind::Imports {
+                continue;
+            }
+            let (Node::File(from), Node::File(to)) =
+                (&self.graph[edge.source()], &self.graph[edge.target()])
+            else {
+                continue;
+            };
+            if from == to {
+                self_loops.insert(from.clone());
+            }
+            let a = *sub_index
+                .entry(from.clone())
+                .or_insert_with(|| sub.add_node(from.clone()));
+            let b = *sub_index
+                .entry(to.clone())
+                .or_insert_with(|| sub.add_node(to.clone()));
+            sub.add_edge(a, b, ());
+        }
+
+        kosaraju_scc(&sub)
+            .into_iter()
+            .filter_map(|scc| {
+                if scc.len() > 1 {
+                    Some(scc.into_iter().map(|idx| sub[idx].clone()).collect())
+                } else {
+                    let file = &sub[scc[0]];
+                    self_loops.contains(file).then(|| vec![file.clone()])
+                }
+            })
+            .collect()
     }
 
     pub fn overview(&self, index: &RepoIndex) -> Overview {

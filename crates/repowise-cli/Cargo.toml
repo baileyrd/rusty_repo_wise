@@ -13,6 +13,7 @@ repowise-core = { path = "../repowise-core" }
 repowise-parser = { path = "../repowise-parser" }
 repowise-graph = { path = "../repowise-graph" }
 repowise-health = { path = "../repowise-health" }
+repowise-refactor = { path = "../repowise-refactor" }
 repowise-git = { path = "../repowise-git" }
 repowise-docs = { path = "../repowise-docs" }
 repowise-adr = { path = "../repowise-adr" }

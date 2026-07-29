@@ -307,10 +307,32 @@ enum Command {
         #[arg(long)]
         for_file: Option<PathBuf>,
     },
+    /// Deterministic refactor candidates: file-level import cycles, god
+    /// classes, low-cohesion classes, and duplicate/near-duplicate
+    /// functions -- read-only, and the only "refactoring" this port
+    /// does. It names problems and where they are; it never generates a
+    /// diff or writes to source (see issue #304 and its follow-up on
+    /// diff generation for why that line is deliberate).
+    Refactor {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Only show one kind: break-import-cycle, split-god-class,
+        /// split-by-cohesion, or extract-duplicate.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Max candidates shown, 0 for unlimited. Default 20: on a real
+        /// multi-crate codebase, duplicate-function candidates alone can
+        /// number in the thousands (see `repowise-refactor`'s own module
+        /// doc), so this defaults to capped rather than defaulting to a
+        /// wall of text. Candidates are ranked strongest-first within
+        /// each kind, so a cap keeps the signal.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Run an MCP server over stdio exposing the agent-facing tools
     /// (get_overview, search_codebase, get_context, get_risk,
-    /// get_change_risk, get_symbol, get_why, get_dead_code, get_health,
-    /// and the
+    /// get_change_risk, get_symbol, get_why, get_answer, get_dead_code,
+    /// get_health, get_refactor_candidates, and the
     /// workspace tools). Every response carries a `_meta` block with
     /// timing and index-staleness. Requires a prior `repowise
     /// init`/`update`.
@@ -617,6 +639,7 @@ fn main() -> anyhow::Result<()> {
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Docs { path } => cmd_docs(&path),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
+        Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
         Command::Generate { path } => cmd_generate(&path),
@@ -2497,6 +2520,66 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             for f in &d.linked_files {
                 println!("      {}", display_path(f, &index.root));
             }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_refactor(path: &Path, kind: Option<&str>, limit: usize) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let graph = RepoGraph::build(&index);
+
+    let kind_filter = kind
+        .map(|k| match k {
+            "break-import-cycle" | "split-god-class" | "split-by-cohesion"
+            | "extract-duplicate" => Ok(k.to_string()),
+            other => anyhow::bail!(
+                "unknown kind {other:?} -- expected break-import-cycle, split-god-class, \
+                 split-by-cohesion, or extract-duplicate"
+            ),
+        })
+        .transpose()?;
+
+    let mut candidates = repowise_refactor::find_refactor_candidates(&index, &graph);
+    if let Some(k) = &kind_filter {
+        candidates.retain(|c| c.kind.label() == k);
+    }
+    let total = candidates.len();
+
+    println!(
+        "Repowise refactor candidates for {} ({total} found)",
+        index.root.display(),
+    );
+    if candidates.is_empty() {
+        println!(
+            "  No structural refactor candidates found (import cycles, god classes, \
+             low-cohesion classes, duplicate/near-duplicate functions)."
+        );
+        return Ok(());
+    }
+    println!(
+        "  Read-only: these name a problem and where it is. Nothing here generates a diff \
+         or writes to a file -- this port doesn't do that (see issue #304)."
+    );
+
+    let shown = if limit == 0 { total } else { limit.min(total) };
+    if shown < total {
+        println!(
+            "  Showing the {shown} strongest of {total} (ranked exact-duplicate first, then \
+             by descending overlap within extract-duplicate; --limit 0 for all, --kind to \
+             narrow)."
+        );
+    }
+
+    for c in candidates.iter().take(shown) {
+        println!("  {:<20} {}", c.kind.label(), c.title);
+        println!("    {}", c.rationale);
+        if !c.files.is_empty() {
+            println!("    files: {}", c.files.join(", "));
+        }
+        if !c.symbols.is_empty() {
+            println!("    symbols: {}", c.symbols.join(", "));
         }
     }
     Ok(())

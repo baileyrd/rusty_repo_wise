@@ -1234,6 +1234,39 @@ fn check_coverage(
 }
 
 fn check_god_classes(index: &RepoIndex, findings: &mut Vec<Finding>) {
+    for c in find_god_classes(index) {
+        findings.push(Finding {
+            file: c.file,
+            symbol: Some(c.class),
+            line: c.line,
+            kind: FindingKind::GodClass,
+            detail: format!("{} methods (> {GOD_CLASS_METHODS})", c.method_count),
+        });
+    }
+}
+
+/// A class/struct whose method count exceeds [`GOD_CLASS_METHODS`].
+///
+/// Pulled out of `check_god_classes` as its own public query, matching
+/// [`find_low_cohesion`]/[`find_near_duplicates`]/[`find_dead_code`] --
+/// each of those is already a narrow, independently-callable detector,
+/// and until this one existed a caller wanting god-class candidates
+/// specifically (rather than the full health report) had no way to ask
+/// for just that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GodClassCandidate {
+    pub file: PathBuf,
+    pub class: String,
+    /// The class/struct declaration's own line, when the indexed symbol
+    /// list has one -- `None` if a class in an unsupported language
+    /// convention was never indexed as its own symbol.
+    pub line: Option<usize>,
+    pub method_count: usize,
+}
+
+/// Find every class/struct across `index` with more than
+/// [`GOD_CLASS_METHODS`] methods, ranked worst-first.
+pub fn find_god_classes(index: &RepoIndex) -> Vec<GodClassCandidate> {
     let mut method_counts: HashMap<(PathBuf, String), usize> = HashMap::new();
     for file in &index.files {
         for sym in &file.symbols {
@@ -1246,28 +1279,35 @@ fn check_god_classes(index: &RepoIndex, findings: &mut Vec<Finding>) {
             }
         }
     }
-    for ((file, parent), count) in &method_counts {
-        if *count <= GOD_CLASS_METHODS {
-            continue;
-        }
-        let line = index
-            .files
-            .iter()
-            .find(|f| &f.path == file)
-            .and_then(|f| {
-                f.symbols.iter().find(|s| {
-                    &s.name == parent && matches!(s.kind, SymbolKind::Struct | SymbolKind::Class)
+    let mut out: Vec<GodClassCandidate> = method_counts
+        .into_iter()
+        .filter(|(_, count)| *count > GOD_CLASS_METHODS)
+        .map(|((file, parent), count)| {
+            let line = index
+                .files
+                .iter()
+                .find(|f| f.path == file)
+                .and_then(|f| {
+                    f.symbols.iter().find(|s| {
+                        s.name == parent && matches!(s.kind, SymbolKind::Struct | SymbolKind::Class)
+                    })
                 })
-            })
-            .map(|s| s.start_line);
-        findings.push(Finding {
-            file: file.clone(),
-            symbol: Some(parent.clone()),
-            line,
-            kind: FindingKind::GodClass,
-            detail: format!("{count} methods (> {GOD_CLASS_METHODS})"),
-        });
-    }
+                .map(|s| s.start_line);
+            GodClassCandidate {
+                file,
+                class: parent,
+                line,
+                method_count: count,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.method_count
+            .cmp(&a.method_count)
+            .then(a.file.cmp(&b.file))
+            .then(a.class.cmp(&b.class))
+    });
+    out
 }
 
 fn check_duplicate_code(index: &RepoIndex, findings: &mut Vec<Finding>) {

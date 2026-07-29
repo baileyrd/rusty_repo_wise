@@ -6,6 +6,51 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #312 — Deterministic refactor-candidate detection
+**2026-07-29** · closes [#304](https://github.com/baileyrd/rusty_repo_wise/issues/304) · splits off [#311](https://github.com/baileyrd/rusty_repo_wise/issues/311)
+
+- **`repowise refactor` (CLI) and `get_refactor_candidates` (MCP)**, both read-only.
+  Four kinds, all synthesized from signals that already existed — no new detection:
+  `break-import-cycle`, `split-god-class`, `split-by-cohesion`, `extract-duplicate`.
+  Neither surface generates a diff or writes to a file; that question is genuinely
+  open (needs a human, not a sizing call) and tracked separately as #311 rather
+  than resolved by default here.
+- **`RepoGraph::file_import_cycles`** is the one new detector: nothing computed
+  single-repo import cycles before (only `repowise-workspace`'s cross-repo cycle
+  detection existed). Same Kosaraju-SCC technique as its cross-repo counterpart.
+- **`repowise_health::find_god_classes`** pulled out of the private
+  `check_god_classes` as its own public query, matching
+  `find_low_cohesion`/`find_near_duplicates`/`find_dead_code`'s existing shape —
+  `check_god_classes` now calls it, `analyze()`'s behavior unchanged.
+- **A real problem surfaced before shipping.** Running this against this port's
+  own ~20-crate workspace produced over 6,000 candidates — almost entirely
+  `extract-duplicate` pairs among structurally-similar test fixtures.
+  `repowise_health`'s own `near-duplicate-code` marker is already this noisy on
+  this codebase (12,000+ findings); it was just never surfaced as a flat list
+  before, since every existing consumer folds it into a per-file score. Fixed:
+  both surfaces cap by default (CLI 20/`--limit 0`; MCP 20, hard-capped at 100,
+  with `total_matching` reporting the true count) and rank duplicate candidates
+  strongest-first — exact matches, then near-duplicates by descending overlap —
+  so a cap keeps the signal instead of an arbitrary slice.
+- **Not a cheap lookup.** The underlying near-duplicate detection measured
+  ~6-7 seconds on this repo, the same cost `repowise health` already pays.
+  Documented in both tool descriptions. (A test-harness artifact — closing
+  stdin immediately after an MCP request — briefly made this *look* like a
+  silent failure; holding stdin open past the runtime confirmed the real
+  response, with the right answer, arrives every time.)
+- Report-only by design: every field on every candidate traces to a specific
+  measured number, never a judgment call, since nothing in `repowise-refactor`
+  is LLM-generated. `repowise health`'s own worst files in this repo score
+  0.0 — exactly why an unsupervised rewriter would be a bad idea here, which is
+  #311's question to answer, not this PR's to assume.
+- 12 new tests across `repowise-graph`/`repowise-refactor`/`repowise-mcp`,
+  including one pinning duplicate-candidate ranking against a known overlap
+  ratio (built from `repowise-health`'s own near-duplicate test fixture) and one
+  confirming candidate ids are stable across repeated calls. Verified live over
+  real MCP stdio against this port's own full workspace.
+
+---
+
 ## PR #310 — Retrieval reuses the persisted embedding index
 **2026-07-29** · closes [#308](https://github.com/baileyrd/rusty_repo_wise/issues/308)
 

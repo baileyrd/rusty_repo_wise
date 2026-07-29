@@ -3,10 +3,10 @@
 //! stdio, using the official `rmcp` SDK.
 //!
 //! Implements `get_overview`, `search_codebase`, `get_context`,
-//! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`,
-//! `get_dead_code`, `get_health`, plus `list_repos`, `get_architecture` and
-//! `get_blast_radius` (the last three have no counterpart in the
-//! reference) — the ones
+//! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`, `get_answer`,
+//! `get_dead_code`, `get_health`, `get_refactor_candidates`, plus
+//! `list_repos`, `get_architecture` and `get_blast_radius` (the last
+//! three have no counterpart in the reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
 //! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
@@ -715,6 +715,75 @@ const INFERRED_CAVEAT: &str = "Some decisions here were inferred by a model from
 from an ADR, commit message, or comment. They are marked `inferred: true` and anchored to code \
 the model quoted (a quote that no longer appears in the file drops the decision). Treat them as \
 a reading of the code, not as recorded intent.";
+
+/// Default rows for `get_refactor_candidates`.
+///
+/// Deliberately capped, unlike `repowise-refactor`'s own
+/// `find_refactor_candidates` (which returns everything -- capping is
+/// this tool's job, not the library's). Running it against this port's
+/// own workspace surfaced why: `extract-duplicate` candidates alone
+/// numbered in the thousands, mostly structurally-similar test fixtures
+/// across many crates. See `repowise-refactor`'s own module doc for the
+/// full account.
+const REFACTOR_DEFAULT_LIMIT: usize = 20;
+
+/// Hard cap, however large a `limit` is requested.
+const REFACTOR_MAX_LIMIT: usize = 100;
+
+fn default_refactor_limit() -> usize {
+    REFACTOR_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RefactorParams {
+    /// Restrict to one kind: `break-import-cycle`, `split-god-class`,
+    /// `split-by-cohesion`, or `extract-duplicate`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Max candidates returned. Default 20, capped at 100. Candidates
+    /// come back ranked strongest-first (within `extract-duplicate`:
+    /// exact matches, then near-duplicates by descending overlap), so a
+    /// cap keeps the signal rather than an arbitrary slice.
+    #[serde(default = "default_refactor_limit")]
+    limit: usize,
+}
+
+impl Default for RefactorParams {
+    fn default() -> Self {
+        RefactorParams {
+            kind: None,
+            limit: default_refactor_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct RefactorCandidateOutput {
+    id: String,
+    /// `break-import-cycle`, `split-god-class`, `split-by-cohesion`, or
+    /// `extract-duplicate`.
+    kind: String,
+    title: String,
+    /// Always traceable to a specific measured number (a method count,
+    /// a component count, an overlap ratio) -- never a vague judgment
+    /// call, since nothing here is LLM-generated.
+    rationale: String,
+    /// Repo-relative files this candidate concerns. Never empty.
+    files: Vec<String>,
+    /// Symbol names involved (class or function names). Empty for
+    /// `break-import-cycle`, which is file-scoped rather than
+    /// symbol-scoped.
+    symbols: Vec<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct RefactorOutput {
+    candidates: Vec<RefactorCandidateOutput>,
+    /// Total matching the requested `kind` filter, before `limit`
+    /// truncated the list -- lets a caller tell "there were only 3"
+    /// from "there were 3000 and you're seeing the strongest 20".
+    total_matching: usize,
+}
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct DeadCodeCandidateOutput {
@@ -1785,6 +1854,63 @@ impl RepowiseServer {
 
         Ok(self.indexed(
             DeadCodeOutput {
+                candidates,
+                total_matching,
+            },
+            &index,
+            started,
+            cached,
+        ))
+    }
+
+    #[tool(
+        name = "get_refactor_candidates",
+        description = "Deterministic refactor candidates: file-level import cycles, god classes (too many methods), low-cohesion classes (methods split into disjoint field-access groups), and duplicate/near-duplicate functions -- every signal already computed by repowise-graph/repowise-health, synthesized here as named, located problems. Read-only: this names a problem and where it is, and never generates a diff or writes to a file -- this port doesn't have a refactoring-diff feature (see issue #304). `kind` restricts to one category. `limit` (default 20, max 100) caps the list; `total_matching` reports the true count before truncation, since extract-duplicate candidates alone can number in the thousands on a large codebase -- candidates are ranked strongest-first (exact duplicates before near-duplicates, near-duplicates by descending overlap) so a cap keeps the signal. NOTE: near-duplicate detection is the same cost as `repowise health`'s equivalent marker -- on a real multi-crate codebase this can take several seconds (not a cheap lookup), since the full computation runs before `limit` truncates the response."
+    )]
+    fn get_refactor_candidates(
+        &self,
+        Parameters(RefactorParams { kind, limit }): Parameters<RefactorParams>,
+    ) -> Result<Json<Envelope<RefactorOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, graph, cached) = self.load()?;
+
+        let kind_filter = kind
+            .as_deref()
+            .map(|k| match k {
+                "break-import-cycle" | "split-god-class" | "split-by-cohesion"
+                | "extract-duplicate" => Ok(k.to_string()),
+                other => Err(ErrorData::invalid_params(
+                    format!(
+                        "unknown kind {other:?} -- expected break-import-cycle, \
+                         split-god-class, split-by-cohesion, or extract-duplicate"
+                    ),
+                    None,
+                )),
+            })
+            .transpose()?;
+
+        let mut candidates = repowise_refactor::find_refactor_candidates(&index, &graph);
+        if let Some(k) = &kind_filter {
+            candidates.retain(|c| c.kind.label() == k);
+        }
+        let total_matching = candidates.len();
+        let limit = limit.clamp(1, REFACTOR_MAX_LIMIT);
+
+        let candidates = candidates
+            .into_iter()
+            .take(limit)
+            .map(|c| RefactorCandidateOutput {
+                id: c.id,
+                kind: c.kind.label().to_string(),
+                title: c.title,
+                rationale: c.rationale,
+                files: c.files,
+                symbols: c.symbols,
+            })
+            .collect();
+
+        Ok(self.indexed(
+            RefactorOutput {
                 candidates,
                 total_matching,
             },
@@ -2945,6 +3071,113 @@ mod tests {
             panic!("expected an error for an invalid min_confidence");
         };
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn get_refactor_candidates_finds_a_god_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut body = String::from("class Big:\n");
+        for i in 0..(repowise_health::GOD_CLASS_METHODS + 1) {
+            body.push_str(&format!("    def m{i}(self):\n        return {i}\n"));
+        }
+        std::fs::write(root.join("big.py"), body).unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_refactor_candidates(Parameters(RefactorParams::default()))
+            .unwrap();
+
+        let god = data
+            .candidates
+            .iter()
+            .find(|c| c.kind == "split-god-class")
+            .expect("Big must be flagged");
+        assert_eq!(god.symbols, vec!["Big".to_string()]);
+        assert!(god
+            .rationale
+            .contains(&(repowise_health::GOD_CLASS_METHODS + 1).to_string()));
+    }
+
+    #[test]
+    fn get_refactor_candidates_kind_filter_narrows_to_one_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut body = String::from("class Big:\n");
+        for i in 0..(repowise_health::GOD_CLASS_METHODS + 1) {
+            body.push_str(&format!("    def m{i}(self):\n        return {i}\n"));
+        }
+        std::fs::write(root.join("big.py"), body).unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_refactor_candidates(Parameters(RefactorParams {
+                kind: Some("extract-duplicate".to_string()),
+                limit: default_refactor_limit(),
+            }))
+            .unwrap();
+
+        assert!(
+            data.candidates
+                .iter()
+                .all(|c| c.kind == "extract-duplicate"),
+            "{:?}",
+            data.candidates
+        );
+        assert_eq!(data.total_matching, 0, "no duplicates in this fixture");
+    }
+
+    #[test]
+    fn get_refactor_candidates_rejects_an_unknown_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let result = server.get_refactor_candidates(Parameters(RefactorParams {
+            kind: Some("rewrite-everything".to_string()),
+            limit: default_refactor_limit(),
+        }));
+        let Err(err) = result else {
+            panic!("expected an error for an unknown kind");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    /// The regression this tool exists to guard against: running it
+    /// against a repo with many structurally-similar functions must
+    /// cap the response and report the true count, not dump everything.
+    #[test]
+    fn get_refactor_candidates_limit_truncates_but_total_matching_reports_the_full_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Four files, each pairing up with every other -- 6 duplicate
+        // pairs from one repeated 4-line body.
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(
+                root.join(format!("{name}.py")),
+                "def compute_total(items):\n    total = 0\n    for x in items:\n        total += x\n    return total\n",
+            )
+            .unwrap();
+        }
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_refactor_candidates(Parameters(RefactorParams {
+                kind: Some("extract-duplicate".to_string()),
+                limit: 2,
+            }))
+            .unwrap();
+
+        assert_eq!(data.candidates.len(), 2);
+        assert_eq!(data.total_matching, 6, "{:?}", data.candidates);
+        assert!(data
+            .candidates
+            .iter()
+            .all(|c| matches!(&c.kind[..], "extract-duplicate")),);
     }
 
     #[test]

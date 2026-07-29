@@ -6,6 +6,52 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #309 — LLM-inferred architectural decisions
+**2026-07-29** · closes [#303](https://github.com/baileyrd/rusty_repo_wise/issues/303)
+
+- **`repowise-adr` gains a seventh decision source, and the first that isn't
+  something a person wrote down.** `repowise generate` already reads every file
+  and calls the model for a wiki summary; it now asks a second question in the
+  same pass — which architectural decisions this code implies — and the answers
+  flow to `repowise decisions`, `get_why`, and both dashboards.
+- **Inference happens at write time; mining stays deterministic.** `generate`
+  writes to `.repowise/inferred-decisions.json`; `repowise-adr` only reads it.
+  No LLM call happens on any decision read path.
+- **Anchors are text, not line numbers.** Every proposal must quote a verbatim
+  span from its file, checked at write time *and* on every read. A model that
+  invents a justification for code that doesn't exist produces nothing — the
+  check runs against the file's real contents, not against anything the model
+  said about them. A decision quoting code that was since rewritten drops itself
+  on the next read. A line number would do neither: it stays valid-looking while
+  the line under it changes. Whitespace is forgiven when matching; identifiers
+  and literals are not.
+- **Every rejection is a rejection.** Missing title/rationale/anchor, a duplicate
+  anchor, or unparseable output all drop the proposal rather than patching it up.
+  `generate` reports each drop category separately: a pass where hallucinations
+  dominate is a fact about that model, and reporting only survivors would present
+  a filtered number as the whole story.
+- **Labelled everywhere, because the compiler insisted.** Adding
+  `DecisionSource::Inferred` deliberately broke every exhaustive match on that
+  enum, forcing each display surface to decide how to label it — a `~` marker in
+  the CLI, an `inferred` boolean plus a caveat in `get_why`, a badge and a
+  table-level note in the static dashboard, and a red banner on the live
+  dashboard's decision detail page, the page where someone decides whether to act.
+- **Absent configuration says so rather than appearing empty.** "No inferred
+  decisions here" and "the pass that infers them never ran" are different facts.
+  `mine_reporting` returns an `InferredState` and every surface prints it;
+  `/api/decisions` changes from a bare array to an object to carry it.
+- **Fixes a mislabel this surfaced.** Both dashboards rendered any decision
+  without a `Status:` line as "commit" — a fallback from when commits were the
+  only non-ADR source. It was describing code comments, changelog entries, and
+  now LLM inferences as commit messages. The Source column says where a decision
+  came from; Status now says nothing when there's nothing to say.
+- 21 new tests. Verified end to end against a stub endpoint: the opt-in state
+  before `generate`, one proposal kept and one invented one dropped, the store
+  contents, self-invalidation after editing the anchored code, and the flagged
+  `get_why` response over real MCP stdio.
+
+---
+
 ## PR #307 — Persist an embedding index; `--mode semantic` works
 **2026-07-29** · closes [#302](https://github.com/baileyrd/rusty_repo_wise/issues/302)
 

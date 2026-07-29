@@ -1,4 +1,4 @@
-use repowise_adr::DecisionRecord;
+use repowise_adr::{DecisionRecord, DecisionSource};
 use repowise_core::RepoIndex;
 use repowise_git::Hotspot;
 use repowise_graph::Overview;
@@ -229,18 +229,45 @@ fn decisions_section(decisions: &[DecisionRecord]) -> String {
         );
         return out;
     }
-    out.push_str("<table><tr><th>ID</th><th>Title</th><th>Status</th><th class=\"num\">Linked files</th></tr>\n");
+
+    // Stated once above the table rather than repeated per row, but
+    // only when there's something to state -- a caveat that's always
+    // there is a caveat nobody reads.
+    if decisions.iter().any(|d| d.source.is_inferred()) {
+        out.push_str(
+            "<p class=\"empty\">Rows marked <span class=\"badge\">inferred</span> were \
+             inferred by a model from code, not read from an ADR, commit, or comment. \
+             Each is anchored to code the model quoted; a quote that no longer appears \
+             in the file drops the decision. Treat them as a reading of the code, not \
+             as recorded intent.</p>\n",
+        );
+    }
+
+    out.push_str("<table><tr><th>ID</th><th>Title</th><th>Status</th><th>Source</th><th class=\"num\">Linked files</th></tr>\n");
     for d in decisions {
+        // Only ADR files carry a `Status:` line. The absent case used to
+        // render as "commit", from when commits were the only other
+        // source -- which now labels a code comment, a changelog entry,
+        // or an LLM inference as a commit. The Source column says where
+        // it came from; this column says nothing when there's nothing to
+        // say.
         let status = match &d.superseded_by {
             Some(target) => format!("superseded by {}", escape(target)),
-            None => d
-                .status
-                .as_deref()
-                .map(escape)
-                .unwrap_or_else(|| "<span class=\"badge\">commit</span>".to_string()),
+            None => d.status.as_deref().map(escape).unwrap_or_default(),
+        };
+        let source = match &d.source {
+            DecisionSource::Adr { .. } => "ADR".to_string(),
+            DecisionSource::CommitMessage { .. } => "commit".to_string(),
+            DecisionSource::PullRequest { number, .. } => format!("PR #{number}"),
+            DecisionSource::CodeComment { .. } => "comment".to_string(),
+            DecisionSource::InlineMarker { marker, .. } => escape(marker),
+            DecisionSource::Changelog { .. } => "changelog".to_string(),
+            DecisionSource::Inferred { model, .. } => {
+                format!("<span class=\"badge\">inferred</span> {}", escape(model))
+            }
         };
         out.push_str(&format!(
-            "<tr><td class=\"mono\">{}</td><td>{}</td><td>{status}</td><td class=\"num\">{}</td></tr>\n",
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td>{status}</td><td>{source}</td><td class=\"num\">{}</td></tr>\n",
             escape(&d.id),
             escape(&d.title),
             d.linked_files.len()
@@ -319,7 +346,6 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repowise_adr::DecisionSource;
     use repowise_core::{FileRecord, Language, Symbol, SymbolKind};
     use repowise_health::FindingKind;
     use std::path::PathBuf;
@@ -395,6 +421,70 @@ mod tests {
         // not silently blank sections.
         assert!(html.contains("No git history found"));
         assert!(html.contains("No decisions found"));
+    }
+
+    /// An inferred decision must arrive visibly labelled, and must not
+    /// be described as anything it isn't.
+    #[test]
+    fn an_inferred_decision_is_badged_and_never_labelled_a_commit() {
+        let root = PathBuf::from("/repo");
+        let overview = Overview {
+            file_count: 1,
+            other_file_count: 0,
+            by_language: vec![],
+            symbol_counts: vec![],
+            total_lines: 1,
+            import_edges: 0,
+            call_edges: 0,
+            unresolved_imports: 0,
+            unresolved_calls: 0,
+            most_depended_on: vec![],
+        };
+        let health = repowise_health::HealthReport {
+            file_scores: vec![],
+            findings: vec![],
+            average_score: 10.0,
+        };
+        let decisions = vec![DecisionRecord {
+            id: "inferred:src/queue.rs:7".to_string(),
+            title: "Bounded work queue".to_string(),
+            source: DecisionSource::Inferred {
+                file: root.join("src/queue.rs"),
+                line: 7,
+                model: "some-model".to_string(),
+            },
+            status: None,
+            superseded_by: None,
+            date: None,
+            body: "Backpressure over unbounded growth.".to_string(),
+            linked_files: vec![root.join("src/queue.rs")],
+        }];
+
+        let index = empty_index(&root);
+        let html = render(
+            &root,
+            &index,
+            &overview,
+            &health,
+            None,
+            &decisions,
+            &HashSet::new(),
+        );
+
+        assert!(
+            html.contains("<span class=\"badge\">inferred</span> some-model"),
+            "the row must name the source and the model: {html}"
+        );
+        assert!(
+            html.contains("not read from an ADR, commit, or comment"),
+            "the table needs the caveat above it, not just a badge"
+        );
+        // The bug this guards: a statusless decision used to render as
+        // "commit", which described an LLM inference as a commit message.
+        assert!(
+            !html.contains(">commit<"),
+            "an inferred decision must not be labelled a commit: {html}"
+        );
     }
 
     #[test]

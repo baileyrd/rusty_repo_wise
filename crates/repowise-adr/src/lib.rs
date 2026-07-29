@@ -1,29 +1,40 @@
 //! Best-effort architectural-decision mining: extracts decisions from
-//! six sources — `docs/adr/*.md` files, commit messages, merged PR
+//! seven sources — `docs/adr/*.md` files, commit messages, merged PR
 //! bodies, decision-like code comments, explicit inline decision markers
-//! (`WHY:`, `DECISION:`, etc.), and keep-a-changelog-style CHANGELOG
-//! sections — links each to the indexed files/symbols its body mentions
+//! (`WHY:`, `DECISION:`, etc.), keep-a-changelog-style CHANGELOG
+//! sections, and decisions a model inferred from code during `repowise
+//! generate` — links each to the indexed files/symbols its body mentions
 //! (or, for PRs, the files the GitHub API reports it actually touched;
 //! or, for code comments/inline markers, the file the comment sits in),
 //! and tracks supersession via an ADR's
 //! `Status: ... Superseded by ADR-XXXX` line.
 //!
-//! Only 6 of the original repowise's 8 decision sources are implemented
+//! Only 7 of the original repowise's 8 decision sources are implemented
 //! here — a focused subset, not a shallow stub of all 8 (see the README
 //! for which are deferred and why). The PR-body source is the one place
 //! this crate makes a network call at all, and only when a
 //! `REPOWISE_GITHUB_TOKEN` env var is set — see the `pull_requests`
 //! module doc comment for why that's an explicit opt-in rather than an
 //! unauthenticated fallback.
+//!
+//! Six of the seven read something a person wrote down. The seventh
+//! ([`inferred`]) reads what a model guessed, and is labelled as such at
+//! every surface that displays it — see that module for why the
+//! distinction is load-bearing rather than cosmetic. This crate still
+//! makes no LLM call: `repowise-llm` writes the proposals, and this
+//! crate only reads the file, so every decision read path stays
+//! deterministic.
 
 mod adr_files;
 mod changelog;
 mod code_comments;
 mod commits;
+pub mod inferred;
 mod inline_markers;
 mod linking;
 mod pull_requests;
 
+pub use inferred::{InferredDecision, InferredState, InferredStore};
 pub use pull_requests::{parse_github_owner_repo, GITHUB_API_BASE};
 
 use repowise_core::RepoIndex;
@@ -55,6 +66,35 @@ pub enum DecisionSource {
         file: PathBuf,
         section: String,
     },
+    /// A decision a **model inferred** from code during `repowise
+    /// generate`, anchored to text it quoted from `file`.
+    ///
+    /// The one variant that isn't a written artifact, and the reason
+    /// `DecisionSource` is matched exhaustively at every display site
+    /// rather than having a catch-all arm: adding this forced every
+    /// surface that shows a decision to decide how to label it, which
+    /// is the only way "this was inferred" reaches a reader instead of
+    /// sitting in a field nobody renders.
+    Inferred {
+        file: PathBuf,
+        line: usize,
+        /// The model that produced it. A reader judging an inferred
+        /// claim is entitled to know what inferred it.
+        model: String,
+    },
+}
+
+impl DecisionSource {
+    /// Whether this decision was inferred by a model rather than read
+    /// from something a person wrote.
+    ///
+    /// Exists so callers ask the question by name instead of matching
+    /// on a variant list — a display site that forgets to update its
+    /// list would silently start presenting inferred claims as mined
+    /// ones.
+    pub fn is_inferred(&self) -> bool {
+        matches!(self, DecisionSource::Inferred { .. })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,13 +123,30 @@ impl DecisionRecord {
 
 /// Mine decisions from `docs/adr/*.md`, decision-like commit messages,
 /// decision-like merged PR bodies, decision-like code comments, inline
-/// decision markers, and keep-a-changelog-style CHANGELOG sections under
-/// `index.root`, linking each to the files/symbols its body mentions.
-/// Missing `docs/adr/`, an unreadable git history, an
-/// unavailable/unauthenticated GitHub API, or no changelog file each
-/// degrade to an empty result for that source rather than failing the
-/// whole call — all six sources are independent.
+/// decision markers, keep-a-changelog-style CHANGELOG sections, and the
+/// LLM-inferred store under `index.root`, linking each to the
+/// files/symbols its body mentions. Missing `docs/adr/`, an unreadable
+/// git history, an unavailable/unauthenticated GitHub API, no changelog
+/// file, or no inferred store each degrade to an empty result for that
+/// source rather than failing the whole call — all seven sources are
+/// independent.
+///
+/// Use [`mine_reporting`] on any path that *displays* decisions: it also
+/// returns what the inferred source contributed, which an empty list
+/// can't distinguish from that source never having run.
 pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
+    Ok(mine_reporting(index)?.0)
+}
+
+/// [`mine`], plus what the LLM-inferred source contributed and why.
+///
+/// Separate entry point rather than a change to `mine`'s signature,
+/// because most callers only want the records — but the ones that
+/// *display* decisions need the state too. An empty contribution from
+/// this source is ambiguous between "nothing inferred" and "the pass
+/// that infers things never ran", and only a surface that reports the
+/// difference lets a reader tell.
+pub fn mine_reporting(index: &RepoIndex) -> anyhow::Result<(Vec<DecisionRecord>, InferredState)> {
     let mut records = adr_files::mine_adr_files(&index.root)?;
 
     let commits = repowise_git::collect_commits(&index.root).unwrap_or_default();
@@ -104,6 +161,12 @@ pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
     records.extend(inline_markers::mine_inline_marker_decisions(index));
     records.extend(changelog::mine_changelog_decisions(&index.root));
 
+    // Read from disk like every other source here -- the inference
+    // itself happened at `repowise generate` time. No network call, no
+    // model, no nondeterminism on this path.
+    let (inferred_records, inferred_state) = inferred::mine_inferred_decisions(&index.root);
+    records.extend(inferred_records);
+
     for record in &mut records {
         // PR, code-comment, and inline-marker decisions are already
         // linked to their real file (the PR's GitHub-reported file
@@ -115,18 +178,22 @@ pub fn mine(index: &RepoIndex) -> anyhow::Result<Vec<DecisionRecord>> {
         // or a comment's enclosing file is, so it gets the same
         // text-matching treatment as ADR files/commit messages instead
         // of an authoritative self-link.
+        // An inferred decision is linked to the file its anchor was
+        // found in, for the same reason as a code comment: the link is
+        // known, so text matching can only lose information.
         if matches!(
             record.source,
             DecisionSource::PullRequest { .. }
                 | DecisionSource::CodeComment { .. }
                 | DecisionSource::InlineMarker { .. }
+                | DecisionSource::Inferred { .. }
         ) {
             continue;
         }
         record.linked_files = linking::link_to_index(&record.body, index);
     }
 
-    Ok(records)
+    Ok((records, inferred_state))
 }
 
 /// Mine merged PR bodies via the GitHub API, if (and only if) `token` is

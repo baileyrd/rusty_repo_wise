@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+repowise-adr = { path = "../repowise-adr" }
 repowise-core = { path = "../repowise-core" }
 repowise-docs = { path = "../repowise-docs" }
 anyhow.workspace = true

@@ -1215,6 +1215,7 @@ name = "repowise-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "repowise-adr",
  "repowise-core",
  "repowise-docs",
  "repowise-parser",

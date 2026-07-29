@@ -337,7 +337,8 @@ repowise decisions [PATH]          # mined ADRs + decision-like commits, with li
 repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_dead_code/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
-repowise generate [PATH]            # add an LLM-written summary to each wiki page (opt-in, requires prior `docs`)
+repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
+                                    #   architectural decisions from code (opt-in, requires prior `docs`)
 repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
                                      #   --workspace <FILE> to opt into the Workspace/Workspace Co-Changes/System Map/Conformance/Contracts sections
@@ -1504,11 +1505,12 @@ dependencies, health findings), and inserts it as a "## Summary" section
 right after the page's title. Re-running replaces a previous summary
 rather than stacking a second one.
 
-This is the first, narrow slice of what was previously a fully-deferred
-LLM tier — see `repowise-llm`'s module doc comment for the other three
-LLM-dependent features (RAG chat, refactor-plan codegen, doc-gen-as-
-decision-source) still deferred as separate follow-ups, since each needs
-its own retrieval/context design.
+The same pass makes a second ask of the model: which architectural
+decisions each file's code implies. Those go to `repowise decisions` as
+their own labelled source — see "LLM-inferred decisions" below for the
+anchoring that keeps them honest. It's a second question in a pass that
+is already reading the file and already calling the model, not a second
+pipeline.
 
 Configuration is three environment variables, all read only at the
 `repowise generate` call site (never baked into the index):
@@ -1592,7 +1594,7 @@ Two honest limitations:
 
 ## Architectural decision mining
 
-`repowise decisions` mines six of the original's eight decision sources:
+`repowise decisions` mines seven of the original's eight decision sources:
 
 - **`docs/adr/*.md` files**, parsed against this repo's own ADR template
   (`# ADR-XXXX: Title`, then `Status:`/`Date:` lines). An unfilled
@@ -1652,6 +1654,9 @@ Two honest limitations:
   index) rather than an authoritative self-link to the changelog file:
   the changelog file itself isn't what the decision is *about*, unlike a
   PR's diff or the file a comment sits in.
+- **Decisions a model inferred from code** — the one source that isn't a
+  written artifact, and treated differently everywhere because of it.
+  See "LLM-inferred decisions" below.
 
 Each ADR-file/commit-message/changelog decision is linked to the indexed
 files it mentions: either the file's own relative path appearing
@@ -1667,6 +1672,66 @@ existing template already has one.
 Not implemented from the original's eight sources: Slack and issue
 trackers — this repo doesn't have integrations for either anyway.
 Recency/confidence scoring on mined decisions is also not implemented.
+
+### LLM-inferred decisions
+
+Six of the seven sources read something a person wrote on purpose. This
+one reads what a *model* inferred from code while `repowise generate`
+was already writing wiki summaries. "We chose X because Y" gets read as
+intent, so a reader has to be able to tell which kind they're looking
+at — and that requirement, not the inference, is most of what this
+source is.
+
+It is **opt-in**, arriving only if `repowise generate` runs with
+`REPOWISE_LLM_BASE_URL` set. Absent that, every surface says so rather
+than showing an empty list, because "this repo has no inferred
+decisions" and "the pass that infers them never ran" are different
+facts and only one of them is about the codebase.
+
+**Inference happens at write time; mining stays deterministic.**
+`generate` writes proposals to `.repowise/inferred-decisions.json`;
+`repowise decisions`, `get_why`, and both dashboards only read it. No
+LLM call happens on a read path, and the same repo state gives the same
+answer every time.
+
+**Anchors are text, not line numbers.** Every proposal must quote a
+verbatim span from the file it's about, and the quote is checked against
+the file — at write time, and again on every read. Two things follow:
+
+- A model that invents a plausible justification for code that doesn't
+  exist produces nothing. The check runs against the file's real
+  contents, not against anything the model said about them.
+- A decision quoting code that has since been rewritten or deleted drops
+  itself on the next read. A line number would do neither — it stays
+  valid-looking while the line under it changes. The displayed line is
+  recomputed from where the anchor actually is, so it's right by
+  construction rather than by being refreshed.
+
+Whitespace is forgiven when matching (a model reproducing code reliably
+gets the code right and unreliably gets the indentation right);
+identifiers, operators and literals are not.
+
+**Every rejection is a rejection.** Proposals missing a title,
+rationale, or anchor are dropped rather than patched up with a
+placeholder; two proposals on the same anchor collapse to one;
+unparseable model output drops that file's proposals and nothing else.
+`generate` reports each drop category separately — a pass where
+hallucinations dominate is a fact about that model worth seeing, and
+reporting only the survivors would present a filtered number as if it
+were the whole story.
+
+**It is labelled everywhere it appears**, not recorded in a field
+nobody renders:
+
+| Surface | How it shows |
+| --- | --- |
+| `repowise decisions` | `~` in the id column, plus `LLM-INFERRED ... -- not a written decision` on the source line |
+| `get_why` (MCP) | `inferred: true` per decision, an `inferred:<file>:<line> by <model>` source string, an always-present `inferred_source` state line, and an `inferred_caveat` attached only when the response actually contains one |
+| Static dashboard | an `inferred` badge in the Source column, and a caveat above the table |
+| Live dashboard | an `inferred` badge in the list, the state line under it, and a red banner on the decision detail page — the page where someone decides whether to act on a decision |
+
+The model that produced each decision is recorded and shown: a reader
+judging an inferred claim is entitled to know what inferred it.
 
 ## MCP server
 
@@ -1823,6 +1888,15 @@ below):
   mined decision. A thin wrapper with no new mining logic of its own —
   the same "reuse an existing library call" shape as `get_overview`/
   `search_codebase`.
+  - **One source isn't a written artifact.** Decisions marked
+    `inferred: true` were inferred by a model from code (see
+    "LLM-inferred decisions" above). `inferred_source` is always present
+    and says what that source contributed — an absent contribution can't
+    be mistaken for a repo with nothing to infer. `inferred_caveat`
+    attaches only when the response actually contains an inferred
+    decision, computed *after* the `targets` filter, so it describes
+    what was returned rather than what the repo happens to hold. A
+    caveat that's always there is a caveat nobody reads.
 - **`get_dead_code(min_confidence?, safe_only?, limit?)`** — functions/
   methods with zero resolved in-repo callers (the same base signal as the
   `possibly-dead-code` health marker), tiered `low`/`medium`/`high` by two

@@ -308,6 +308,47 @@ struct DecisionDto {
     status: Option<String>,
     superseded_by: Option<String>,
     linked_file_count: usize,
+    /// Where this came from, e.g. `adr:docs/adr/0001.md` or
+    /// `inferred:src/queue.rs:12 by smart`.
+    source: String,
+    /// True when a **model inferred** this decision from code rather
+    /// than reading it from something a person wrote. Rendered as a
+    /// visible badge, not just carried in the payload -- a reader
+    /// weighing "we chose X because Y" needs to know which kind it is.
+    inferred: bool,
+}
+
+/// `GET /api/decisions`.
+///
+/// An object rather than a bare array so it can carry
+/// `inferred_source`. An empty list is ambiguous between "this repo has
+/// no inferred decisions" and "the pass that infers them was never
+/// run", and only one of those is a fact about the codebase.
+#[derive(Serialize)]
+struct DecisionsDto {
+    decisions: Vec<DecisionDto>,
+    inferred_source: String,
+}
+
+/// One-line label for a decision's origin, shared by both decision
+/// endpoints so they can't describe the same record differently.
+fn source_label(root: &Path, source: &repowise_adr::DecisionSource) -> String {
+    use repowise_adr::DecisionSource as S;
+    match source {
+        S::Adr { file } => format!("adr:{}", relative(root, file)),
+        S::CommitMessage { hash, author } => {
+            format!("commit:{} by {author}", &hash[..hash.len().min(7)])
+        }
+        S::PullRequest { number, author } => format!("pr:{number} by {author}"),
+        S::CodeComment { file, line } => format!("comment:{}:{line}", relative(root, file)),
+        S::InlineMarker { file, line, marker } => {
+            format!("marker:{marker}:{}:{line}", relative(root, file))
+        }
+        S::Changelog { file, section } => format!("changelog:{section}:{}", relative(root, file)),
+        S::Inferred { file, line, model } => {
+            format!("inferred:{}:{line} by {model}", relative(root, file))
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -471,6 +512,13 @@ struct DecisionDetailDto {
     supersedes: Option<String>,
     body: String,
     linked_files: Vec<String>,
+    /// Where this came from. Empty when `found` is false.
+    source: String,
+    /// True when a model inferred this from code rather than reading it
+    /// from something a person wrote. The detail view is where someone
+    /// goes to decide whether to act on a decision, so it is exactly
+    /// where this must not be missing.
+    inferred: bool,
 }
 
 /// Commit-activity stats, for `GET /api/stats` (issue #262).
@@ -761,11 +809,12 @@ struct DecisionsQuery {
 async fn get_decisions(
     State(state): State<AppState>,
     Query(query): Query<DecisionsQuery>,
-) -> Result<Json<Vec<DecisionDto>>, ApiError> {
+) -> Result<Json<DecisionsDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
-    let decisions = repowise_adr::mine(&index).unwrap_or_default();
-    Ok(Json(
-        decisions
+    let (decisions, inferred_state) = repowise_adr::mine_reporting(&index)
+        .unwrap_or_else(|_| (Vec::new(), repowise_adr::InferredState::NotGenerated));
+    Ok(Json(DecisionsDto {
+        decisions: decisions
             .into_iter()
             .filter(|d| match &query.file {
                 None => true,
@@ -775,6 +824,8 @@ async fn get_decisions(
                     .any(|f| relative(&state.root, f) == *rel),
             })
             .map(|d| DecisionDto {
+                source: source_label(&state.root, &d.source),
+                inferred: d.source.is_inferred(),
                 id: d.id,
                 title: d.title,
                 status: d.status,
@@ -782,7 +833,8 @@ async fn get_decisions(
                 linked_file_count: d.linked_files.len(),
             })
             .collect(),
-    ))
+        inferred_source: inferred_state.describe(),
+    }))
 }
 
 async fn get_symbols(State(state): State<AppState>) -> Result<Json<Vec<SymbolDto>>, ApiError> {
@@ -1085,11 +1137,15 @@ async fn get_decision_detail(
             supersedes: None,
             body: String::new(),
             linked_files: Vec::new(),
+            source: String::new(),
+            inferred: false,
         }));
     };
 
     Ok(Json(DecisionDetailDto {
         found: true,
+        source: source_label(&state.root, &d.source),
+        inferred: d.source.is_inferred(),
         id: d.id,
         title: d.title,
         status: d.status,
@@ -2184,7 +2240,11 @@ mod tests {
         let (status, json) = get(root, "/api/decisions").await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json, serde_json::json!([]));
+        assert_eq!(json["decisions"], serde_json::json!([]));
+        // The reason an empty list isn't the whole response: "no
+        // inferred decisions here" and "the pass that infers them never
+        // ran" are different facts, and this repo is the second.
+        assert!(json["inferred_source"].as_str().unwrap().contains("opt-in"));
     }
 
     #[tokio::test]
@@ -2459,15 +2519,21 @@ mod tests {
 
         let (status, json) = get(root.clone(), "/api/decisions").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json.as_array().unwrap().len(), 1);
+        let all = json["decisions"].as_array().unwrap();
+        assert_eq!(all.len(), 1);
+        // A comment-sourced decision must not be flagged as inferred --
+        // the flag is only meaningful if it's exclusive to the one
+        // source that isn't a written artifact.
+        assert_eq!(all[0]["inferred"], serde_json::json!(false));
+        assert!(all[0]["source"].as_str().unwrap().starts_with("comment:"));
 
         let (status, json) = get(root.clone(), "/api/decisions?file=busy.rs").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json["decisions"].as_array().unwrap().len(), 1);
 
         let (status, json) = get(root, "/api/decisions?file=other.rs").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json, serde_json::json!([]));
+        assert_eq!(json["decisions"], serde_json::json!([]));
     }
 
     #[tokio::test]

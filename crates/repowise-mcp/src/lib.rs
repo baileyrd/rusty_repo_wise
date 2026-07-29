@@ -213,6 +213,85 @@ impl RepowiseServer {
         ))
     }
 
+    /// `search_codebase`'s semantic branch.
+    ///
+    /// Split out because it shares nothing with the substring path but
+    /// the response envelope: it embeds the query, ranks files against
+    /// the stored index, and reports coverage.
+    ///
+    /// Unavailability is an **error**, not an empty `semantic_matches`.
+    /// An agent reading zero results would conclude the repo has nothing
+    /// matching, when the truth is that no search ran — and it would act
+    /// on that. The CLI bails for the same reason, so the two surfaces
+    /// agree on what "unavailable" looks like.
+    fn search_semantic(
+        &self,
+        index: &RepoIndex,
+        query: &str,
+        limit: usize,
+        started: Instant,
+        cached: bool,
+    ) -> Result<Json<Envelope<SearchOutput>>, ErrorData> {
+        use repowise_llm::embedding_index::{self, Unavailable};
+
+        let config = repowise_llm::LlmConfig::from_env();
+        let (hits, coverage) = embedding_index::search(&self.root, index, query, config.as_ref())
+            .map_err(|why| {
+            let message = why.explain();
+            match why {
+                // A live endpoint that failed is this server's
+                // problem to report, not the caller's to fix by
+                // changing an argument.
+                Unavailable::EndpointFailed { .. } => ErrorData::internal_error(message, None),
+                _ => ErrorData::invalid_params(message, None),
+            }
+        })?;
+
+        let total = hits.len();
+        let limit = limit.clamp(1, SEARCH_MAX_LIMIT);
+        let semantic_matches: Vec<SemanticMatch> = hits
+            .into_iter()
+            .take(limit)
+            .map(|hit| SemanticMatch {
+                file: display_rel(&hit.file, &index.root),
+                similarity: hit.similarity,
+            })
+            .collect();
+
+        let note = (!coverage.is_complete()).then(|| {
+            format!(
+                "{} of {} indexed file(s) have embeddings{}. Files without one could not \
+                 be ranked and are absent from these results entirely -- their absence is \
+                 not evidence they don't match. Run `repowise update` with an embedding \
+                 endpoint configured to cover them.",
+                coverage.embedded,
+                coverage.total,
+                coverage
+                    .percent()
+                    .map(|p| format!(" ({p:.0}%)"))
+                    .unwrap_or_default()
+            )
+        });
+
+        Ok(self.indexed(
+            SearchOutput {
+                matches: Vec::new(),
+                file_matches: Vec::new(),
+                semantic_matches,
+                semantic_matches_total: Some(total),
+                coverage: Some(CoverageOutput {
+                    embedded: coverage.embedded,
+                    total: coverage.total,
+                    note,
+                }),
+                filters: format!("mode=semantic, limit={limit}"),
+            },
+            index,
+            started,
+            cached,
+        ))
+    }
+
     /// Wrap a payload from a tool that did **not** consult this
     /// server's index — git-only (`get_change_risk`) or workspace tools
     /// reading other repos entirely. See [`Meta::timing_only`] for why
@@ -259,15 +338,28 @@ impl RepowiseServer {
     }
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchParams {
     /// Case-insensitive substring to match.
     query: String,
-    /// What to match against: `symbol` (default), `path`, or `hybrid`.
-    /// `semantic`/`concept` is deliberately rejected rather than
-    /// silently degraded -- see `repowise_graph::SearchMode`.
+    /// What to match against: `symbol` (default), `path`, `hybrid`, or
+    /// `semantic`. The first three are case-insensitive substring
+    /// matches over symbol names and/or paths. `semantic` instead ranks
+    /// whole files by embedding similarity against the stored index and
+    /// needs an LLM endpoint plus a built index; when either is missing
+    /// it errors naming the missing piece rather than degrading to
+    /// substring matching, which would answer a different question.
     #[serde(default)]
     mode: Option<String>,
+    /// Max results in `semantic` mode only -- default 20, capped at 200.
+    /// Ignored by the substring modes, which return every match.
+    ///
+    /// Semantic search scores *every* embedded file rather than
+    /// producing match/no-match, so an unlimited response would be the
+    /// whole repo sorted. `semantic_matches_total` reports how many were
+    /// ranked, so a truncated list can't be read as the full ranking.
+    #[serde(default = "default_search_limit")]
+    limit: usize,
     /// Restrict to files of one role: `implementation`, `test`,
     /// `config`, `doc`, or `unknown`. Inferred from path conventions.
     #[serde(default)]
@@ -276,6 +368,21 @@ struct SearchParams {
     /// `struct`, `enum`, `trait`, `class`, `module`, `mixin`).
     #[serde(default)]
     symbol_kind: Option<String>,
+}
+
+/// Hand-written rather than derived so `limit` defaults to
+/// `SEARCH_DEFAULT_LIMIT` and not to `usize`'s zero, which would mean
+/// "return nothing" in the one mode that reads it.
+impl Default for SearchParams {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            mode: None,
+            kind: None,
+            symbol_kind: None,
+            limit: default_search_limit(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
@@ -423,11 +530,55 @@ struct SymbolMatch {
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
+struct SemanticMatch {
+    file: String,
+    /// Cosine similarity between the query's embedding and the file's,
+    /// in [-1, 1]. A *relative* score: the top result is the best match
+    /// among embedded files, which is not the same as it being a good
+    /// one. There is no threshold below which a file is excluded, so a
+    /// query about something the repo doesn't contain still returns a
+    /// ranked list.
+    similarity: f32,
+}
+
+/// How much of the repo the embedding index covers, reported alongside
+/// every semantic result.
+///
+/// Without it a search over 60% of a repo is indistinguishable from a
+/// search over all of it, and the files that lost are indistinguishable
+/// from the files that were never in the running.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CoverageOutput {
+    embedded: usize,
+    total: usize,
+    /// Present only when coverage is partial, spelling out what the
+    /// ranking therefore excludes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SearchOutput {
     matches: Vec<SymbolMatch>,
     /// Files whose path matched. Populated in `path`/`hybrid` mode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     file_matches: Vec<String>,
+    /// Files ranked by embedding similarity, best first. Populated in
+    /// `semantic` mode only, and never mixed with the substring hits
+    /// above -- they answer different questions and their scores aren't
+    /// comparable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    semantic_matches: Vec<SemanticMatch>,
+    /// Files ranked before `limit` truncated the list. `None` outside
+    /// semantic mode; `Some` there even when nothing was truncated, so
+    /// a short list can be read as complete rather than guessed at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_matches_total: Option<usize>,
+    /// Index coverage. `None` outside semantic mode, where it doesn't
+    /// apply -- substring search reads the code index, which covers
+    /// every file by construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<CoverageOutput>,
     /// The filters actually applied. Echoed back so an empty result is
     /// readable: "nothing matches" and "your filters excluded
     /// everything" are otherwise indistinguishable.
@@ -793,6 +944,19 @@ fn default_context_limit() -> usize {
     CONTEXT_DEFAULT_LIMIT
 }
 
+/// Default top-N for `search_codebase`'s semantic mode.
+///
+/// Smaller than the context limit on purpose: semantic mode scores every
+/// embedded file, so the tail is noise sorted by a number, not results.
+const SEARCH_DEFAULT_LIMIT: usize = 20;
+
+/// Hard cap, however large a `limit` is requested.
+const SEARCH_MAX_LIMIT: usize = 200;
+
+fn default_search_limit() -> usize {
+    SEARCH_DEFAULT_LIMIT
+}
+
 /// A symbol id with the repo-relative path, rather than the absolute one
 /// `Symbol::make_id` bakes in.
 ///
@@ -921,7 +1085,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "search_codebase",
-        description = "Case-insensitive substring search over indexed symbol names (functions, methods, classes, structs, etc.), returning each match's kind, file, and line number."
+        description = "Search the index four ways, chosen by `mode`. `symbol` (default), `path`, and `hybrid` are case-insensitive substring matches over indexed symbol names and/or file paths, returning each match's kind, file, and line number — cheap, exact, and always available. `semantic` instead ranks whole files by embedding similarity to the query, for questions phrased by meaning rather than by name (\"where is retry logic handled\"); it requires REPOWISE_LLM_BASE_URL and an embedding index built by `repowise init`/`update`, and errors naming whichever is missing rather than falling back to substring matching. Semantic results carry index coverage, since a ranking over part of a repo must not read as a ranking over all of it."
     )]
     fn search_codebase(
         &self,
@@ -930,6 +1094,7 @@ impl RepowiseServer {
             mode,
             kind,
             symbol_kind,
+            limit,
         }): Parameters<SearchParams>,
     ) -> Result<Json<Envelope<SearchOutput>>, ErrorData> {
         let started = Instant::now();
@@ -950,6 +1115,23 @@ impl RepowiseServer {
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         let (index, graph, cached) = self.load()?;
+
+        // Semantic shares none of the filtering below: it ranks files,
+        // not symbols, so `kind`/`symbol_kind` have nothing to act on
+        // and are rejected rather than silently ignored -- a filter that
+        // looks applied but isn't is how a caller ends up trusting a
+        // result that didn't honour their constraint.
+        if !mode.is_lexical() {
+            if kind.is_some() || symbol_kind.is_some() {
+                return Err(ErrorData::invalid_params(
+                    "semantic mode ranks whole files, so `kind` and `symbol_kind` don't \
+                     apply to it. They are rejected rather than ignored, so a result can't \
+                     look filtered when it isn't. Use `hybrid` if you need those filters.",
+                    None,
+                ));
+            }
+            return self.search_semantic(&index, &query, limit, started, cached);
+        }
 
         let file_allowed = |file: &Path| -> bool {
             let Some(want) = kind else { return true };
@@ -1009,6 +1191,9 @@ impl RepowiseServer {
             SearchOutput {
                 matches,
                 file_matches,
+                semantic_matches: Vec::new(),
+                semantic_matches_total: None,
+                coverage: None,
                 filters: filters.join(", "),
             },
             &index,
@@ -2855,10 +3040,44 @@ mod tests {
         );
     }
 
-    /// A silent fallback would answer a different question than the one
-    /// asked, so the tool refuses instead.
+    /// Semantic mode without an embedding endpoint must **error**, not
+    /// return an empty ranking. Zero results reads as "the repo has
+    /// nothing matching" — a false negative an agent will act on —
+    /// when the truth is that no search ran at all.
     #[test]
-    fn search_codebase_rejects_semantic_mode_with_the_real_reason() {
+    fn search_codebase_semantic_without_an_endpoint_errors_rather_than_ranking_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        // Guard the premise: with a base URL set this would exercise a
+        // different branch and quietly stop testing what it claims to.
+        if std::env::var("REPOWISE_LLM_BASE_URL").is_ok() {
+            return;
+        }
+
+        let server = RepowiseServer::new(root, None);
+        let err = server
+            .search_codebase(Parameters(SearchParams {
+                query: "how does auth work".to_string(),
+                mode: Some("semantic".to_string()),
+                ..Default::default()
+            }))
+            .err()
+            .expect("semantic without an endpoint must error, not return an empty ranking");
+        assert!(
+            err.message.contains("REPOWISE_LLM_BASE_URL"),
+            "must name the missing piece so it can be fixed: {}",
+            err.message
+        );
+    }
+
+    /// A filter that can't be honoured must be refused, not dropped:
+    /// silently ignoring `kind` would return unfiltered results the
+    /// caller believes are filtered.
+    #[test]
+    fn search_codebase_semantic_refuses_filters_it_cannot_apply() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
@@ -2869,15 +3088,54 @@ mod tests {
             .search_codebase(Parameters(SearchParams {
                 query: "how does auth work".to_string(),
                 mode: Some("semantic".to_string()),
+                kind: Some("test".to_string()),
                 ..Default::default()
             }))
             .err()
-            .expect("semantic mode must be rejected");
+            .expect("an inapplicable filter must be refused");
         assert!(
-            err.message.contains("embeddings"),
-            "must name the real limitation, not report a typo: {}",
+            err.message.contains("kind"),
+            "must say which argument doesn't apply: {}",
             err.message
         );
+        // Specifically not the unavailability error: the filter is
+        // wrong regardless of whether an endpoint is configured, so it
+        // has to be caught first.
+        assert!(
+            !err.message.contains("REPOWISE_LLM_BASE_URL"),
+            "the argument error must be reported before the availability one: {}",
+            err.message
+        );
+    }
+
+    /// The substring modes must not sprout semantic fields. Serializing
+    /// `coverage: 0 of N` on a symbol search would claim the search was
+    /// limited by an index that has nothing to do with it.
+    #[test]
+    fn substring_modes_report_no_semantic_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        for mode in ["symbol", "path", "hybrid"] {
+            let out = server
+                .search_codebase(Parameters(SearchParams {
+                    query: "a".to_string(),
+                    mode: Some(mode.to_string()),
+                    ..Default::default()
+                }))
+                .unwrap()
+                .0
+                .data;
+            assert!(out.coverage.is_none(), "{mode} must not report coverage");
+            assert!(
+                out.semantic_matches_total.is_none(),
+                "{mode} must not report a semantic total"
+            );
+            assert!(out.semantic_matches.is_empty());
+        }
     }
 
     /// An empty result with filters active is ambiguous unless the

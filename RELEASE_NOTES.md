@@ -6,6 +6,54 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #307 — Persist an embedding index; `--mode semantic` works
+**2026-07-29** · closes [#302](https://github.com/baileyrd/rusty_repo_wise/issues/302)
+
+- **`search --mode semantic` and `search_codebase`'s `semantic` mode now work.**
+  They were refused before, and #305 corrected the refusal to name the right gap:
+  this port could compute embeddings but not store them, so every semantic query
+  would have re-embedded the whole corpus. `repowise-llm::embedding_index` stores
+  them at `.repowise/embeddings.json`, built by `init`/`update` when an embedding
+  endpoint is configured. A query now costs one short call to embed the query.
+- **Staleness is prevented, not detected.** A stale vector is worse than a
+  missing one: it returns confident, wrong neighbours and nothing about the
+  result looks wrong. So entries aren't timestamped and compared — they're keyed
+  by a hash of the *exact text embedded*. A changed file gets a different key, so
+  its old vector is simply not found. There is no comparison to get wrong and no
+  window to be stale in. Refresh reports `N new, N reused, N evicted`, and the
+  `evicted` count is what makes the guarantee visible.
+- **The embedding model is part of the index's identity.** Cosine similarity
+  across two models' vectors is noise that looks like a score, so a model change
+  invalidates the whole index with an error naming both models rather than
+  silently mixing.
+- **Unavailable is an error, never an empty ranking.** Zero results reads as "the
+  repo has nothing matching" — a false negative a caller acts on — when the truth
+  is that no search ran. Four reasons, each naming its own fix. "Endpoint down"
+  is deliberately separate from "not configured", so nobody is sent to check a
+  variable that is already right.
+- **Partial coverage is always reported** (`embedded` of `total`), stating that
+  unranked files are *absent from the results*, not ranked low.
+- Two smaller instances of the same rule: `kind`/`symbol_kind` are **refused** in
+  semantic mode rather than ignored, so a result can't look filtered when it
+  isn't; and `limit` (default 20, max 200) applies there because semantic scores
+  *every* embedded file rather than producing match/no-match.
+- **Fixes an env var that doesn't exist, named in a shipped error message.**
+  `REPOWISE_LLM_EMBEDDING_MODEL` — the real one has no `LLM_` infix. Setting it
+  changes nothing, so the advice reads as correct and silently doesn't work.
+  Found by *running* the model-mismatch path rather than reasoning about it. Var
+  names are now constants read by `from_env`, with a test asserting no message
+  can name one outside that set.
+- **`get_answer` / `POST /api/chat` deliberately still re-embed per call.**
+  Pointing them at the stored index is not a wire-up: a partially covered index
+  would ground an answer in a subset of the repo while its citations looked
+  complete. Docs say that rather than implying it's finished.
+- 11 new tests. Verified over real MCP stdio against a stub endpoint: semantic
+  ranking, partial coverage after indexing a file without embedding it, all four
+  unavailable reasons, filter refusal, `limit` truncation, and that the substring
+  modes emit no coverage fields.
+
+---
+
 ## PR #306 — MCP: `get_answer`
 **2026-07-29** · closes [#301](https://github.com/baileyrd/rusty_repo_wise/issues/301)
 

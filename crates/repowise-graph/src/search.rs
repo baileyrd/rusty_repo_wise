@@ -1,22 +1,21 @@
 //! Filters for symbol/path search, shared by the `search` CLI command
 //! and the `search_codebase` MCP tool so the two surfaces can't drift.
 //!
-//! # What's deliberately absent
+//! # Semantic mode is parsed here but executed elsewhere
 //!
-//! The reference also offers a `semantic`/`concept` mode, and this
-//! doesn't. It is **not** stubbed: a `--mode semantic` that quietly
-//! fell back to substring matching would be worse than not offering the
-//! flag, because the caller would believe they had asked a different
-//! question and got an answer to it.
+//! [`SearchMode::Semantic`] is a mode this module recognises and
+//! deliberately cannot run: ranking by embedding similarity needs
+//! `repowise-llm` and a persisted embedding index, and this crate
+//! depends on neither. Callers match on the variant and dispatch to
+//! `repowise_llm::embedding_index::search`.
 //!
-//! The reason is **persistence, not capability** -- a distinction an
-//! earlier version of this module got wrong. `repowise_llm::embed` and
-//! `cosine_similarity` exist, and `POST /api/chat` uses them for real
-//! semantic retrieval today. What's missing is a stored embedding
-//! index: that endpoint re-embeds the entire corpus on every call,
-//! which is a defensible tradeoff for an occasional chat message and an
-//! indefensible one for `search`, which is meant to be cheap and
-//! frequent. See issue #302.
+//! It lives in this enum anyway so the two surfaces (`repowise search`
+//! and the `search_codebase` MCP tool) still parse modes from one
+//! place and can't drift on which names are legal. What must never
+//! happen is the fallback: a `--mode semantic` that quietly matched
+//! substrings would answer a different question than the one asked, so
+//! a caller who asks for it without an embedding index gets a refusal
+//! naming the missing piece, not a degraded result.
 
 use repowise_core::{FileRecord, Language, SymbolKind};
 use std::path::Path;
@@ -34,6 +33,15 @@ pub enum SearchMode {
     Path,
     /// Both, merged.
     Hybrid,
+    /// Whole files ranked by embedding similarity to the query.
+    ///
+    /// This crate cannot execute it -- see the module doc. Matching on
+    /// this variant is the caller's signal to hand off to
+    /// `repowise_llm::embedding_index::search` instead of running any
+    /// of the substring filters below, which share none of its
+    /// semantics: it ranks *files*, not symbols, and every file gets a
+    /// score rather than a match/no-match verdict.
+    Semantic,
 }
 
 impl SearchMode {
@@ -42,21 +50,9 @@ impl SearchMode {
             "symbol" => Ok(SearchMode::Symbol),
             "path" => Ok(SearchMode::Path),
             "hybrid" => Ok(SearchMode::Hybrid),
-            // Named explicitly rather than lumped in with typos: a
-            // caller reaching for `semantic` has a specific expectation,
-            // and "unknown mode" would read as a spelling mistake when
-            // the real answer is that this port can't do it at all.
-            "semantic" | "concept" => Err(
-                "semantic/concept search isn't available: this port computes embeddings \
-                 (see `repowise-llm`) but doesn't persist an index of them, and \
-                 re-embedding the corpus per query would make search far too expensive \
-                 to be worth it (see issue #302). It is deliberately not offered rather \
-                 than silently falling back to substring matching, which would answer a \
-                 different question than the one asked."
-                    .to_string(),
-            ),
+            "semantic" | "concept" => Ok(SearchMode::Semantic),
             other => Err(format!(
-                "unknown mode {other:?} -- expected symbol, path, or hybrid"
+                "unknown mode {other:?} -- expected symbol, path, hybrid, or semantic"
             )),
         }
     }
@@ -66,6 +62,20 @@ impl SearchMode {
             SearchMode::Symbol => "symbol",
             SearchMode::Path => "path",
             SearchMode::Hybrid => "hybrid",
+            SearchMode::Semantic => "semantic",
+        }
+    }
+
+    /// Whether this mode is served by the substring filters in this
+    /// crate, as opposed to needing an embedding index.
+    ///
+    /// Exists so callers dispatch on a named question rather than on a
+    /// `matches!` list that a future variant could silently fall
+    /// through.
+    pub fn is_lexical(&self) -> bool {
+        match self {
+            SearchMode::Symbol | SearchMode::Path | SearchMode::Hybrid => true,
+            SearchMode::Semantic => false,
         }
     }
 }
@@ -279,22 +289,40 @@ mod tests {
     }
 
     #[test]
-    fn mode_parsing_rejects_semantic_with_a_specific_reason() {
+    fn mode_parsing_accepts_semantic_and_marks_it_non_lexical() {
         assert_eq!(SearchMode::parse("symbol"), Ok(SearchMode::Symbol));
         assert_eq!(SearchMode::parse("PATH"), Ok(SearchMode::Path));
-        let err = SearchMode::parse("semantic").unwrap_err();
-        assert!(
-            err.contains("doesn't persist an index"),
-            "a caller asking for semantic search deserves the real reason -- the gap is \
-             persistence, not capability -- and not 'unknown mode': {err}"
-        );
-        assert!(
-            !err.contains("doesn't have"),
-            "must not repeat the earlier claim that this port lacks embeddings: {err}"
-        );
+        // Both spellings, since the reference offers both.
+        assert_eq!(SearchMode::parse("semantic"), Ok(SearchMode::Semantic));
+        assert_eq!(SearchMode::parse("concept"), Ok(SearchMode::Semantic));
         assert!(SearchMode::parse("nonsense")
             .unwrap_err()
             .contains("unknown mode"));
+    }
+
+    /// The dispatch guard: semantic must never be served by the
+    /// substring filters in this crate. If a future edit made
+    /// `is_lexical` true for it, callers would silently answer a
+    /// different question than the one asked -- the exact failure this
+    /// mode was held back from shipping to avoid.
+    #[test]
+    fn semantic_is_never_served_by_the_lexical_filters() {
+        assert!(!SearchMode::Semantic.is_lexical());
+        for mode in [SearchMode::Symbol, SearchMode::Path, SearchMode::Hybrid] {
+            assert!(mode.is_lexical(), "{} must stay lexical", mode.label());
+        }
+    }
+
+    /// An unknown mode must read as a typo; a real mode must not.
+    #[test]
+    fn unknown_mode_message_lists_every_accepted_mode() {
+        let err = SearchMode::parse("nonsense").unwrap_err();
+        for mode in ["symbol", "path", "hybrid", "semantic"] {
+            assert!(
+                err.contains(mode),
+                "the typo message must name {mode} as an option: {err}"
+            );
+        }
     }
 
     #[test]

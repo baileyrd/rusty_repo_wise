@@ -131,16 +131,19 @@ enum Command {
         #[arg(long)]
         stdout: bool,
     },
-    /// Search the index by symbol name (default), file path, or both.
-    /// Case-insensitive substring match. `--mode semantic` is
-    /// deliberately not offered -- it needs embeddings this port
-    /// doesn't have (issue #61), and a silent fallback to substring
-    /// matching would answer a different question than the one asked.
+    /// Search the index by symbol name (default), file path, or both --
+    /// case-insensitive substring match -- or by meaning with `--mode
+    /// semantic`, which ranks whole files against the stored embedding
+    /// index. Semantic mode needs REPOWISE_LLM_BASE_URL and an index
+    /// built by `init`/`update`; without them it says so rather than
+    /// falling back to substring matching, which would answer a
+    /// different question than the one asked.
     Search {
         query: String,
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// What to match against: `symbol` (default), `path`, or `hybrid`.
+        /// What to match against: `symbol` (default), `path`, `hybrid`,
+        /// or `semantic`.
         #[arg(long, default_value = "symbol")]
         mode: String,
         /// Restrict to files of one role: implementation, test, config,
@@ -661,6 +664,7 @@ fn build_stamped_index(root: &Path) -> anyhow::Result<RepoIndex> {
 fn cmd_init(path: &Path) -> anyhow::Result<()> {
     let index = build_stamped_index(path)?;
     let saved_to = index.save(&index.root)?;
+    refresh_embeddings(&index.root, &index);
     println!(
         "Indexed {} file(s) ({} other file(s) skipped) under {}",
         index.files.len(),
@@ -671,11 +675,42 @@ fn cmd_init(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refresh the persisted embedding index after a re-index, if an LLM
+/// endpoint is configured.
+///
+/// Opt-in and **non-fatal**: an unreachable embeddings endpoint must not
+/// fail `update`, whose actual job is the code index. Reports what it
+/// did rather than working silently, since this is the one part of
+/// `update` that makes network calls and costs money.
+fn refresh_embeddings(root: &Path, index: &RepoIndex) {
+    let Some(config) = repowise_llm::LlmConfig::from_env() else {
+        return;
+    };
+    match repowise_llm::embedding_index::refresh(root, index, &config) {
+        Ok((embeddings, report)) => match embeddings.save(root) {
+            Ok(_) => println!(
+                "Embeddings: {} new, {} reused, {} evicted ({} file(s) covered, {} KB)",
+                report.embedded,
+                report.reused,
+                report.evicted,
+                embeddings.coverage(root, index).embedded,
+                embeddings.size_bytes(root) / 1024
+            ),
+            Err(e) => eprintln!("Embeddings computed but could not be saved: {e}"),
+        },
+        Err(e) => eprintln!(
+            "Embedding refresh failed, leaving the previous index in place: {e}\n\
+             The code index above is unaffected; semantic search may be stale or absent."
+        ),
+    }
+}
+
 fn cmd_update(path: &Path) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let previous = RepoIndex::load(&root).ok();
     let index = build_stamped_index(&root)?;
     let saved_to = index.save(&index.root)?;
+    refresh_embeddings(&index.root, &index);
     match previous {
         Some(prev) => {
             let delta = index.files.len() as i64 - prev.files.len() as i64;
@@ -1425,6 +1460,68 @@ fn cmd_generate_claude_md(path: &Path, output: Option<&Path>, stdout: bool) -> a
     Ok(())
 }
 
+/// Semantic search over the persisted embedding index.
+///
+/// Embeds only the query -- one short call -- against vectors stored by
+/// `update`. Reports coverage, because a search over part of a repo that
+/// presents itself as a search over the repo is the failure this feature
+/// could most easily introduce.
+fn cmd_search_semantic(query: &str, path: &Path, limit: usize) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let config = repowise_llm::LlmConfig::from_env();
+
+    let (hits, coverage) =
+        match repowise_llm::embedding_index::search(&root, &index, query, config.as_ref()) {
+            Ok(found) => found,
+            // Refused rather than degraded: falling back to substring
+            // matching would answer a different question than the one
+            // asked, which is the same rule the mode parser follows.
+            Err(reason) => anyhow::bail!("{}", reason.explain()),
+        };
+
+    if !coverage.is_complete() {
+        println!(
+            "NOTE: {} of {} file(s) have embeddings{}. Files without one cannot be \
+             ranked and are absent from these results -- run `repowise update` to \
+             embed them.",
+            coverage.embedded,
+            coverage.total,
+            coverage
+                .percent()
+                .map(|p| format!(" ({p:.0}%)"))
+                .unwrap_or_default()
+        );
+    }
+
+    if hits.is_empty() {
+        println!("No embedded files to rank for {query:?}.");
+        return Ok(());
+    }
+
+    let shown = if limit == 0 {
+        hits.len()
+    } else {
+        limit.min(hits.len())
+    };
+    for hit in hits.iter().take(shown) {
+        println!(
+            "{:<8} {:.3}  {}",
+            "file",
+            hit.similarity,
+            display_path(&hit.file, &index.root)
+        );
+    }
+    if shown < hits.len() {
+        println!("... {shown} of {} shown (--limit {limit})", hits.len());
+    }
+    println!(
+        "\nRanked by embedding similarity over per-file symbol summaries, not over file \
+         contents -- this port's index stores structure, not source."
+    );
+    Ok(())
+}
+
 /// Describe the filters that were applied, for the no-results message.
 ///
 /// An empty result is ambiguous: "nothing in this repo matches" and
@@ -1456,6 +1553,14 @@ fn cmd_search(
     limit: usize,
 ) -> anyhow::Result<()> {
     let mode = repowise_graph::SearchMode::parse(mode).map_err(|e| anyhow::anyhow!(e))?;
+    // Semantic is handled separately: it ranks whole files by embedding
+    // similarity rather than matching symbol names, so it shares none of
+    // the filtering below. Dispatching on `is_lexical` rather than on a
+    // list of variants means a future mode that also isn't substring
+    // matching can't fall through into filters that don't fit it.
+    if !mode.is_lexical() {
+        return cmd_search_semantic(query, path, limit);
+    }
     let kind = kind
         .map(repowise_graph::FileKind::parse)
         .transpose()

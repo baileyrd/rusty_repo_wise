@@ -1847,12 +1847,29 @@ FastAPI-backend architecture, minus the Node.js dependency.
   section's activity elsewhere on the page without the two components
   sharing state directly — token counts only, current server process
   only, not a persisted dollar-cost history.
+  It is **the single frontend for this port** — there is deliberately no
+  second one. A React/Vite app briefly existed under `web/` and was
+  removed: it duplicated this crate against the same `/api/*` surface
+  while being absent from CI, the README, and the server's
+  `--static-dir` wiring, so it could rot or break with nothing to catch
+  it. One frontend that is actually gated beats two where only one is.
+
   It's deliberately **not** a member of the root Cargo workspace (its
   own `Cargo.toml` has an empty `[workspace]` table): it only ever
   targets `wasm32-unknown-unknown` via [`trunk`](https://trunkrs.dev),
   and pulling a WASM-only crate into the main workspace would break
   plain `cargo build/test/clippy --workspace` for every other crate
-  (which target the host). Build it with:
+  (which target the host).
+
+  That exclusion has a consequence worth stating: the workspace-wide
+  `Format`/`Clippy`/`Test` steps in CI **skip this crate**, so it carries
+  its own `Format (WASM web crate)` and `Clippy (WASM web crate)` steps
+  in `.github/workflows/ci-rust.yml`, run with `--manifest-path` against
+  the wasm target. Without those it would be held to a weaker standard
+  than every other crate in the repo — which is exactly the state it was
+  in until now (a bare `cargo check`, no fmt, no lints).
+
+  Build it with:
   ```sh
   rustup target add wasm32-unknown-unknown   # once
   cargo install trunk                        # once

@@ -6,6 +6,37 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #256 — One frontend: remove the React app, give the Leptos crate a real CI gate
+**2026-07-28**
+
+- **Removed:** the React/Vite app under `web/` (37 files). It arrived in the
+  direct-push commit `894d0a6` and duplicated `crates/repowise-web` against the
+  same `/api/*` surface, with *more* views — but it was absent from CI, from
+  the Cargo workspace, from the README, and from the server's `--static-dir`
+  wiring, and its README was the unmodified stock Vite template. Nothing built,
+  type-checked, linted, or tested it, so it could rot or break silently. The
+  README meanwhile stated the Leptos crate was "chosen deliberately over a real
+  Next.js/React frontend" — the repo held a documented decision and a working
+  contradiction of it at the same time.
+- **Nothing outside `.repowise/` (gitignored) referenced `web/`**, so the
+  removal touches no build, no config, and no other crate.
+- **Fixed a gap the removal exposed:** `crates/repowise-web` is deliberately
+  outside the root workspace (it only targets wasm32 — putting it in would
+  break `cargo build/test/clippy --workspace` for every host-target crate), and
+  the consequence was that CI's workspace-wide `Format`/`Clippy`/`Test` steps
+  **skipped it entirely**. Its only gate was a bare `cargo check`: no
+  formatting check, no lints. The surviving frontend was held to a weaker
+  standard than every other crate in the repo.
+- **Added `Format (WASM web crate)` and `Clippy (WASM web crate)` CI steps**,
+  run with `--manifest-path` against `wasm32-unknown-unknown`. Clippy compiles
+  as it lints, so these subsume the bare `cargo check` they replace. Both
+  already pass, so this locks in the current state rather than papering over
+  a break.
+- README's `repowise-web` section now states it is the single frontend, why the
+  React app was removed, and why the crate needs its own CI steps.
+
+---
+
 ## PR #255 — Parity: architecture-model export in JSON Graph Format
 **2026-07-28** · closes [#244](https://github.com/baileyrd/rusty_repo_wise/issues/244)
 

@@ -44,6 +44,20 @@ jobs:
       - name: Install WASM target
         run: rustup target add wasm32-unknown-unknown
 
-      - name: Check WASM Web Crate
-        run: cargo check --manifest-path crates/repowise-web/Cargo.toml --target wasm32-unknown-unknown
+      # `repowise-web` is deliberately outside the root workspace (it only
+      # ever targets wasm32; see its section in README.md), which means the
+      # workspace-wide Format/Clippy/Test steps above skip it entirely. It
+      # therefore needs its own gate, or the only frontend in the repo would
+      # be held to a weaker standard than every other crate.
+      - name: Format (WASM web crate)
+        run: cargo fmt --manifest-path crates/repowise-web/Cargo.toml -- --check
+
+      # Clippy compiles as it lints, so this subsumes the bare `cargo check`
+      # this step replaced.
+      - name: Clippy (WASM web crate)
+        run: >
+          cargo clippy
+          --manifest-path crates/repowise-web/Cargo.toml
+          --target wasm32-unknown-unknown
+          --all-targets -- -D warnings
 

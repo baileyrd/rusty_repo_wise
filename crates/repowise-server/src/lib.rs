@@ -434,6 +434,42 @@ struct DeadCodeDto {
 /// Matches the `get_dead_code` MCP tool's own default `limit`.
 const DEAD_CODE_LIMIT: usize = 50;
 
+/// Per-file coverage, for `GET /api/coverage` (issue #257).
+#[derive(Serialize)]
+struct FileCoverageDto {
+    path: String,
+    /// Percentage of this file's *known* lines that executed at least
+    /// once. Only present for measured files -- see `CoverageDto`.
+    percent: f64,
+    lines_known: usize,
+    lines_hit: usize,
+}
+
+#[derive(Serialize)]
+struct CoverageDto {
+    /// `false` when no coverage has been ingested. Mirrors
+    /// `/api/ownership`'s flag: a missing-data state is reported, not
+    /// raised as an error.
+    available: bool,
+    /// Files that appear in an ingested report, least-covered first.
+    ///
+    /// **Only measured files appear here.** A file no report mentioned
+    /// is absent rather than listed at 0% -- `CoverageData::line_coverage_of`
+    /// returns `None` vs `Some(0.0)` precisely to keep "never measured"
+    /// and "measured, nothing ran" apart, and flattening them into one
+    /// list would undo that distinction at the API boundary.
+    files: Vec<FileCoverageDto>,
+    /// Indexed files with no coverage record at all. Reported as a count
+    /// so the UI can say "N files unmeasured" rather than implying the
+    /// measured set is the whole repo.
+    unmeasured_files: usize,
+    mean_percent: f64,
+    /// Whether the ingested reports carried per-test contexts. Without
+    /// it `repowise impacted-tests` cannot run, which is worth showing.
+    has_per_test_map: bool,
+    test_contexts: usize,
+}
+
 #[derive(Deserialize)]
 struct ChatTurnDto {
     role: String,
@@ -944,6 +980,68 @@ async fn get_ownership(
     Ok(Json(dto))
 }
 
+async fn get_coverage(State(state): State<AppState>) -> Result<Json<CoverageDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let Ok(coverage) = repowise_core::coverage::CoverageData::load(&state.root) else {
+        return Ok(Json(CoverageDto {
+            available: false,
+            files: Vec::new(),
+            unmeasured_files: index.files.len(),
+            mean_percent: 0.0,
+            has_per_test_map: false,
+            test_contexts: 0,
+        }));
+    };
+
+    let mut files: Vec<FileCoverageDto> = Vec::new();
+    let mut unmeasured_files = 0usize;
+    for file in &index.files {
+        match coverage.line_coverage_of(&file.path) {
+            // `None` means no report ever mentioned this file. Counting
+            // it rather than listing it at 0% is the whole point -- see
+            // CoverageDto::files.
+            None => unmeasured_files += 1,
+            Some(percent) => {
+                let lines = coverage.files.get(&file.path);
+                let lines_known = lines.map(|l| l.len()).unwrap_or(0);
+                let lines_hit = lines
+                    .map(|l| l.values().filter(|c| **c > 0).count())
+                    .unwrap_or(0);
+                files.push(FileCoverageDto {
+                    path: relative(&state.root, &file.path),
+                    percent,
+                    lines_known,
+                    lines_hit,
+                });
+            }
+        }
+    }
+
+    let mean_percent = if files.is_empty() {
+        0.0
+    } else {
+        files.iter().map(|f| f.percent).sum::<f64>() / files.len() as f64
+    };
+    files.sort_by(|a, b| {
+        a.percent
+            .partial_cmp(&b.percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    Ok(Json(CoverageDto {
+        // Coverage exists on disk but matched no indexed file: report it
+        // as unavailable rather than as a repo with 0 measured files,
+        // which would read as "nothing is covered".
+        available: !files.is_empty(),
+        files,
+        unmeasured_files,
+        mean_percent,
+        has_per_test_map: coverage.has_per_test_map(),
+        test_contexts: coverage.per_test.len(),
+    }))
+}
+
 async fn get_dead_code(
     State(state): State<AppState>,
     Query(query): Query<DeadCodeQuery>,
@@ -1445,6 +1543,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
         .route("/api/ownership", get(get_ownership))
+        .route("/api/coverage", get(get_coverage))
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/chat", post(post_chat))
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
@@ -2162,6 +2261,50 @@ mod tests {
         assert_eq!(json["git_available"], true);
         assert_eq!(json["llm_configured"], true);
         assert_eq!(json["llm_model"], "smart");
+    }
+
+    #[tokio::test]
+    async fn get_coverage_reports_unavailable_when_nothing_was_ingested() {
+        // Must not read as "0% covered everywhere" -- a repo that never
+        // ran `coverage add` is unmeasured, not untested.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/coverage").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["files"].as_array().unwrap().len(), 0);
+        assert_eq!(json["unmeasured_files"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_coverage_separates_measured_files_from_unmeasured_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_busy_symbol(&root);
+        // Measure busy.rs at 50%; leave any other indexed file absent
+        // from the report entirely.
+        let report = format!(
+            "TN:t\nSF:{}\nDA:1,1\nDA:2,0\nend_of_record\n",
+            index.files[0].path.display()
+        );
+        let (data, _) = repowise_core::coverage::ingest(&report, &root).unwrap();
+        data.save(&root).unwrap();
+
+        let (status, json) = get(root, "/api/coverage").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        let files = json["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "{files:#?}");
+        assert_eq!(files[0]["percent"], 50.0);
+        assert_eq!(files[0]["lines_known"], 2);
+        assert_eq!(files[0]["lines_hit"], 1);
+        assert_eq!(json["unmeasured_files"], 0);
+        assert_eq!(json["has_per_test_map"], true);
+        assert_eq!(json["test_contexts"], 1);
     }
 
     #[tokio::test]

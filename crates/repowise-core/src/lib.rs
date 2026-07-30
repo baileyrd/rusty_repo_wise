@@ -5,6 +5,7 @@
 
 pub mod coverage;
 pub mod docker;
+pub mod graphql;
 pub mod openapi;
 pub mod org_signals;
 pub mod protobuf;
@@ -102,6 +103,14 @@ pub enum Language {
     /// `repowise_protobuf::collect_protobuf`, not part of `FileRecord`
     /// at all.
     Proto,
+    /// GraphQL SDL (issue #325, the buildable follow-up to #319's
+    /// design decision): same "Structural tier" treatment as Protobuf
+    /// above -- `.graphql`/`.gql` also has an unambiguous extension.
+    /// Its actual content -- types/queries/mutations/subscriptions --
+    /// is a parallel model ([`graphql::GraphQlObject`]) computed
+    /// separately by `repowise_graphql::collect_graphql`, not part of
+    /// `FileRecord` at all.
+    GraphQl,
     Other,
 }
 
@@ -153,6 +162,7 @@ impl Language {
             "fs" | "fsi" | "fsx" => Language::FSharp,
             "sql" => Language::Sql,
             "proto" => Language::Proto,
+            "graphql" | "gql" => Language::GraphQl,
             _ => Language::Other,
         }
     }
@@ -193,6 +203,7 @@ impl Language {
             Language::FSharp => "F#",
             Language::Sql => "SQL",
             Language::Proto => "Protobuf",
+            Language::GraphQl => "GraphQL",
             Language::Other => "Other",
         }
     }

@@ -18,6 +18,7 @@ members = [
     "crates/repowise-sql",
     "crates/repowise-openapi",
     "crates/repowise-protobuf",
+    "crates/repowise-graphql",
     "crates/repowise-cli",
 ]
 

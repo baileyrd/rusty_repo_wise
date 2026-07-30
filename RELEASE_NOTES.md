@@ -6,6 +6,44 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #343 — Generalize cross-repo import resolution beyond Rust
+**2026-07-30** · closes [#338](https://github.com/baileyrd/rusty_repo_wise/issues/338)
+
+- First of `ParityGaps.md`'s open gaps worked, highest-priority-first: cross-repo
+  import resolution previously only resolved Rust `use` imports, so a
+  workspace of any other language resolved zero cross-repo edges and
+  `workspace-metrics` withheld its architecture score for having nothing to
+  measure.
+- **`repowise_graph::cross_repo::cross_repo_import_edges` now covers every
+  language this port already resolves single-repo via a name -> file module
+  map** — Rust, Python, Java, Kotlin, Scala, Go, C#, and PHP (new
+  `MODULE_MAP_LANGUAGES` constant and `module_map`/`separator` helpers) —
+  rather than adding one arbitrary next language: it reuses the exact
+  per-language `(separator, map)` table `RepoGraph::build` already computes
+  and tests for single-repo resolution. `rust_module_map` kept as a thin
+  wrapper over the new `module_map` for existing callers.
+- `workspace-architecture`, `workspace-blast-radius`, `workspace-metrics`,
+  `workspace-conformance`, the `get_architecture`/`get_blast_radius` MCP
+  tools, and the dashboard's System Map view all inherit the wider coverage
+  for free, since every one of them is built on the one shared
+  `cross_repo_import_edges` function.
+- `repowise-workspace::metrics`'s `has_rust_files` became
+  `has_resolvable_language_files`, checking `MODULE_MAP_LANGUAGES` instead of
+  just `Language::Rust`; every "Rust-only" doc comment, CLI help string, and
+  JSON caveat across `repowise-cli`/`repowise-mcp`/`repowise-server`/
+  `repowise-web`/`repowise-workspace` updated to match.
+- Deliberately **not** in scope: TypeScript/JavaScript/C/C++/Ruby/Swift/
+  Dart/Shell resolve imports directly against the filesystem at parse time
+  instead of through a module map — a different resolution mechanism
+  entirely — so they're still unresolved cross-repo.
+- New tests: cross-repo Python resolution and cross-repo Go resolution
+  (proving the per-language separator table, not just Rust's `::`); the
+  existing "ignores non-Rust imports" test now uses TypeScript (still
+  unresolved) instead of Python (now resolved), and likewise for
+  `workspace-metrics`'s "withholds the score" test.
+
+---
+
 ## PR #342 — Add ParityGaps.md and file 10 parity-gap issues vs upstream repowise
 **2026-07-30**
 

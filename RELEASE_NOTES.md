@@ -6,6 +6,57 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #327 — OpenAPI support: a parallel `OpenApiObject` model
+**2026-07-30** · closes [#323](https://github.com/baileyrd/rusty_repo_wise/issues/323) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319))
+
+- **New `repowise-openapi` crate** and `OpenApiObject`/`OpenApiObjectKind`
+  (`Schema`/`Endpoint`) model in `repowise-core::openapi` — a parallel model,
+  not new `SymbolKind` variants, the same call already made for Docker build
+  stages (#318) and SQL/dbt objects (#317).
+- **No content-sniffing step, and no `Language::OpenApi` variant.**
+  `openapiv3`'s `OpenAPI` struct requires `openapi`/`info`/`paths` fields (no
+  `Option`, no `#[serde(default)]`) — a document that deserializes into it
+  successfully is, by construction, a real OpenAPI 3.x spec. That makes "try
+  to parse, keep it if it works" itself a reliable filter: every `.yaml`/
+  `.yml`/`.json` file in the repo is a parse candidate, and `discover_files`'s
+  per-file (extension-only) classification never needs to read file content
+  to tell an OpenAPI spec apart from any other YAML/JSON file. A document
+  that fails to parse (not a spec, or Swagger 2.0, which this crate doesn't
+  support) is silently skipped rather than reported as an error, the same
+  graceful-degradation call already made for a malformed non-Jinja `.sql`
+  file.
+- **One object per `components.schemas` entry, one per HTTP method on a
+  path.** A schema's `fields` come from its property names when it's an
+  object type; non-object schema kinds and `$ref`-only entries get no
+  fields. An endpoint is named by its `operationId` when present, else
+  `"METHOD path"`. `openapiv3`'s serde-based deserialization carries no
+  line/span info at all, so line numbers fall back to a best-effort text
+  search for the schema/path name — the same tradeoff SQL's `CREATE
+  FUNCTION`/`PROCEDURE` fallback already makes.
+- **New `repowise openapi [PATH]` CLI command**, mirroring `repowise sql`/
+  `repowise docker-stages`.
+- **#319 closed and split into four buildable issues** (#323 OpenAPI, #324
+  Protobuf, #325 GraphQL, #326 Terraform) — separate small models per format
+  rather than one shared type, since each format carries real
+  format-specific metadata (HTTP methods, RPC streaming flags,
+  interfaces/unions) that doesn't transfer to the others; Terraform stays
+  separate from the other three entirely, since a `resource` block isn't a
+  typed schema the way the other three are. Parser choices verified against
+  the real crates: `openapiv3` (this PR), `protobuf-parse`, `graphql-parser`,
+  `hcl-rs`.
+- 7 new tests in `repowise-openapi` covering object-typed schemas, non-object
+  schemas, endpoint naming (both `operationId` and method+path fallback), the
+  "missing required fields → not a spec" check for both YAML and JSON, and a
+  `collect_openapi` integration test confirming unrelated YAML is correctly
+  skipped. Local gate (all six CI steps by exit status) passes.
+- Verified live against a fixture OpenAPI document (2 schemas — one object,
+  one array via `$ref` — and 3 endpoints across 2 paths) alongside an
+  unrelated `docker-compose.yml`: `repowise openapi` reported exactly the 5
+  expected objects with correct kinds/names/fields, and the unrelated YAML
+  file was correctly excluded.
+
+---
+
 ## PR #322 — SQL/dbt support: a parallel `SqlObject` model + `LineageEdge` graph
 **2026-07-30** · closes [#317](https://github.com/baileyrd/rusty_repo_wise/issues/317) (design decided in [#67](https://github.com/baileyrd/rusty_repo_wise/issues/67))
 

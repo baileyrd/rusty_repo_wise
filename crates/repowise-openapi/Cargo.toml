@@ -1,0 +1,15 @@
+[package]
+name = "repowise-openapi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+repowise-core = { path = "../repowise-core" }
+anyhow.workspace = true
+openapiv3 = "2"
+serde_json.workspace = true
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"

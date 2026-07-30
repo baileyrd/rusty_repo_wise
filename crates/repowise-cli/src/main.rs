@@ -339,6 +339,18 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List OpenAPI 3.x schemas (`components.schemas`) and endpoints
+    /// (one per HTTP method per path) (issue #323, the buildable
+    /// follow-up to #319's design decision). Every `.yaml`/`.yml`/
+    /// `.json` file in the repo is a parse candidate; only ones that
+    /// actually deserialize as a valid OpenAPI 3.x document are kept --
+    /// see that issue for why no `Language` variant or content-sniffing
+    /// step exists for this format. No wiki pages or graph integration
+    /// yet.
+    Openapi {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -678,6 +690,7 @@ fn main() -> anyhow::Result<()> {
         } => cmd_decide(&path, title, rationale),
         Command::DockerStages { path } => cmd_docker_stages(&path),
         Command::Sql { path } => cmd_sql(&path),
+        Command::Openapi { path } => cmd_openapi(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2706,6 +2719,48 @@ fn cmd_sql(path: &Path) -> anyhow::Result<()> {
             println!(
                 "      {keyword}: {} -> {target} (line {})",
                 edge.name, edge.line
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_openapi(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let objects = repowise_openapi::collect_openapi(&root)?;
+
+    if objects.is_empty() {
+        println!("No OpenAPI documents found under {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} OpenAPI object(s) found under {}",
+        objects.len(),
+        root.display()
+    );
+
+    let mut by_file: std::collections::BTreeMap<
+        &Path,
+        Vec<&repowise_core::openapi::OpenApiObject>,
+    > = std::collections::BTreeMap::new();
+    for object in &objects {
+        by_file.entry(&object.file).or_default().push(object);
+    }
+
+    for (file, file_objects) in by_file {
+        println!("  {}", display_path(file, &root));
+        for object in &file_objects {
+            let fields = if object.fields.is_empty() {
+                String::new()
+            } else {
+                format!("  fields: {}", object.fields.join(", "))
+            };
+            println!(
+                "    [{}] {}  line {}{fields}",
+                object.kind.label(),
+                object.name,
+                object.start_line
             );
         }
     }

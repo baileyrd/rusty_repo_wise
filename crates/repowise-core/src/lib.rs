@@ -62,6 +62,21 @@ pub enum Language {
     /// `repowise_parser::collect_docker_stages`, not part of
     /// `FileRecord` at all.
     Dockerfile,
+    /// The "Lightweight" tier (issue #69): a file-level import graph via
+    /// regex, and nothing else -- no symbols, no calls, no complexity.
+    /// Deliberately shallower than every other supported language, all
+    /// of which get full tree-sitter AST extraction. Each `ImportRef`
+    /// this tier produces is left unresolved by design (see
+    /// `repowise_parser::lightweight`'s module doc for why) -- the same
+    /// choice already made for Swift's/Dart's package imports.
+    Elixir,
+    Clojure,
+    Haskell,
+    /// Lean 4, not Lean 3 -- the two have incompatible syntax and this
+    /// port only recognizes Lean 4's `import Foo.Bar` form.
+    Lean,
+    Erlang,
+    FSharp,
     Other,
 }
 
@@ -105,6 +120,12 @@ impl Language {
             // runs; this arm only covers the `*.dockerfile` suffix
             // convention (e.g. `backend.dockerfile`).
             "dockerfile" => Language::Dockerfile,
+            "ex" | "exs" => Language::Elixir,
+            "clj" | "cljs" | "cljc" => Language::Clojure,
+            "hs" | "lhs" => Language::Haskell,
+            "lean" => Language::Lean,
+            "erl" | "hrl" => Language::Erlang,
+            "fs" | "fsi" | "fsx" => Language::FSharp,
             _ => Language::Other,
         }
     }
@@ -137,6 +158,12 @@ impl Language {
             Language::Nim => "Nim",
             Language::D => "D",
             Language::Dockerfile => "Dockerfile",
+            Language::Elixir => "Elixir",
+            Language::Clojure => "Clojure",
+            Language::Haskell => "Haskell",
+            Language::Lean => "Lean 4",
+            Language::Erlang => "Erlang",
+            Language::FSharp => "F#",
             Language::Other => "Other",
         }
     }

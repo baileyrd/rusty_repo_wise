@@ -14,6 +14,7 @@ mod go;
 mod java;
 mod javascript;
 mod kotlin;
+pub mod lightweight;
 mod metrics;
 mod php;
 mod python;
@@ -78,6 +79,16 @@ pub fn parse_file(
         // model `collect_docker_stages` produces, not part of
         // `FileRecord` at all.
         Language::Dockerfile => Ok(Some(structural_only(path, language, source))),
+        // The "Lightweight" tier (issue #69): unlike the Structural
+        // tier above, these get a real (if unresolved) import list --
+        // see `lightweight`'s own module doc for why symbols/calls stay
+        // empty and imports stay unresolved.
+        Language::Elixir
+        | Language::Clojure
+        | Language::Haskell
+        | Language::Lean
+        | Language::Erlang
+        | Language::FSharp => Ok(Some(lightweight::extract(path, language, source))),
         Language::Other => Ok(None),
     }
 }
@@ -218,6 +229,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_file_gives_every_lightweight_tier_language_a_bare_record_with_no_matching_imports() {
+        let languages = [
+            Language::Elixir,
+            Language::Clojure,
+            Language::Haskell,
+            Language::Lean,
+            Language::Erlang,
+            Language::FSharp,
+        ];
+        // None of these lines match any of the six import regexes, so
+        // every language should still produce a real, empty-imports
+        // `FileRecord` -- unlike `Language::Other`, which produces `None`.
+        let source = "line one\nline two\nline three\n";
+        for language in languages {
+            let path = PathBuf::from("example.src");
+            let record = parse_file(&path, language, source)
+                .unwrap()
+                .unwrap_or_else(|| panic!("expected a FileRecord for {language:?}"));
+            assert_eq!(record.language, language);
+            assert_eq!(record.lines, 3);
+            assert!(record.symbols.is_empty());
+            assert!(record.imports.is_empty());
+            assert!(record.calls.is_empty());
+            assert!(record.field_accesses.is_empty());
+        }
+    }
+
+    #[test]
     fn parse_file_returns_none_for_a_truly_unrecognized_language() {
         let path = PathBuf::from("example.bin");
         let record = parse_file(&path, Language::Other, "whatever").unwrap();
@@ -271,5 +310,26 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].from_stage, 1);
         assert_eq!(edges[0].to_stage, 0);
+    }
+
+    #[test]
+    fn build_index_gives_a_lightweight_tier_file_real_but_unresolved_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("lib.ex"),
+            "defmodule MyApp do\n  import Foo.Bar\n  alias Foo.Baz\nend\n",
+        )
+        .unwrap();
+
+        let index = build_index(&root).unwrap();
+
+        assert_eq!(index.files.len(), 1);
+        let record = &index.files[0];
+        assert_eq!(record.language, Language::Elixir);
+        assert!(record.symbols.is_empty());
+        assert_eq!(record.imports.len(), 2);
+        assert!(record.imports.iter().all(|i| i.resolved_file.is_none()));
+        assert_eq!(index.other_files, 0);
     }
 }

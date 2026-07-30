@@ -197,9 +197,12 @@ at all: no grammar exists for them, so their hotspot score is always
 Dockerfiles get the same "recognized, git-history only" treatment for the
 same reason, plus a separate `repowise docker-stages` command that reads
 their actual content (build stages, `COPY --from` edges) — see "Docker
-build-stage extraction" below. Every other repowise language, and every
-other config/data format in its lower-depth tier, is unimplemented. The
-health scorer now
+build-stage extraction" below. Six more — Elixir, Clojure, Haskell,
+Lean 4, Erlang, and F# (issue #69's "Lightweight tier") — sit a level
+above the Structural tier: a real, regex-only file-level import graph,
+still no symbols/calls/complexity — see "Lightweight-tier languages"
+below. Every other repowise language, and every other config/data
+format in its lower-depth tier, is unimplemented. The health scorer now
 implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
@@ -1586,6 +1589,50 @@ bundled (OpenAPI, Protobuf, GraphQL, Terraform) is tracked separately,
 pending whether this design generalizes; YAML/JSON/TOML/Makefile/
 Markdown were rejected outright — no natural symbol-like unit the way a
 build stage has one.
+
+## Lightweight-tier languages
+
+Elixir, Clojure, Haskell, Lean 4, Erlang, and F# (issue #69) get
+repowise's own "Lightweight" tier: a file-level import graph via regex,
+and nothing else. No symbols, no calls, no complexity — a deliberately
+shallower extraction pipeline than every other supported language, all
+of which get full tree-sitter AST extraction.
+
+```
+$ repowise overview
+By language:
+  Elixir     3
+  Haskell    2
+  ...
+Edges: 0 import(s), 0 call(s) (16 unresolved import(s), 0 unresolved call(s))
+```
+
+**A regex per language, not a parser.** `import Foo.Bar`/`alias`/
+`require`/`use` (Elixir), `import [qualified] Data.Text` (Haskell),
+`import Foo.Bar` (Lean 4), `open Namespace.Module` (F#), and
+`-import(module, [...])`/`-include("path.hrl")` (Erlang, whose module
+references are flat atoms, not dotted — the closest thing this language
+has to a second import form) are each a single-line pattern. Clojure is
+the one exception: its `(:require [foo.bar :as fb])`/
+`(:import [java.util Date])` forms are s-expressions this crate makes no
+attempt to actually parse, so instead any bracketed or quoted **dotted**
+token (2+ segments) is treated as a namespace reference — matching the
+overwhelmingly common style-guide convention of one namespace per line.
+False positives are accepted here the same way `repowise-adr`'s
+keyword-heuristic decision sources already accept them.
+
+**Every import stays unresolved, by design.** Each language's
+module-naming convention diverges from the simple "dotted segment =
+directory name" mapping this port already uses for Python/Java/Go/etc.
+in a genuinely different, language-specific way — Elixir's `MyApp.Foo`
+needs a CamelCase-to-snake_case conversion to reach `my_app/foo.ex`,
+Clojure's `my-app.core` needs hyphen-to-underscore, Erlang's module
+references are flat rather than dotted, and F#'s `open` doesn't reliably
+correspond to a file path at all. Building six language-specific
+resolvers is a bigger, separately-decidable commitment than "extract
+what a file imports," so every import here reports as unresolved in
+`repowise overview`'s stats — the same choice already made for Swift's
+and Dart's own package imports.
 
 ## Git analytics
 

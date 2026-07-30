@@ -167,6 +167,12 @@ impl RepoGraph {
                 // `FileRecord` is the same zero-symbol, zero-import
                 // shape -- its actual content lives in the separate
                 // `DockerStage`/`DockerCopyFromEdge` model instead.
+                // The Lightweight tier (#69) has real imports, unlike
+                // the languages above, but has no module-path map to
+                // build one from either -- its `ImportRef`s stay
+                // unresolved by design (see `repowise_parser::
+                // lightweight`'s module doc), so it needs no branch
+                // here beyond a home in this exhaustive match.
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C
@@ -185,6 +191,12 @@ impl RepoGraph {
                 | Language::Nim
                 | Language::D
                 | Language::Dockerfile
+                | Language::Elixir
+                | Language::Clojure
+                | Language::Haskell
+                | Language::Lean
+                | Language::Erlang
+                | Language::FSharp
                 | Language::Other => {}
             }
         }
@@ -220,7 +232,13 @@ impl RepoGraph {
                 | Language::Crystal
                 | Language::Nim
                 | Language::D
-                | Language::Dockerfile => ("", &no_modules),
+                | Language::Dockerfile
+                | Language::Elixir
+                | Language::Clojure
+                | Language::Haskell
+                | Language::Lean
+                | Language::Erlang
+                | Language::FSharp => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

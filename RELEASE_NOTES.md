@@ -6,6 +6,110 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #320 — `repowise docker-stages`: Dockerfile build-stage extraction
+**2026-07-30** · closes [#318](https://github.com/baileyrd/rusty_repo_wise/issues/318) (split from [#68](https://github.com/baileyrd/rusty_repo_wise/issues/68))
+
+- **`repowise docker-stages [PATH]`**: lists every Dockerfile's build stages
+  (`FROM` lines) and same-file `COPY --from` edges between them — the
+  prototype for #68's bundled config/data-format tier (ten formats with no
+  shared shape; Dockerfile was picked as the one closest to this port's
+  existing function/import model).
+- **A parallel model, not a `Symbol`**: `repowise_core::docker::DockerStage`
+  and `DockerCopyFromEdge`, following the same call #317 made for SQL
+  objects — a build stage carries none of `Symbol`'s per-symbol metrics
+  (complexity, nesting depth, ...), so it gets its own small type instead of
+  a `SymbolKind` stretch. Computed on demand by
+  `repowise_parser::collect_docker_stages`, the same "not folded into
+  `RepoIndex`" shape as `repowise_git::collect_commits`/`repowise_adr::mine`
+  — deliberately, since `RepoIndex` is constructed as a literal struct at
+  ~75 call sites across the workspace and a new required field there would
+  have touched all of them for a feature explicitly scoped as a prototype.
+- **`Language::Dockerfile`** added, detected by filename in
+  `discover_files` (`Dockerfile`, `Dockerfile.<suffix>`, `<name>.dockerfile`
+  — the conventional bare `Dockerfile` name has no extension for
+  `Language::from_extension` to see). Once detected, a Dockerfile gets the
+  same "Structural tier" (#70) treatment: a real, zero-symbol `FileRecord`
+  visible to `repowise overview`'s per-language counts and git-history views
+  (`hotspots`/`ownership`/`coupled`), but no tree-sitter parsing.
+- **No tree-sitter grammar or external crate**: Dockerfile syntax is simple
+  and line-oriented enough (one instruction per logical line, `\` for
+  continuation) that a small hand-written parser in `repowise-parser`
+  handles it directly — confirmed during implementation rather than assumed
+  up front, per the issue's own open question on parser choice.
+- **`COPY --from` resolution**: a `--from` value is matched against earlier
+  stages in the same file by name, then by numeric index; a value that
+  doesn't match any stage (an external image, e.g.
+  `COPY --from=alpine:3.18`) produces no edge — there's nothing in the repo
+  for it to point to. A stage can't reference itself or a later stage,
+  matching real Docker semantics.
+- **Deliberately narrow, matching the issue's own prototype scope**: no
+  wiki pages, dashboard section, or MCP tool yet (follow-ups once this
+  model proves out) and no handling for parser-directive comments,
+  `ARG`-before-`FROM` substitution, or heredoc instruction bodies.
+- Splits #68 the same way #311/#62/#66 split their own bundled issues:
+  the pure serialization/prose formats (YAML, JSON, TOML, Makefile,
+  Markdown) were rejected outright as not planned — no natural symbol-like
+  unit the way a build stage has one — and the schema/declarative-infra
+  formats (OpenAPI, Protobuf, GraphQL, Terraform) stay a separate
+  needs-human issue (#319) pending whether this prototype's design
+  generalizes.
+- 13 new tests (9 in `repowise-parser`'s new `docker` module covering stage
+  parsing, named/indexed `COPY --from` resolution, external-image and
+  self/forward-reference non-matches, line continuations, comments, and
+  case-insensitivity; 2 integration tests verifying `build_index` and
+  `collect_docker_stages` against real files on disk; 2 in
+  `repowise-core::walk` for filename detection). Local gate (all six CI
+  steps by exit status) passes. Verified live against a real indexed
+  two-stage Dockerfile: correct stage names/image/line ranges, a resolved
+  `COPY --from=builder` edge, a correctly-unresolved
+  `COPY --from=alpine:3.18` (no edge), `repowise overview` reporting
+  `Dockerfile 1` alongside the repo's other languages, and a clean error
+  (nonzero exit) on a nonexistent path.
+
+---
+
+## PR #316 — `repowise decide`: manually recorded decisions, the eighth ADR source
+**2026-07-29** · closes [#315](https://github.com/baileyrd/rusty_repo_wise/issues/315) (split from [#66](https://github.com/baileyrd/rusty_repo_wise/issues/66), whose `session` transcript-mining half stays not planned)
+
+- **`repowise decide <TITLE> <RATIONALE> [PATH]`**: records a decision the user
+  typed in directly, no mining, no keyword heuristic, no model in the loop.
+  The eighth and last of the original repowise's decision sources, and the
+  most trustworthy — unlike `Inferred` (#309), there's nothing to
+  anchor-check, since this is the user's own stated intent rather than a
+  guess about what the code implies.
+- **`repowise-adr::manual`**: a new `ManualDecisionStore` under
+  `.repowise/manual-decisions.json`, **append-only** by design — each
+  `repowise decide` call is a single, deliberate, permanent record, unlike
+  the LLM-inferred store, which is re-derived (and so replaced) wholesale on
+  every `repowise generate` run. Sequential `MANUAL-0001`-style ids are
+  assigned at record time, mirroring ADR's own `ADR-XXXX` numbering.
+- **`DecisionSource::Manual { recorded_at }`** added to the exhaustively
+  matched enum, forcing every display surface to label it: `repowise
+  decisions` (`recorded via \`repowise decide\` on <timestamp>`), `get_why`
+  (MCP), the static dashboard (a `manual` badge), and `repowise-server`'s
+  shared `source_label`.
+- **Text-linked like an ADR file or commit message**: a manually recorded
+  decision has no inherently known file location (unlike a code comment or
+  PR), so its rationale is run through the same text-matching pass, linking
+  it to any file/symbol name it mentions.
+- **Splits #66 the same way #311/#62 split their own bundled issues**: the
+  `session` half needed a coding-agent transcript format this port has never
+  had anything to produce — a genuinely absent prerequisite, not a sizing
+  problem — and stays permanently not planned. Only the `cli` half, needing
+  nothing but a new local store and command, is built here.
+- 8 new tests (4 in `repowise-adr::manual` covering the empty-store default,
+  sequential id assignment + persistence, append-only behavior across
+  separate process invocations, and unfiltered mining; 1 new end-to-end
+  `mine()` integration test verifying a manually recorded decision reaches
+  `mine()` labelled and text-linked; plus CLI-level coverage via manual
+  verification). Local gate (all six CI steps by exit status) passes.
+  Verified live: recorded two decisions against a real indexed repo,
+  confirmed sequential ids, append-only persistence across separate CLI
+  invocations, correct text-linking to a file mentioned in the rationale,
+  and rejection of an empty title/rationale.
+
+---
+
 ## PR #314 — Fixed-penalty organizational-signal health markers
 **2026-07-29** · closes [#313](https://github.com/baileyrd/rusty_repo_wise/issues/313)
 

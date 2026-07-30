@@ -1589,6 +1589,9 @@ impl RepowiseServer {
                             display_rel(file, &index.root)
                         )
                     }
+                    repowise_adr::DecisionSource::Manual { recorded_at } => {
+                        format!("manual:{recorded_at}")
+                    }
                 };
                 let inferred = d.source.is_inferred();
                 DecisionOutput {

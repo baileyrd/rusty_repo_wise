@@ -1098,6 +1098,7 @@ name = "repowise-adr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "repowise-core",
  "repowise-git",
  "serde",
@@ -1111,6 +1112,7 @@ name = "repowise-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "notify",
  "repowise-adr",

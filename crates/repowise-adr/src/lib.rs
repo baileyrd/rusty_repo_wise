@@ -1,23 +1,25 @@
 //! Best-effort architectural-decision mining: extracts decisions from
-//! seven sources — `docs/adr/*.md` files, commit messages, merged PR
+//! eight sources — `docs/adr/*.md` files, commit messages, merged PR
 //! bodies, decision-like code comments, explicit inline decision markers
 //! (`WHY:`, `DECISION:`, etc.), keep-a-changelog-style CHANGELOG
-//! sections, and decisions a model inferred from code during `repowise
-//! generate` — links each to the indexed files/symbols its body mentions
+//! sections, decisions a model inferred from code during `repowise
+//! generate`, and decisions the user typed in directly via `repowise
+//! decide` — links each to the indexed files/symbols its body mentions
 //! (or, for PRs, the files the GitHub API reports it actually touched;
 //! or, for code comments/inline markers, the file the comment sits in),
 //! and tracks supersession via an ADR's
 //! `Status: ... Superseded by ADR-XXXX` line.
 //!
-//! Only 7 of the original repowise's 8 decision sources are implemented
-//! here — a focused subset, not a shallow stub of all 8 (see the README
-//! for which are deferred and why). The PR-body source is the one place
-//! this crate makes a network call at all, and only when a
-//! `REPOWISE_GITHUB_TOKEN` env var is set — see the `pull_requests`
-//! module doc comment for why that's an explicit opt-in rather than an
-//! unauthenticated fallback.
+//! All 8 of the original repowise's decision sources are now implemented
+//! here (see #315/#66 for the `cli` source's history: split off from a
+//! bundled issue whose other half, transcript-mining a coding agent's
+//! `session`, stays not planned — this port has no such transcript
+//! format to mine). The PR-body source is the one place this crate makes
+//! a network call at all, and only when a `REPOWISE_GITHUB_TOKEN` env var
+//! is set — see the `pull_requests` module doc comment for why that's an
+//! explicit opt-in rather than an unauthenticated fallback.
 //!
-//! Six of the seven read something a person wrote down. The seventh
+//! Seven of the eight read something a person wrote down. The eighth
 //! ([`inferred`]) reads what a model guessed, and is labelled as such at
 //! every surface that displays it — see that module for why the
 //! distinction is load-bearing rather than cosmetic. This crate still
@@ -32,9 +34,11 @@ mod commits;
 pub mod inferred;
 mod inline_markers;
 mod linking;
+mod manual;
 mod pull_requests;
 
 pub use inferred::{InferredDecision, InferredState, InferredStore};
+pub use manual::{ManualDecision, ManualDecisionStore};
 pub use pull_requests::{parse_github_owner_repo, GITHUB_API_BASE};
 
 use repowise_core::RepoIndex;
@@ -82,6 +86,18 @@ pub enum DecisionSource {
         /// claim is entitled to know what inferred it.
         model: String,
     },
+    /// A decision the user typed in directly via `repowise decide`
+    /// (issue #66's `cli` source; its `session` transcript-mining
+    /// sibling was rejected as not planned -- see #66's closing comment).
+    ///
+    /// The most trustworthy of the eight sources: unlike `Inferred`,
+    /// there's no model in the loop and nothing to anchor-check, since
+    /// this is the user's own stated intent rather than a guess about
+    /// what the code implies.
+    Manual {
+        /// RFC 3339 timestamp of when it was recorded.
+        recorded_at: String,
+    },
 }
 
 impl DecisionSource {
@@ -123,12 +139,13 @@ impl DecisionRecord {
 
 /// Mine decisions from `docs/adr/*.md`, decision-like commit messages,
 /// decision-like merged PR bodies, decision-like code comments, inline
-/// decision markers, keep-a-changelog-style CHANGELOG sections, and the
-/// LLM-inferred store under `index.root`, linking each to the
-/// files/symbols its body mentions. Missing `docs/adr/`, an unreadable
-/// git history, an unavailable/unauthenticated GitHub API, no changelog
-/// file, or no inferred store each degrade to an empty result for that
-/// source rather than failing the whole call — all seven sources are
+/// decision markers, keep-a-changelog-style CHANGELOG sections, the
+/// LLM-inferred store, and the manually-recorded store under
+/// `index.root`, linking each to the files/symbols its body mentions.
+/// Missing `docs/adr/`, an unreadable git history, an
+/// unavailable/unauthenticated GitHub API, no changelog file, or no
+/// inferred/manual store each degrade to an empty result for that source
+/// rather than failing the whole call — all eight sources are
 /// independent.
 ///
 /// Use [`mine_reporting`] on any path that *displays* decisions: it also
@@ -166,6 +183,8 @@ pub fn mine_reporting(index: &RepoIndex) -> anyhow::Result<(Vec<DecisionRecord>,
     // model, no nondeterminism on this path.
     let (inferred_records, inferred_state) = inferred::mine_inferred_decisions(&index.root);
     records.extend(inferred_records);
+
+    records.extend(manual::mine_manual_decisions(&index.root));
 
     for record in &mut records {
         // PR, code-comment, and inline-marker decisions are already

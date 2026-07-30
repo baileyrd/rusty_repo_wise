@@ -307,6 +307,29 @@ enum Command {
         #[arg(long)]
         for_file: Option<PathBuf>,
     },
+    /// Record a decision you already made, directly -- the `cli`
+    /// decision source (issue #66's `cli` half; its `session`
+    /// transcript-mining sibling was rejected as not planned, since this
+    /// port has no agent-session-recording feature to mine from -- see
+    /// issue #315). Appends to `.repowise/manual-decisions.json`; nothing
+    /// recorded here is ever edited or removed by a later call.
+    Decide {
+        /// Short title for the decision.
+        title: String,
+        /// Why -- scanned for file paths/symbol names the same way an
+        /// ADR file or commit message already is, so mentioning a file
+        /// links this decision to it automatically.
+        rationale: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// List Dockerfile build stages and same-file `COPY --from` edges
+    /// (issue #318, the prototype for #68's config/data-format tier).
+    /// No wiki pages or graph integration yet -- see that issue.
+    DockerStages {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -639,6 +662,12 @@ fn main() -> anyhow::Result<()> {
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Docs { path } => cmd_docs(&path),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
+        Command::Decide {
+            title,
+            rationale,
+            path,
+        } => cmd_decide(&path, title, rationale),
+        Command::DockerStages { path } => cmd_docker_stages(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2522,6 +2551,9 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
                     display_path(file, &index.root)
                 )
             }
+            repowise_adr::DecisionSource::Manual { recorded_at } => {
+                format!("recorded via `repowise decide` on {recorded_at}")
+            }
         };
         let status = d.status.as_deref().unwrap_or("-");
         // The marker goes in the id column, where it can't be scrolled
@@ -2537,6 +2569,77 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             println!("    linked files:");
             for f in &d.linked_files {
                 println!("      {}", display_path(f, &index.root));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_decide(path: &Path, title: String, rationale: String) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    if title.trim().is_empty() {
+        anyhow::bail!("title must not be empty");
+    }
+    if rationale.trim().is_empty() {
+        anyhow::bail!("rationale must not be empty");
+    }
+
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    let mut store = repowise_adr::ManualDecisionStore::load(&root);
+    let decision = store.record(&root, title, rationale, recorded_at)?;
+
+    println!("Recorded {} -- {}", decision.id, decision.title);
+    println!("  Run `repowise decisions` to see it alongside every other mined decision.");
+    Ok(())
+}
+
+fn cmd_docker_stages(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let (stages, edges) = repowise_parser::collect_docker_stages(&root)?;
+
+    if stages.is_empty() {
+        println!("No Dockerfiles found under {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} Docker build stage(s) found under {}",
+        stages.len(),
+        root.display()
+    );
+
+    let mut by_file: std::collections::BTreeMap<&Path, Vec<&repowise_core::docker::DockerStage>> =
+        std::collections::BTreeMap::new();
+    for stage in &stages {
+        by_file.entry(&stage.file).or_default().push(stage);
+    }
+
+    for (file, file_stages) in by_file {
+        println!("  {}", display_path(file, &root));
+        for stage in &file_stages {
+            let label = stage
+                .name
+                .as_deref()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| format!("stage {}", stage.index));
+            println!(
+                "    [{}] {label} ({})  lines {}-{}",
+                stage.index, stage.base_image, stage.start_line, stage.end_line
+            );
+            for edge in edges
+                .iter()
+                .filter(|e| e.file == stage.file && e.from_stage == stage.index)
+            {
+                let target = &file_stages
+                    .iter()
+                    .find(|s| s.index == edge.to_stage)
+                    .expect("edge target stage must exist in the same file");
+                let target_label = target
+                    .name
+                    .as_deref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| format!("stage {}", target.index));
+                println!("      copies from: {target_label} (line {})", edge.line);
             }
         }
     }

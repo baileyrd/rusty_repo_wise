@@ -9,6 +9,7 @@ mod c;
 mod cpp;
 mod csharp;
 mod dart;
+pub mod docker;
 mod go;
 mod java;
 mod javascript;
@@ -71,6 +72,12 @@ pub fn parse_file(
         | Language::Crystal
         | Language::Nim
         | Language::D => Ok(Some(structural_only(path, language, source))),
+        // Same "no grammar, but still visible" treatment as the
+        // Structural tier above -- a Dockerfile's real content (build
+        // stages, `COPY --from` edges) is the separate `DockerStage`
+        // model `collect_docker_stages` produces, not part of
+        // `FileRecord` at all.
+        Language::Dockerfile => Ok(Some(structural_only(path, language, source))),
         Language::Other => Ok(None),
     }
 }
@@ -135,6 +142,39 @@ pub fn build_index(root: &Path) -> anyhow::Result<RepoIndex> {
     })
 }
 
+/// Walk `root` and extract every Dockerfile's build stages and `COPY
+/// --from` edges (issue #318). A separate pass from `build_index`,
+/// deliberately: `DockerStage`/`DockerCopyFromEdge` are a parallel model
+/// to `Symbol`/`FileRecord`, not part of `RepoIndex` -- the same
+/// "computed on demand, not persisted in the index" shape as
+/// `repowise_git::collect_commits` and `repowise_adr::mine`. Unreadable
+/// files are skipped, matching `build_index`'s own tolerance for a
+/// binary/unreadable file that happened to match.
+pub fn collect_docker_stages(
+    root: &Path,
+) -> anyhow::Result<(
+    Vec<repowise_core::docker::DockerStage>,
+    Vec<repowise_core::docker::DockerCopyFromEdge>,
+)> {
+    let root = root.canonicalize()?;
+    let discovered = discover_files(&root)?;
+
+    let mut stages = Vec::new();
+    let mut edges = Vec::new();
+    for entry in discovered {
+        if entry.language != Language::Dockerfile {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&entry.path) else {
+            continue;
+        };
+        let (file_stages, file_edges) = docker::extract_stages(&entry.path, &source);
+        stages.extend(file_stages);
+        edges.extend(file_edges);
+    }
+    Ok((stages, edges))
+}
+
 /// Shared helpers used by the per-language extractors.
 pub(crate) mod util {
     use tree_sitter::Node;
@@ -195,5 +235,41 @@ mod tests {
         assert_eq!(index.files.len(), 1);
         assert_eq!(index.files[0].language, Language::Zig);
         assert_eq!(index.other_files, 0);
+    }
+
+    #[test]
+    fn build_index_gives_a_dockerfile_a_bare_zero_symbol_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("Dockerfile"), "FROM alpine\nRUN true\n").unwrap();
+
+        let index = build_index(&root).unwrap();
+
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].language, Language::Dockerfile);
+        assert!(index.files[0].symbols.is_empty());
+        assert_eq!(index.other_files, 0);
+    }
+
+    #[test]
+    fn collect_docker_stages_walks_the_repo_and_finds_a_real_dockerfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("Dockerfile"),
+            "FROM rust:1.75 AS builder\nRUN cargo build --release\n\n\
+             FROM debian:bookworm-slim\nCOPY --from=builder /app /app\n",
+        )
+        .unwrap();
+        // Not a Dockerfile -- must not be picked up.
+        std::fs::write(root.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+        let (stages, edges) = collect_docker_stages(&root).unwrap();
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].name.as_deref(), Some("builder"));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_stage, 1);
+        assert_eq!(edges[0].to_stage, 0);
     }
 }

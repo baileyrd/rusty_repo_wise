@@ -23,15 +23,48 @@ pub fn discover_files(root: &Path) -> anyhow::Result<Vec<DiscoveredFile>> {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let language = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(Language::from_extension)
-            .unwrap_or(Language::Other);
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let language = if is_dockerfile_name(file_name) {
+            Language::Dockerfile
+        } else {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(Language::from_extension)
+                .unwrap_or(Language::Other)
+        };
         out.push(DiscoveredFile {
             path: path.to_path_buf(),
             language,
         });
     }
     Ok(out)
+}
+
+/// Whether `name` follows one of the conventional Dockerfile naming
+/// patterns -- checked before extension-based detection, since the most
+/// common form (`Dockerfile`) has no extension at all for
+/// `Path::extension` to find.
+fn is_dockerfile_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "dockerfile" || lower.starts_with("dockerfile.") || lower.ends_with(".dockerfile")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_dockerfile_name_recognizes_the_conventional_forms() {
+        assert!(is_dockerfile_name("Dockerfile"));
+        assert!(is_dockerfile_name("dockerfile"));
+        assert!(is_dockerfile_name("Dockerfile.dev"));
+        assert!(is_dockerfile_name("Dockerfile.prod"));
+        assert!(is_dockerfile_name("backend.dockerfile"));
+    }
+
+    #[test]
+    fn is_dockerfile_name_rejects_unrelated_names() {
+        assert!(!is_dockerfile_name("main.rs"));
+        assert!(!is_dockerfile_name("docker-compose.yml"));
+    }
 }

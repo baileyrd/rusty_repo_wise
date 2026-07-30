@@ -29,6 +29,7 @@ repowise-llm = { path = "../repowise-llm" }
 repowise-server = { path = "../repowise-server" }
 repowise-workspace = { path = "../repowise-workspace" }
 anyhow.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde_json.workspace = true
 clap.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }

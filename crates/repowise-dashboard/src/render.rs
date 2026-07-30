@@ -265,6 +265,7 @@ fn decisions_section(decisions: &[DecisionRecord]) -> String {
             DecisionSource::Inferred { model, .. } => {
                 format!("<span class=\"badge\">inferred</span> {}", escape(model))
             }
+            DecisionSource::Manual { .. } => "<span class=\"badge\">manual</span>".to_string(),
         };
         out.push_str(&format!(
             "<tr><td class=\"mono\">{}</td><td>{}</td><td>{status}</td><td>{source}</td><td class=\"num\">{}</td></tr>\n",

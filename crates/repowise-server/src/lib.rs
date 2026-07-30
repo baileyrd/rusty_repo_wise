@@ -347,6 +347,7 @@ fn source_label(root: &Path, source: &repowise_adr::DecisionSource) -> String {
         S::Inferred { file, line, model } => {
             format!("inferred:{}:{line} by {model}", relative(root, file))
         }
+        S::Manual { recorded_at } => format!("manual:{recorded_at}"),
     }
 }
 

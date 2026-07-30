@@ -53,6 +53,27 @@
 //! `repowise_graph::cross_repo::MODULE_MAP_LANGUAGES`); every other
 //! language's cross-repo imports are left unresolved, deliberately, for
 //! a future slice.
+//!
+//! `search_codebase`'s `repo` parameter (issue #337) is the first slice
+//! of federated workspace queries: every prior workspace tool answers a
+//! question *about* the workspace as a whole (which repos exist, which
+//! import which), but every question-about-one-repo tool (`get_symbol`,
+//! `get_context`, `get_risk`, ...) still only ever sees this server's own
+//! `root`. `search_codebase` is the first to break that -- `repo` names a
+//! specific configured workspace repo to search instead, or `"all"` to
+//! federate the same search across every one of them in a single call,
+//! each match then labeled with which repo it came from
+//! (`RepowiseServer::resolve_search_targets`). Deliberately narrow in two
+//! ways: only this one tool (the most naturally federatable, and the
+//! surface upstream's own `repo="all"` feature specifically targets),
+//! and only the lexical modes (`symbol`/`path`/`hybrid`) -- `semantic`
+//! mode's embedding index is tied to this server's own root and isn't
+//! federated. Each named/federated repo's index is loaded fresh
+//! per call (`RepoIndex::load`+`RepoGraph::build`, no persistent
+//! multi-repo-resident cache): this port has no telemetry suggesting the
+//! query volume justifies holding N repos in memory at once, and every
+//! other MCP tool already re-loads its own index fresh per call the same
+//! way -- federating just means doing that N times instead of once.
 
 use repowise_core::{RepoIndex, SymbolKind};
 use repowise_graph::RepoGraph;
@@ -370,6 +391,18 @@ struct SearchParams {
     /// `struct`, `enum`, `trait`, `class`, `module`, `mixin`).
     #[serde(default)]
     symbol_kind: Option<String>,
+    /// Which workspace repo to search. Omit to search this server's own
+    /// indexed root only (the default, unchanged from before this
+    /// parameter existed) -- a specific repo's name, as configured in
+    /// the workspace file this server was started with, to search just
+    /// that repo instead; or `"all"` to federate the same search across
+    /// every configured workspace repo at once, merging results with
+    /// each carrying which repo it came from. Requires `--workspace` for
+    /// any value other than omitted; `semantic` mode does not support
+    /// this parameter yet (its embedding index is tied to this server's
+    /// own root).
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 /// Hand-written rather than derived so `limit` defaults to
@@ -383,6 +416,7 @@ impl Default for SearchParams {
             kind: None,
             symbol_kind: None,
             limit: default_search_limit(),
+            repo: None,
         }
     }
 }
@@ -529,6 +563,30 @@ struct SymbolMatch {
     kind: String,
     file: String,
     line: usize,
+    /// Which workspace repo this match came from. Present only when
+    /// `search_codebase`'s `repo` parameter was given (a named repo or
+    /// `"all"`) -- the default (unscoped) search omits it, since every
+    /// match already shares one implicit repo and repeating it on every
+    /// entry would be noise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct FileMatch {
+    file: String,
+    /// See `SymbolMatch::repo`'s own doc comment -- same presence rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+}
+
+/// One repo to run `search_codebase` against -- see
+/// `RepowiseServer::resolve_search_targets`.
+struct SearchTarget {
+    /// `None` for this server's own indexed root (the unscoped default);
+    /// `Some(name)` for a named or `"all"`-federated workspace repo.
+    repo: Option<String>,
+    root: PathBuf,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -564,7 +622,7 @@ struct SearchOutput {
     matches: Vec<SymbolMatch>,
     /// Files whose path matched. Populated in `path`/`hybrid` mode.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    file_matches: Vec<String>,
+    file_matches: Vec<FileMatch>,
     /// Files ranked by embedding similarity, best first. Populated in
     /// `semantic` mode only, and never mixed with the substring hits
     /// above -- they answer different questions and their scores aren't
@@ -1200,7 +1258,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "search_codebase",
-        description = "Search the index four ways, chosen by `mode`. `symbol` (default), `path`, and `hybrid` are case-insensitive substring matches over indexed symbol names and/or file paths, returning each match's kind, file, and line number — cheap, exact, and always available. `semantic` instead ranks whole files by embedding similarity to the query, for questions phrased by meaning rather than by name (\"where is retry logic handled\"); it requires REPOWISE_LLM_BASE_URL and an embedding index built by `repowise init`/`update`, and errors naming whichever is missing rather than falling back to substring matching. Semantic results carry index coverage, since a ranking over part of a repo must not read as a ranking over all of it."
+        description = "Search the index four ways, chosen by `mode`. `symbol` (default), `path`, and `hybrid` are case-insensitive substring matches over indexed symbol names and/or file paths, returning each match's kind, file, and line number — cheap, exact, and always available. `semantic` instead ranks whole files by embedding similarity to the query, for questions phrased by meaning rather than by name (\"where is retry logic handled\"); it requires REPOWISE_LLM_BASE_URL and an embedding index built by `repowise init`/`update`, and errors naming whichever is missing rather than falling back to substring matching. Semantic results carry index coverage, since a ranking over part of a repo must not read as a ranking over all of it. The three lexical modes accept a `repo` parameter: a workspace repo's name to search just that repo, or `\"all\"` to federate the search across every configured workspace repo at once (each match then carries which repo it came from) -- semantic mode does not support it yet."
     )]
     fn search_codebase(
         &self,
@@ -1210,6 +1268,7 @@ impl RepowiseServer {
             kind,
             symbol_kind,
             limit,
+            repo,
         }): Parameters<SearchParams>,
     ) -> Result<Json<Envelope<SearchOutput>>, ErrorData> {
         let started = Instant::now();
@@ -1229,14 +1288,24 @@ impl RepowiseServer {
             .transpose()
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        let (index, graph, cached) = self.load()?;
-
-        // Semantic shares none of the filtering below: it ranks files,
-        // not symbols, so `kind`/`symbol_kind` have nothing to act on
-        // and are rejected rather than silently ignored -- a filter that
-        // looks applied but isn't is how a caller ends up trusting a
-        // result that didn't honour their constraint.
+        // Semantic shares none of the filtering/scoping below: it ranks
+        // files, not symbols, so `kind`/`symbol_kind` have nothing to
+        // act on and are rejected rather than silently ignored -- a
+        // filter that looks applied but isn't is how a caller ends up
+        // trusting a result that didn't honour their constraint. `repo`
+        // is rejected too: its embedding index is tied to this server's
+        // own indexed root (see `search_semantic`), and federating that
+        // is real added complexity this first slice of issue #337 didn't
+        // take on -- the lexical modes below are where federation lives.
         if !mode.is_lexical() {
+            if repo.is_some() {
+                return Err(ErrorData::invalid_params(
+                    "semantic mode does not support the `repo` parameter yet -- its \
+                     embedding index is tied to this server's own indexed root. Omit \
+                     `repo`, or use symbol/path/hybrid mode instead.",
+                    None,
+                ));
+            }
             if kind.is_some() || symbol_kind.is_some() {
                 return Err(ErrorData::invalid_params(
                     "semantic mode ranks whole files, so `kind` and `symbol_kind` don't \
@@ -1245,54 +1314,97 @@ impl RepowiseServer {
                     None,
                 ));
             }
+            let (index, _graph, cached) = self.load()?;
             return self.search_semantic(&index, &query, limit, started, cached);
         }
 
-        let file_allowed = |file: &Path| -> bool {
-            let Some(want) = kind else { return true };
-            index
-                .files
-                .iter()
-                .find(|f| f.path == file)
-                .map(|f| repowise_graph::classify(f, &index.root) == want)
-                .unwrap_or(false)
-        };
+        let targets = self.resolve_search_targets(repo.as_deref())?;
 
+        // Only the single implicit-self target (no `repo` given at all)
+        // reuses this server's own `_meta` provenance -- a named or
+        // federated search answers from other repos' indexes too, the
+        // same "doesn't apply" reasoning `list_repos`/`get_architecture`/
+        // `get_blast_radius` already use for `Meta::timing_only`.
+        let mut self_meta: Option<(RepoIndex, bool)> = None;
         let mut matches: Vec<SymbolMatch> = Vec::new();
-        if matches!(
-            mode,
-            repowise_graph::SearchMode::Symbol | repowise_graph::SearchMode::Hybrid
-        ) {
-            matches = graph
-                .search(&query)
-                .into_iter()
-                .filter(|s| symbol_kind.is_none_or(|k| s.kind == k))
-                .filter(|s| file_allowed(&s.file))
-                .map(|sym| SymbolMatch {
-                    id: sym.id.clone(),
-                    name: sym.name.clone(),
-                    kind: sym.kind.label().to_string(),
-                    file: display_rel(&sym.file, &index.root),
-                    line: sym.start_line,
-                })
-                .collect();
-            matches.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
+        let mut file_matches: Vec<FileMatch> = Vec::new();
+
+        for target in &targets {
+            let (index, graph, cached) = if target.repo.is_none() {
+                self.load()?
+            } else {
+                let index = RepoIndex::load(&target.root).map_err(|e| {
+                    ErrorData::internal_error(
+                        format!("failed to load index at {}: {e}", target.root.display()),
+                        None,
+                    )
+                })?;
+                let graph = RepoGraph::build(&index);
+                (index, graph, false)
+            };
+
+            let file_allowed = |file: &Path| -> bool {
+                let Some(want) = kind else { return true };
+                index
+                    .files
+                    .iter()
+                    .find(|f| f.path == file)
+                    .map(|f| repowise_graph::classify(f, &index.root) == want)
+                    .unwrap_or(false)
+            };
+
+            if matches!(
+                mode,
+                repowise_graph::SearchMode::Symbol | repowise_graph::SearchMode::Hybrid
+            ) {
+                matches.extend(
+                    graph
+                        .search(&query)
+                        .into_iter()
+                        .filter(|s| symbol_kind.is_none_or(|k| s.kind == k))
+                        .filter(|s| file_allowed(&s.file))
+                        .map(|sym| SymbolMatch {
+                            id: sym.id.clone(),
+                            name: sym.name.clone(),
+                            kind: sym.kind.label().to_string(),
+                            file: display_rel(&sym.file, &index.root),
+                            line: sym.start_line,
+                            repo: target.repo.clone(),
+                        }),
+                );
+            }
+
+            if matches!(
+                mode,
+                repowise_graph::SearchMode::Path | repowise_graph::SearchMode::Hybrid
+            ) {
+                file_matches.extend(
+                    index
+                        .files
+                        .iter()
+                        .filter(|f| repowise_graph::path_matches(&f.path, &index.root, &query))
+                        .filter(|f| {
+                            kind.is_none_or(|k| repowise_graph::classify(f, &index.root) == k)
+                        })
+                        .map(|f| FileMatch {
+                            file: display_rel(&f.path, &index.root),
+                            repo: target.repo.clone(),
+                        }),
+                );
+            }
+
+            if target.repo.is_none() {
+                self_meta = Some((index, cached));
+            }
         }
 
-        let mut file_matches: Vec<String> = Vec::new();
-        if matches!(
-            mode,
-            repowise_graph::SearchMode::Path | repowise_graph::SearchMode::Hybrid
-        ) {
-            file_matches = index
-                .files
-                .iter()
-                .filter(|f| repowise_graph::path_matches(&f.path, &index.root, &query))
-                .filter(|f| kind.is_none_or(|k| repowise_graph::classify(f, &index.root) == k))
-                .map(|f| display_rel(&f.path, &index.root))
-                .collect();
-            file_matches.sort();
-        }
+        matches.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then(a.file.cmp(&b.file))
+                .then(a.repo.cmp(&b.repo))
+        });
+        file_matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.repo.cmp(&b.repo)));
 
         let mut filters = vec![format!("mode={}", mode.label())];
         if let Some(k) = kind {
@@ -1301,20 +1413,69 @@ impl RepowiseServer {
         if let Some(k) = symbol_kind {
             filters.push(format!("symbol_kind={}", k.label()));
         }
+        if let Some(r) = &repo {
+            filters.push(format!("repo={r}"));
+        }
 
-        Ok(self.indexed(
-            SearchOutput {
-                matches,
-                file_matches,
-                semantic_matches: Vec::new(),
-                semantic_matches_total: None,
-                coverage: None,
-                filters: filters.join(", "),
-            },
-            &index,
-            started,
-            cached,
-        ))
+        let output = SearchOutput {
+            matches,
+            file_matches,
+            semantic_matches: Vec::new(),
+            semantic_matches_total: None,
+            coverage: None,
+            filters: filters.join(", "),
+        };
+
+        Ok(match self_meta {
+            Some((index, cached)) => self.indexed(output, &index, started, cached),
+            None => self.untracked(output, started),
+        })
+    }
+
+    /// Resolve `search_codebase`'s `repo` parameter into the list of
+    /// repo roots to search: `None` means just this server's own indexed
+    /// root (one target, `repo: None` so its matches stay unlabeled,
+    /// exactly the pre-#337 behavior); `Some("all")` federates across
+    /// every configured workspace repo; `Some(name)` searches just that
+    /// one named repo. The latter two both require `--workspace` and
+    /// error clearly when it's missing, rather than silently falling
+    /// back to searching only this server's own root -- that would look
+    /// like an answer to "search my whole workspace" while quietly
+    /// answering a much narrower question.
+    fn resolve_search_targets(&self, repo: Option<&str>) -> Result<Vec<SearchTarget>, ErrorData> {
+        let Some(repo) = repo else {
+            return Ok(vec![SearchTarget {
+                repo: None,
+                root: self.root.clone(),
+            }]);
+        };
+        let Some(repos) = self.workspace_repos.as_ref() else {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "repo={repo:?} requires a workspace; start the MCP server with --workspace"
+                ),
+                None,
+            ));
+        };
+        if repo == "all" {
+            return Ok(repos
+                .iter()
+                .map(|r| SearchTarget {
+                    repo: Some(r.name.clone()),
+                    root: r.path.clone(),
+                })
+                .collect());
+        }
+        let Some(target) = repos.iter().find(|r| r.name == repo) else {
+            return Err(ErrorData::resource_not_found(
+                format!("no repo named {repo:?} in the configured workspace"),
+                None,
+            ));
+        };
+        Ok(vec![SearchTarget {
+            repo: Some(target.name.clone()),
+            root: target.path.clone(),
+        }])
     }
 
     #[tool(
@@ -1360,6 +1521,9 @@ impl RepowiseServer {
                 kind: sym.kind.label().to_string(),
                 file: display_rel(&sym.file, &index.root),
                 line: sym.start_line,
+                // `get_context` is scoped to this server's own root only
+                // -- no `repo` parameter, so no repo label to attach.
+                repo: None,
             })
             .collect();
 
@@ -3432,7 +3596,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            data.file_matches.iter().any(|f| f.contains("loader.rs")),
+            data.file_matches
+                .iter()
+                .any(|f| f.file.contains("loader.rs")),
             "{:?}",
             data.file_matches
         );
@@ -3797,5 +3963,164 @@ mod tests {
             .err()
             .expect("an empty question is invalid params");
         assert!(err.message.contains("must not be empty"), "{}", err.message);
+    }
+
+    /// Two repos each with their own `helper_*` function, so a search for
+    /// `"helper"` matches in both -- unlike `two_repo_workspace`, which has
+    /// no shared search term across its two repos.
+    fn two_repo_workspace_with_matching_symbols(
+        dir: &Path,
+    ) -> Vec<repowise_workspace::ResolvedWorkspaceRepo> {
+        let repo_a = dir.join("repo-a");
+        write_crate(
+            &repo_a,
+            "repo-a",
+            &[("src/foo.rs", "pub fn helper_alpha() -> i32 { 1 }\n")],
+        );
+        build_and_save_index(&repo_a);
+
+        let repo_b = dir.join("repo-b");
+        write_crate(
+            &repo_b,
+            "repo-b",
+            &[("src/lib.rs", "pub fn helper_beta() -> i32 { 2 }\n")],
+        );
+        build_and_save_index(&repo_b);
+
+        vec![
+            repowise_workspace::ResolvedWorkspaceRepo {
+                name: "repo-a".to_string(),
+                path: repo_a,
+            },
+            repowise_workspace::ResolvedWorkspaceRepo {
+                name: "repo-b".to_string(),
+                path: repo_b,
+            },
+        ]
+    }
+
+    #[test]
+    fn search_codebase_with_no_repo_param_stays_scoped_to_this_servers_own_root() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        // This server's own root is a separate directory entirely, not
+        // nested under either workspace repo -- proves the unscoped
+        // default never wanders into `workspace_repos` at all.
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data, .. }) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "helper".to_string(),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert!(data.matches.is_empty(), "{:?}", data.matches);
+        assert!(!data.filters.contains("repo="), "{}", data.filters);
+    }
+
+    #[test]
+    fn search_codebase_repo_all_federates_across_every_workspace_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data, .. }) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "helper".to_string(),
+                repo: Some("all".to_string()),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert_eq!(data.matches.len(), 2, "{:?}", data.matches);
+        let mut repos: Vec<_> = data.matches.iter().map(|m| m.repo.as_deref()).collect();
+        repos.sort();
+        assert_eq!(repos, vec![Some("repo-a"), Some("repo-b")]);
+        let mut names: Vec<_> = data.matches.iter().map(|m| m.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["helper_alpha", "helper_beta"]);
+    }
+
+    #[test]
+    fn search_codebase_with_a_named_repo_searches_only_that_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data, .. }) = server
+            .search_codebase(Parameters(SearchParams {
+                query: "helper".to_string(),
+                repo: Some("repo-b".to_string()),
+                ..Default::default()
+            }))
+            .unwrap();
+
+        assert_eq!(data.matches.len(), 1, "{:?}", data.matches);
+        assert_eq!(data.matches[0].name, "helper_beta");
+        assert_eq!(data.matches[0].repo.as_deref(), Some("repo-b"));
+    }
+
+    #[test]
+    fn search_codebase_repo_param_requires_a_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let result = server.search_codebase(Parameters(SearchParams {
+            query: "helper".to_string(),
+            repo: Some("all".to_string()),
+            ..Default::default()
+        }));
+        let Err(err) = result else {
+            panic!("expected an error with no workspace configured");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn search_codebase_repo_param_errors_on_unknown_repo_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let result = server.search_codebase(Parameters(SearchParams {
+            query: "helper".to_string(),
+            repo: Some("nonexistent".to_string()),
+            ..Default::default()
+        }));
+        let Err(err) = result else {
+            panic!("expected an error for an unknown repo name");
+        };
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn search_codebase_semantic_mode_rejects_the_repo_parameter() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let result = server.search_codebase(Parameters(SearchParams {
+            query: "helper".to_string(),
+            mode: Some("semantic".to_string()),
+            repo: Some("all".to_string()),
+            ..Default::default()
+        }));
+        let Err(err) = result else {
+            panic!("expected semantic mode to reject the repo parameter");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("repo"), "{}", err.message);
     }
 }

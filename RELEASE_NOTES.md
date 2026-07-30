@@ -6,6 +6,51 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #348 — Federated `search_codebase` across a workspace (`repo` parameter)
+**2026-07-30** · partially closes [#337](https://github.com/baileyrd/rusty_repo_wise/issues/337)
+
+- Fifth of `ParityGaps.md`'s open gaps worked, highest-priority-first (after
+  #338/PR #343, #339/PR #344, #335/PR #345, and #341/PR #347) — and the one
+  piece of issue #64 (multi-repo/workspace support) its own closing note
+  left open: "There's still no way to switch which repo the rest of the
+  dashboard/MCP server operates on — `root` stays fixed for the life of the
+  process."
+- Answered both of issue #337's open questions:
+  - **Which surface first**: the MCP server (agent-facing), not the
+    dashboard — the surface upstream repowise's own `repo="all"` feature
+    specifically targets.
+  - **Persistent multi-repo-resident state, or per-call loading**: per-call.
+    Every other MCP tool already re-loads its own index fresh per call with
+    no persistent cache beyond a single-slot mtime-keyed one for this
+    server's own root; federating a search just does the same
+    `RepoIndex::load`+`RepoGraph::build` N times instead of once, rather
+    than introducing a different caching model this port has no telemetry
+    to justify.
+- **`search_codebase` gains a `repo` parameter**: omit for the unchanged
+  default (this server's own indexed root only); name a specific configured
+  workspace repo to search just that one; or pass `"all"` to federate the
+  same search across every configured workspace repo in a single call, each
+  match then labeled with which repo it came from. `SymbolMatch`/the new
+  `FileMatch` struct both carry an optional `repo` field, present only when
+  `repo` was explicitly given — an unscoped search's response shape is
+  byte-for-byte unchanged from before this parameter existed.
+- Deliberately narrow, matching the "clean vertical slice" pattern the
+  other parity-gap PRs this session used: only `search_codebase` (the most
+  naturally federatable tool — a query string in, matches out), and only
+  its three lexical modes (`symbol`/`path`/`hybrid`). `semantic` mode
+  explicitly rejects `repo` with a clear error, since its embedding index
+  is tied to this server's own root and federating that is real added
+  complexity left for later. Extending the same `repo` parameter to
+  `get_symbol`/other root-scoped tools, and to the dashboard, are both
+  natural follow-ups this slice doesn't take on — issue #337 stays open,
+  narrowed to those.
+- New tests: 6 covering the unscoped default (no shape change, no `repo`
+  label), a named-repo search, `repo="all"` federation across two repos'
+  distinct symbols, missing-workspace and unknown-repo-name errors, and
+  semantic mode's rejection of `repo`.
+
+---
+
 ## PR #347 — Luau language support (Full tier)
 **2026-07-30** · closes [#341](https://github.com/baileyrd/rusty_repo_wise/issues/341)
 

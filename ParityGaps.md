@@ -1,0 +1,85 @@
+# Parity gaps vs. upstream repowise
+
+This is a snapshot audit of where `rusty_repo_wise` (this Rust port) still
+diverges from the original [repowise-dev/repowise](https://github.com/repowise-dev/repowise)
+(Python/TypeScript, AGPL-3.0), as of 2026-07-30. It supersedes any earlier
+in-conversation summary of the same comparison — an initial pass under-read
+this repo's own README (3,143 lines) and missed several already-shipped
+sections (`repowise-server`/`repowise-web`'s live dashboard, `repowise-distill`,
+the post-commit hook, `repowise-workspace`'s later slices). This version is
+cross-checked against the current README/ARCHITECTURE.md in full and against
+this repo's own closed-issue history (120 issues, 0 open at time of writing),
+so it doesn't re-flag anything already implemented or already declined by a
+human as a permanent non-goal.
+
+Every open gap below has a matching GitHub issue labeled `parity-gap`
+(alongside `enhancement`/`needs-human`, matching this repo's existing
+convention from issues like #64 and #319). **Priority for this repo's
+near-term work is parity** — closing these before starting anything not
+tracked back to the upstream reference.
+
+## Already at parity (not gaps)
+
+Worth stating plainly, since the first pass got this wrong: the port has
+reached genuine parity on the deterministic, index-only core, and in several
+places exceeds upstream on raw count:
+
+- All 16 of upstream's fully-parsed languages, plus its Structural (9
+  languages) and Lightweight (6 languages) tiers, by name.
+- 31 health markers (vs. upstream's headline ~25, which bundles the
+  Performance-signal cluster as one item instead of listing each of the 19
+  individually).
+- All 8 of upstream's decision-mining sources, plus a 9th
+  (README/ARCHITECTURE prose) upstream doesn't have.
+- All ten of upstream's flagship MCP tools, plus three more
+  (`list_repos`, `get_architecture`, `get_blast_radius`).
+- A live dashboard server (`repowise serve-dashboard`, axum backend +
+  `repowise-web` Leptos/WASM frontend) with JSON search, a dependency-graph
+  view, chat backed by real embeddings retrieval, Present Mode, a live
+  reindex job banner, a read-only Settings view, and in-process cost
+  tracking — closing out issues #59 and #65's entire bundle.
+- `repowise-distill`: reversible command-output compaction with an
+  omission store, a hook that routes recognized commands through it
+  automatically, savings accounting, and fumble-correction detection
+  (`repowise distill`/`expand`/`hook rewrite`/`saved`/`corrections`).
+- A post-commit git hook (`repowise hook install`) and debounced
+  file-watch re-indexing (`repowise watch`).
+- Test intelligence: LCOV coverage ingest, impacted-tests, and
+  `untested_hotspot`/`coverage_gap` health markers.
+- `repowise-workspace`'s first four of #64's five bundled slices: repo
+  listing, cross-repo co-change, cross-repo architecture/blast-radius,
+  and a conformance/cycle-detection CI gate — plus contract
+  producer/consumer matching (the fifth slice) and workspace-level
+  propagation-cost/cyclic-core metrics.
+
+## Deliberately declined, not gaps
+
+Two upstream capabilities were reviewed by a human and closed as permanent
+non-goals rather than deferred work — re-opening them isn't part of this
+list:
+
+- **ML-calibrated health-score weights and the change-risk regression
+  model** (issue #62, #42): both need a labeled defect corpus and a
+  training/versioning pipeline this port has never had infrastructure for.
+  Fixed-penalty heuristics stand in for both permanently.
+- **A hosted/SaaS offering and commercial dual-licensing**: a business-model
+  decision, not an engineering gap — this port is MIT-licensed,
+  self-hosted-only, and doesn't share code with upstream's AGPL-3.0 base.
+
+## Open parity gaps (tracked as issues)
+
+| # | Gap | Issue |
+|---|-----|-------|
+| 1 | VS Code extension | [#332](https://github.com/baileyrd/rusty_repo_wise/issues/332) |
+| 2 | Claude Code / Codex / opencode agent plugins (hooks, skills, commands) | [#333](https://github.com/baileyrd/rusty_repo_wise/issues/333) |
+| 3 | GitHub PR bot | [#334](https://github.com/baileyrd/rusty_repo_wise/issues/334) |
+| 4 | Webhook- and polling-triggered auto-sync | [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335) |
+| 5 | Native multi-provider LLM support in `repowise-llm` | [#336](https://github.com/baileyrd/rusty_repo_wise/issues/336) |
+| 6 | Federated workspace queries (`repo="all"`) | [#337](https://github.com/baileyrd/rusty_repo_wise/issues/337) |
+| 7 | Cross-repo import resolution beyond Rust | [#338](https://github.com/baileyrd/rusty_repo_wise/issues/338) |
+| 8 | Contract breaking-change detection | [#339](https://github.com/baileyrd/rusty_repo_wise/issues/339) |
+| 9 | Git-worktree auto-seeding for incremental indexing | [#340](https://github.com/baileyrd/rusty_repo_wise/issues/340) |
+| 10 | Luau ("Partial" tier) language support | [#341](https://github.com/baileyrd/rusty_repo_wise/issues/341) |
+
+See each linked issue for the gap/why/reference/open-questions detail —
+this table is kept in sync with issue numbers once filed.

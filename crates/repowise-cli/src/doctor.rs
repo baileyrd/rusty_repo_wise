@@ -81,6 +81,7 @@ pub fn run_checks(root: &Path) -> Vec<Check> {
     checks.push(check_index(root));
     checks.push(check_github_token());
     checks.push(check_llm_endpoint());
+    checks.push(check_webhook_secret());
     checks
 }
 
@@ -162,6 +163,26 @@ fn check_llm_endpoint() -> Check {
             "REPOWISE_LLM_BASE_URL",
             "not set -- `repowise generate` (LLM wiki summaries) is unavailable",
             "optional: every other command is deterministic and needs no LLM",
+        ),
+    }
+}
+
+/// Only relevant to `repowise serve-dashboard` (issue #335's GitHub/
+/// GitLab webhook receivers) -- most `repowise doctor` checks apply to
+/// every command, this one to a single opt-in server flag, but it's
+/// still worth surfacing here rather than only failing loudly the first
+/// time someone points a forge's webhook at an unconfigured server.
+fn check_webhook_secret() -> Check {
+    match std::env::var("REPOWISE_WEBHOOK_SECRET") {
+        Ok(v) if !v.is_empty() => Check::pass(
+            "REPOWISE_WEBHOOK_SECRET",
+            "set -- `serve-dashboard`'s GitHub/GitLab webhook receivers are enabled",
+        ),
+        _ => Check::warn(
+            "REPOWISE_WEBHOOK_SECRET",
+            "not set -- `serve-dashboard`'s /api/webhook/github and /api/webhook/gitlab \
+             report 503; the post-commit hook and `repowise watch` are unaffected",
+            "optional: only needed for webhook-triggered auto-sync via a running server",
         ),
     }
 }

@@ -20,6 +20,16 @@ serde_json.workspace = true
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
+# Already fully resolved in Cargo.lock (pulled in transitively via
+# rustls, itself a `ureq`/TLS dependency of repowise-adr/repowise-git/
+# repowise-llm), so adding it directly adds no new crate version to the
+# dependency tree -- same precedent repowise-workspace's `regex`
+# dependency already set. Used for constant-time GitHub/GitLab webhook
+# signature verification (issue #335); `ring::hmac`/
+# `ring::constant_time` do the comparison, not hand-rolled code, since
+# a non-constant-time secret comparison is exactly the kind of subtle
+# security bug worth a dependency to avoid.
+ring = "0.17"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -77,9 +77,35 @@
 //!
 //! Requires a prior `repowise init`/`update`, same as every other
 //! command that reads `.repowise/index.json`.
-
+//!
+//! `POST /api/webhook/github` and `POST /api/webhook/gitlab` (issue
+//! #335, `ParityGaps.md`'s open-gaps list) are the third of upstream
+//! repowise's five auto-sync mechanisms this port implements -- after
+//! the post-commit hook (`repowise hook install`) and file-watching
+//! (`repowise watch`), both CLI-only. These two need a running server
+//! to receive them, which `repowise-server` didn't exist yet to provide
+//! when auto-sync was first built; it does now. Both trigger the exact
+//! same background-reindex job `POST /api/reindex` already exposes
+//! (`trigger_reindex`, factored out so there's exactly one
+//! job-triggering code path, not three that could drift), gated behind
+//! `REPOWISE_WEBHOOK_SECRET`: unset, both endpoints report `503` rather
+//! than silently accepting unauthenticated requests, since a webhook
+//! endpoint with no verification is an open invitation to force a
+//! reindex (a cheap but real denial-of-service surface) from anyone who
+//! can reach the port. GitHub's `X-Hub-Signature-256` (HMAC-SHA256 over
+//! the raw request body) and GitLab's `X-Gitlab-Token` (a plain shared
+//! secret) are different auth shapes by design on their end, so this
+//! port verifies each the way its own forge expects rather than forcing
+//! one scheme onto both -- `ring::hmac`/`ring::constant_time` do the
+//! actual comparison, not hand-rolled code, since a non-constant-time
+//! secret comparison is exactly the kind of subtle bug a webhook secret
+//! shouldn't be exposed to. No polling fallback: a workspace with no
+//! forge to send it webhooks in the first place has `repowise watch` or
+//! the post-commit hook already, and this port has no persisted
+//! "when did I last check" state a poller would need.
+use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -126,6 +152,13 @@ struct AppState {
     workspace_state_dir: Arc<Option<PathBuf>>,
     reindex_job: ReindexJob,
     usage: UsageTracker,
+    /// Resolved once at server startup from `REPOWISE_WEBHOOK_SECRET`
+    /// (`None` if unset) -- gates `post_webhook_github`/
+    /// `post_webhook_gitlab`. Read once for the same reason
+    /// `llm_config` is: a pure function of its state, and tests can
+    /// inject a fixture secret directly instead of racing process env
+    /// vars across parallel tests.
+    webhook_secret: Arc<Option<String>>,
 }
 
 /// Running token-usage totals for this server process, tallied across
@@ -1901,8 +1934,11 @@ async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>
 /// same implementation `repowise-cli`'s `init`/`update` commands use) if
 /// one isn't already running, and return the job's current status.
 /// Never errors on a bad root -- a reindex failure surfaces as a
-/// `Failed` status for the dashboard to render, not a 500.
-async fn post_reindex(State(state): State<AppState>) -> Json<ReindexStatusDto> {
+/// `Failed` status for the dashboard to render, not a 500. The one
+/// job-triggering code path shared by `POST /api/reindex` and the two
+/// webhook endpoints, so all three can't drift out of sync with each
+/// other.
+fn trigger_reindex(state: &AppState) -> ReindexStatusDto {
     if state.reindex_job.try_start() {
         let root = (*state.root).clone();
         let job = state.reindex_job.clone();
@@ -1926,12 +1962,143 @@ async fn post_reindex(State(state): State<AppState>) -> Json<ReindexStatusDto> {
             job.finish(status);
         });
     }
-    Json(state.reindex_job.snapshot())
+    state.reindex_job.snapshot()
+}
+
+async fn post_reindex(State(state): State<AppState>) -> Json<ReindexStatusDto> {
+    Json(trigger_reindex(&state))
 }
 
 /// The dashboard polls this to render the live job banner.
 async fn get_reindex_status(State(state): State<AppState>) -> Json<ReindexStatusDto> {
     Json(state.reindex_job.snapshot())
+}
+
+/// Hex-decodes a lowercase- or uppercase-hex string into raw bytes.
+/// `None` on odd length or a non-hex-digit character -- a small,
+/// self-contained decoder rather than a new dependency for the one
+/// place this port needs it (GitHub's `X-Hub-Signature-256` header),
+/// the same "small enough to write directly" call this port already
+/// made for the web frontend's own six-character percent-encoder.
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Verifies a GitHub webhook's `X-Hub-Signature-256: sha256=<hex>`
+/// header: HMAC-SHA256 of the raw request body, keyed on the shared
+/// secret. `ring::hmac::verify` does the actual comparison in constant
+/// time -- a non-constant-time comparison here would leak the correct
+/// signature one byte at a time to a patient attacker, exactly the kind
+/// of subtle bug a webhook secret shouldn't be exposed to.
+fn verify_github_signature(secret: &str, body: &[u8], signature_header: &str) -> bool {
+    let Some(hex_sig) = signature_header.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Some(sig_bytes) = decode_hex(hex_sig) else {
+        return false;
+    };
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    ring::hmac::verify(&key, body, &sig_bytes).is_ok()
+}
+
+/// Verifies a GitLab webhook's `X-Gitlab-Token` header: a plain shared
+/// secret, compared directly rather than HMAC'd (GitLab's own scheme,
+/// not this port's choice). `ring::constant_time::verify_slices_are_equal`
+/// covers `verify_github_signature`'s HMAC-tag comparison but is
+/// explicitly deprecated for exactly this kind of direct external use
+/// ("no promises regarding side channels"), so this is a small,
+/// self-contained constant-time comparison instead: XOR every
+/// same-length byte pair and OR the differences together, so the number
+/// of loop iterations (the only thing an attacker could time) never
+/// depends on *where* a mismatch is, only on the (public) secret
+/// length. A length mismatch returns `false` immediately -- lengths
+/// aren't secret, so there's no timing information to protect there.
+fn verify_gitlab_token(secret: &str, token_header: &str) -> bool {
+    let (a, b) = (secret.as_bytes(), token_header.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// `503` (not `404`, since the route genuinely exists -- it's just
+/// unusable without configuration) when `REPOWISE_WEBHOOK_SECRET` isn't
+/// set, and `401` on a missing or invalid signature/token -- distinct
+/// statuses because they mean different things to whoever's debugging a
+/// misconfigured webhook: one says "this server isn't set up for
+/// webhooks at all", the other says "your forge and this server
+/// disagree about the secret".
+enum WebhookError {
+    NotConfigured,
+    Unauthorized,
+}
+
+impl IntoResponse for WebhookError {
+    fn into_response(self) -> Response {
+        match self {
+            WebhookError::NotConfigured => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "REPOWISE_WEBHOOK_SECRET is not set on this server",
+            )
+                .into_response(),
+            WebhookError::Unauthorized => {
+                (StatusCode::UNAUTHORIZED, "invalid webhook signature").into_response()
+            }
+        }
+    }
+}
+
+/// GitHub webhook receiver: any event triggers a reindex (this port has
+/// no per-event-type filtering -- a push, a merge, a branch update all
+/// mean "the tree may have changed", and a reindex is cheap enough not
+/// to need finer-grained triggering). See this module's own doc comment
+/// for the auth model.
+async fn post_webhook_github(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ReindexStatusDto>, WebhookError> {
+    let secret = state
+        .webhook_secret
+        .as_ref()
+        .as_ref()
+        .ok_or(WebhookError::NotConfigured)?;
+    let signature = headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(WebhookError::Unauthorized)?;
+    if !verify_github_signature(secret, &body, signature) {
+        return Err(WebhookError::Unauthorized);
+    }
+    Ok(Json(trigger_reindex(&state)))
+}
+
+/// GitLab webhook receiver -- see `post_webhook_github`'s own doc
+/// comment for the shared "any event reindexes" reasoning, and this
+/// module's doc comment for the auth model.
+async fn post_webhook_gitlab(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ReindexStatusDto>, WebhookError> {
+    let secret = state
+        .webhook_secret
+        .as_ref()
+        .as_ref()
+        .ok_or(WebhookError::NotConfigured)?;
+    let token = headers
+        .get("x-gitlab-token")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(WebhookError::Unauthorized)?;
+    if !verify_gitlab_token(secret, token) {
+        return Err(WebhookError::Unauthorized);
+    }
+    Ok(Json(trigger_reindex(&state)))
 }
 
 /// Build the axum `Router` — separated from `serve` so tests can drive
@@ -1951,6 +2118,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>, workspace: Option<PathBuf
         workspace_state_dir: Arc::new(workspace_state_dir),
         reindex_job: ReindexJob::new(),
         usage: UsageTracker::new(),
+        webhook_secret: Arc::new(std::env::var("REPOWISE_WEBHOOK_SECRET").ok()),
     };
     build_router(state, static_dir)
 }
@@ -1976,6 +2144,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/chat", post(post_chat))
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
+        .route("/api/webhook/github", post(post_webhook_github))
+        .route("/api/webhook/gitlab", post(post_webhook_gitlab))
         .route("/api/settings", get(get_settings))
         .route("/api/usage", get(get_usage))
         .route("/api/workspace-repos", get(get_workspace_repos))
@@ -2978,6 +3148,20 @@ mod tests {
             workspace_state_dir: Arc::new(None),
             reindex_job: ReindexJob::new(),
             usage: UsageTracker::new(),
+            webhook_secret: Arc::new(None),
+        };
+        build_router(state, None)
+    }
+
+    fn app_with_webhook_secret(root: PathBuf, secret: Option<&str>) -> Router {
+        let state = AppState {
+            root: Arc::new(root),
+            llm_config: Arc::new(None),
+            workspace_repos: Arc::new(None),
+            workspace_state_dir: Arc::new(None),
+            reindex_job: ReindexJob::new(),
+            usage: UsageTracker::new(),
+            webhook_secret: Arc::new(secret.map(str::to_string)),
         };
         build_router(state, None)
     }
@@ -3008,6 +3192,32 @@ mod tests {
             })
         };
         (status, json)
+    }
+
+    /// A raw `POST` with one custom header -- webhook receivers care
+    /// about a specific header's presence/value, not a JSON content
+    /// type, so this deliberately doesn't reuse `post_json`.
+    async fn post_with_header(
+        router: Router,
+        uri: &str,
+        header_name: &str,
+        header_value: &str,
+        body: &[u8],
+    ) -> (StatusCode, String) {
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header_name, header_value)
+                    .body(axum::body::Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&body).into_owned())
     }
 
     #[tokio::test]
@@ -4086,5 +4296,159 @@ mod tests {
 
         assert_eq!(final_json["status"], "failed");
         assert!(final_json["error"].is_string());
+    }
+
+    fn github_signature(secret: &str, body: &[u8]) -> String {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+        let tag = ring::hmac::sign(&key, body);
+        let hex: String = tag.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256={hex}")
+    }
+
+    #[tokio::test]
+    async fn post_webhook_github_is_unavailable_without_a_configured_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app_with_webhook_secret(root, None);
+        let (status, _body) = post_with_header(
+            router,
+            "/api/webhook/github",
+            "x-hub-signature-256",
+            "sha256=deadbeef",
+            b"{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn post_webhook_github_rejects_an_invalid_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app_with_webhook_secret(root, Some("shh"));
+        let (status, _body) = post_with_header(
+            router,
+            "/api/webhook/github",
+            "x-hub-signature-256",
+            "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+            b"{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn post_webhook_github_triggers_a_reindex_on_a_valid_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let secret = "shh";
+        let body = br#"{"ref": "refs/heads/main"}"#;
+        let signature = github_signature(secret, body);
+
+        let router = app_with_webhook_secret(root, Some(secret));
+        let (status, response_body) = post_with_header(
+            router.clone(),
+            "/api/webhook/github",
+            "x-hub-signature-256",
+            &signature,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+        assert!(json["status"] == "running" || json["status"] == "completed");
+
+        let mut final_json = json;
+        for _ in 0..50 {
+            if final_json["status"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let (status, json) = get_on(router.clone(), "/api/reindex").await;
+            assert_eq!(status, StatusCode::OK);
+            final_json = json;
+        }
+        assert_eq!(final_json["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn post_webhook_gitlab_is_unavailable_without_a_configured_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app_with_webhook_secret(root, None);
+        let (status, _body) = post_with_header(
+            router,
+            "/api/webhook/gitlab",
+            "x-gitlab-token",
+            "whatever",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn post_webhook_gitlab_rejects_an_incorrect_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app_with_webhook_secret(root, Some("shh"));
+        let (status, _body) = post_with_header(
+            router,
+            "/api/webhook/gitlab",
+            "x-gitlab-token",
+            "not-the-secret",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn post_webhook_gitlab_triggers_a_reindex_on_the_correct_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let router = app_with_webhook_secret(root, Some("shh"));
+        let (status, response_body) = post_with_header(
+            router.clone(),
+            "/api/webhook/gitlab",
+            "x-gitlab-token",
+            "shh",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+        assert!(json["status"] == "running" || json["status"] == "completed");
+    }
+
+    #[test]
+    fn verify_gitlab_token_rejects_different_length_secrets() {
+        assert!(!verify_gitlab_token("shh", "shhh"));
+        assert!(!verify_gitlab_token("shh", "sh"));
+    }
+
+    #[test]
+    fn verify_gitlab_token_accepts_only_an_exact_match() {
+        assert!(verify_gitlab_token("shh", "shh"));
+        assert!(!verify_gitlab_token("shh", "SHH"));
+    }
+
+    #[test]
+    fn decode_hex_rejects_odd_length_and_non_hex_input() {
+        assert_eq!(decode_hex("deadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(decode_hex("abc"), None);
+        assert_eq!(decode_hex("zz"), None);
     }
 }

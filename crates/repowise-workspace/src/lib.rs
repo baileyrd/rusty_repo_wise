@@ -46,6 +46,7 @@
 //! dependency-free of every other `repowise-*` crate is a load-bearing
 //! invariant the rest of this port relies on.
 
+mod breaking_changes;
 mod contracts;
 mod metrics;
 
@@ -56,6 +57,8 @@ pub use contracts::{
     ContractsReport, OrphanProducer, ProducerRoute, RepoEndpointCounts, UnmatchedConsumer,
     UnmatchedReason,
 };
+
+pub use breaking_changes::{workspace_contract_changes, BrokenContract, ContractKey};
 
 use repowise_core::RepoIndex;
 use repowise_graph::CrossRepoImportEdge;
@@ -125,6 +128,23 @@ pub fn load_resolved(config_path: &Path) -> anyhow::Result<Vec<ResolvedWorkspace
             ResolvedWorkspaceRepo { name: r.name, path }
         })
         .collect())
+}
+
+/// The directory a workspace's own state lives in -- sibling to the
+/// workspace TOML file itself, matching upstream repowise's own
+/// `.repowise-workspace/` naming for the same concept. Never inside any
+/// one member repo's own `.repowise/`: a workspace spans repos, so no
+/// one member repo is a sensible owner of workspace-level state, the
+/// same reasoning `load_resolved` already applies to relative repo
+/// paths. Currently the only consumer is contract breaking-change
+/// snapshots (`breaking_changes.rs`); a future slice could move other
+/// workspace-level caches here too.
+pub fn workspace_state_dir(config_path: &Path) -> PathBuf {
+    let canonical = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf());
+    let dir = canonical.parent().unwrap_or_else(|| Path::new("."));
+    dir.join(".repowise-workspace")
 }
 
 /// A configured repo's indexed status -- never errors; an unindexed or

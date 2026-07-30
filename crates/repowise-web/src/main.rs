@@ -568,12 +568,23 @@ struct UnmatchedConsumer {
     path: String,
 }
 
+/// Mirrors `repowise-server`'s `BrokenContractDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct BrokenContract {
+    path: String,
+    consumer_repo: String,
+    consumer_file: String,
+    previous_producer_repo: String,
+    reason: Option<String>,
+}
+
 /// Mirrors `repowise-server`'s `WorkspaceContractsDto` wire shape.
 #[derive(Deserialize, Clone, Debug)]
 struct WorkspaceContracts {
     available: bool,
     matches: Vec<ContractMatch>,
     unmatched_consumers: Vec<UnmatchedConsumer>,
+    broken: Vec<BrokenContract>,
 }
 
 /// Mirrors `repowise-server`'s `UsageTotalsDto` wire shape.
@@ -2743,9 +2754,15 @@ fn ConformanceSection() -> impl IntoView {
 /// resolution involved, just a fixed pattern table over raw source
 /// text (see `repowise-workspace`'s `contracts` module doc comment for
 /// the coarse/heuristic caveat). Renders matched producer/consumer
-/// pairs and unmatched consumer calls (not necessarily a problem -- may
+/// pairs, unmatched consumer calls (not necessarily a problem -- may
 /// be a genuinely external API, or a producer this heuristic's pattern
-/// table doesn't recognize) as two separate lists.
+/// table doesn't recognize), and -- since issue #339 -- contracts that
+/// resolved on a *previous* fetch of this same endpoint and stopped
+/// (leads the view when non-empty, same "warning before the numbers it
+/// invalidates" convention `render_metrics` uses in the CLI): every
+/// fetch here both diffs against and overwrites the persisted
+/// `.repowise-workspace/contracts.json` snapshot, so polling this view
+/// is itself how the baseline stays current.
 #[component]
 fn ContractsSection() -> impl IntoView {
     let contracts =
@@ -2766,6 +2783,30 @@ fn ContractsSection() -> impl IntoView {
                         .into_any(),
                         Ok(c) => view! {
                             <div>
+                                {if c.broken.is_empty() {
+                                    view! { <span></span> }.into_any()
+                                } else {
+                                    view! {
+                                        <div class="warning">
+                                            <h3>{format!("Broken ({})", c.broken.len())}</h3>
+                                            <ul>
+                                                {c.broken.into_iter().map(|b| view! {
+                                                    <li>
+                                                        {format!(
+                                                            "{} ({} :: {}) used to resolve to {} -- {}",
+                                                            b.path, b.consumer_repo, b.consumer_file,
+                                                            b.previous_producer_repo,
+                                                            b.reason.as_deref().unwrap_or(
+                                                                "the consumer call site itself is gone",
+                                                            ),
+                                                        )}
+                                                    </li>
+                                                }).collect::<Vec<_>>()}
+                                            </ul>
+                                        </div>
+                                    }
+                                    .into_any()
+                                }}
                                 <h3>"Matched"</h3>
                                 {if c.matches.is_empty() {
                                     view! { <p class="empty">"No cross-repo API contracts matched."</p> }.into_any()

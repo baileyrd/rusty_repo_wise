@@ -116,6 +116,14 @@ struct AppState {
     /// module doc comment for the #64 workspace-listing feature this
     /// backs.
     workspace_repos: Arc<Option<Vec<repowise_workspace::ResolvedWorkspaceRepo>>>,
+    /// Sibling `.repowise-workspace/` directory for the same `--workspace
+    /// <path>` this state's `workspace_repos` was resolved from (`None`
+    /// under the same condition `workspace_repos` is `None`) -- computed
+    /// once at startup via `repowise_workspace::workspace_state_dir`
+    /// rather than re-derived per request, same "resolve once, reuse"
+    /// shape as `workspace_repos` itself. Currently the only consumer is
+    /// `get_workspace_contracts`'s breaking-change snapshot.
+    workspace_state_dir: Arc<Option<PathBuf>>,
     reindex_job: ReindexJob,
     usage: UsageTracker,
 }
@@ -1795,10 +1803,42 @@ impl From<repowise_workspace::ConsumerCall> for UnmatchedConsumerDto {
 }
 
 #[derive(Serialize)]
+struct BrokenContractDto {
+    path: String,
+    consumer_repo: String,
+    consumer_file: String,
+    previous_producer_repo: String,
+    /// `None` when the consumer call site itself is gone rather than
+    /// merely unmatched -- see `repowise_workspace::BrokenContract`'s
+    /// own doc comment.
+    reason: Option<&'static str>,
+}
+
+impl From<repowise_workspace::BrokenContract> for BrokenContractDto {
+    fn from(b: repowise_workspace::BrokenContract) -> Self {
+        BrokenContractDto {
+            path: b.key.path,
+            consumer_repo: b.key.consumer_repo,
+            consumer_file: b.key.consumer_file.display().to_string(),
+            previous_producer_repo: b.key.producer_repo,
+            reason: b.reason.map(|r| r.label()),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct WorkspaceContractsDto {
     available: bool,
     matches: Vec<ContractMatchDto>,
     unmatched_consumers: Vec<UnmatchedConsumerDto>,
+    /// Contracts that resolved in the last call to this endpoint (or the
+    /// last `repowise workspace-contracts` CLI run against the same
+    /// workspace file -- they share one snapshot) and don't anymore. See
+    /// `repowise_workspace::workspace_contract_changes`'s own doc
+    /// comment: every call both reads and overwrites the snapshot, so
+    /// polling this endpoint on a schedule is itself how it stays
+    /// current.
+    broken: Vec<BrokenContractDto>,
 }
 
 /// Regex-based HTTP producer/consumer route matching across every
@@ -1809,9 +1849,12 @@ struct WorkspaceContractsDto {
 /// no workspace was configured, same shape as every other workspace
 /// endpoint.
 async fn get_workspace_contracts(State(state): State<AppState>) -> Json<WorkspaceContractsDto> {
-    let dto = match state.workspace_repos.as_ref() {
-        Some(repos) => {
-            let report = repowise_workspace::workspace_contracts(repos);
+    let dto = match (
+        state.workspace_repos.as_ref(),
+        state.workspace_state_dir.as_ref(),
+    ) {
+        (Some(repos), Some(state_dir)) => {
+            let (report, broken) = repowise_workspace::workspace_contract_changes(repos, state_dir);
             WorkspaceContractsDto {
                 available: true,
                 matches: report
@@ -1824,12 +1867,14 @@ async fn get_workspace_contracts(State(state): State<AppState>) -> Json<Workspac
                     .into_iter()
                     .map(UnmatchedConsumerDto::from)
                     .collect(),
+                broken: broken.into_iter().map(BrokenContractDto::from).collect(),
             }
         }
-        None => WorkspaceContractsDto {
+        _ => WorkspaceContractsDto {
             available: false,
             matches: Vec::new(),
             unmatched_consumers: Vec::new(),
+            broken: Vec::new(),
         },
     };
     Json(dto)
@@ -1895,11 +1940,15 @@ async fn get_reindex_status(State(state): State<AppState>) -> Json<ReindexStatus
 /// built `repowise-web` frontend (e.g. `crates/repowise-web/dist` after
 /// `trunk build`) as a fallback for any path the JSON API doesn't claim.
 pub fn app(root: PathBuf, static_dir: Option<PathBuf>, workspace: Option<PathBuf>) -> Router {
+    let workspace_state_dir = workspace
+        .as_deref()
+        .map(repowise_workspace::workspace_state_dir);
     let workspace_repos = workspace.and_then(|path| repowise_workspace::load_resolved(&path).ok());
     let state = AppState {
         root: Arc::new(root),
         llm_config: Arc::new(repowise_llm::LlmConfig::from_env()),
         workspace_repos: Arc::new(workspace_repos),
+        workspace_state_dir: Arc::new(workspace_state_dir),
         reindex_job: ReindexJob::new(),
         usage: UsageTracker::new(),
     };
@@ -2926,6 +2975,7 @@ mod tests {
             root: Arc::new(root),
             llm_config: Arc::new(llm_config),
             workspace_repos: Arc::new(None),
+            workspace_state_dir: Arc::new(None),
             reindex_job: ReindexJob::new(),
             usage: UsageTracker::new(),
         };
@@ -3579,6 +3629,7 @@ mod tests {
         assert_eq!(matches[0]["consumer_repo"], "client");
         assert_eq!(matches[0]["path"], "/api/hotspots");
         assert_eq!(json["unmatched_consumers"], serde_json::json!([]));
+        assert_eq!(json["broken"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -3624,6 +3675,111 @@ mod tests {
         let unmatched = json["unmatched_consumers"].as_array().unwrap();
         assert_eq!(unmatched.len(), 1);
         assert_eq!(unmatched[0]["path"], "/api/unknown");
+        assert_eq!(json["broken"], serde_json::json!([]));
+    }
+
+    /// Two calls against the same `--workspace` flag (so the same
+    /// `.repowise-workspace/contracts.json` snapshot on disk), with the
+    /// producer's route removed in between -- exercises
+    /// `workspace_contract_changes` through the real HTTP surface, not
+    /// just `repowise-workspace`'s own unit tests.
+    #[tokio::test]
+    async fn get_workspace_contracts_reports_a_broken_contract_after_the_producer_route_disappears()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let server_repo = dir.path().join("server");
+        std::fs::create_dir_all(&server_repo).unwrap();
+        index_repo_with_producer_route(&server_repo);
+
+        let client_repo = dir.path().join("client");
+        std::fs::create_dir_all(&client_repo).unwrap();
+        index_repo_with_consumer_call(&client_repo, "/api/hotspots");
+
+        let workspace_path = dir.path().join("workspace.toml");
+        std::fs::write(
+            &workspace_path,
+            format!(
+                r#"
+                    [[repo]]
+                    name = "server"
+                    path = "{}"
+
+                    [[repo]]
+                    name = "client"
+                    path = "{}"
+                "#,
+                server_repo.display(),
+                client_repo.display(),
+            ),
+        )
+        .unwrap();
+
+        // First call: matches, and (since `app()` is built fresh here,
+        // with no prior snapshot on disk) nothing broken yet.
+        let router = app(root.clone(), None, Some(workspace_path.clone()));
+        let (status, json) = {
+            let response = router
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/api/workspace-contracts")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        };
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(json["broken"], serde_json::json!([]));
+
+        // The producer drops its route entirely.
+        std::fs::write(server_repo.join("routes.rs"), "// no routes here\n").unwrap();
+        let index = RepoIndex {
+            root: server_repo.clone(),
+            files: vec![],
+            other_files: 1,
+            indexed_commit: None,
+        };
+        index.save(&server_repo).unwrap();
+
+        // A fresh `app()` (new process, same workspace file) still reads
+        // the snapshot the first call wrote -- the baseline lives on
+        // disk, not in server memory.
+        let router = app(root, None, Some(workspace_path));
+        let (status, json) = {
+            let response = router
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/api/workspace-contracts")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        };
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["matches"], serde_json::json!([]));
+        let broken = json["broken"].as_array().unwrap();
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0]["path"], "/api/hotspots");
+        assert_eq!(broken[0]["consumer_repo"], "client");
+        assert_eq!(broken[0]["previous_producer_repo"], "server");
+        assert_eq!(broken[0]["reason"], "no-producer-anywhere");
     }
 
     #[tokio::test]

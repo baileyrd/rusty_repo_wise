@@ -1583,6 +1583,7 @@ dependencies = [
  "repowise-graph",
  "repowise-parser",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

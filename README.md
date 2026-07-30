@@ -383,7 +383,7 @@ repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own mo
 repowise workspace-architecture --workspace <FILE>  # cross-repo import resolution: which repos depend on which
 repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  # direct cross-repo importers of one file
 repowise workspace-conformance --workspace <FILE> [--json] [--allow-unverified]  # circular cross-repo dependencies; exits non-zero on findings, so it gates CI
-repowise workspace-contracts --workspace <FILE>  # regex-based HTTP producer/consumer route matching across repos
+repowise workspace-contracts --workspace <FILE> [--json]  # regex-based HTTP producer/consumer route matching across repos, plus any that broke since the last run
 repowise workspace-diagnostics --workspace <FILE> # why that contract count is what it is (unmatched-by-reason, orphan routes, unread repos)
 repowise workspace-metrics --workspace <FILE>    # propagation cost, cyclic core, 1-10 architecture-complexity score
 ```
@@ -3069,10 +3069,35 @@ per language, which this port has no such capability for. False
 negatives (an unrecognized framework idiom) and false positives (a
 route-shaped string that isn't actually a route) are both expected.
 
-- `repowise workspace-contracts --workspace <path>` prints matched
+- `repowise workspace-contracts --workspace <path> [--json]` prints matched
   producer/consumer pairs and any consumer calls with no known producer
   in the workspace (not necessarily a problem — may be a genuinely
   external API, or a producer this heuristic doesn't recognize).
+
+  **Breaking-change detection (issue #339).** Every call also diffs
+  against `.repowise-workspace/contracts.json` — a snapshot of the
+  *previous* call's matches, persisted sibling to the workspace TOML
+  file itself (`repowise_workspace::workspace_state_dir`, matching
+  upstream repowise's own `.repowise-workspace/` naming for the same
+  concept) — and reports any contract that resolved before and doesn't
+  now, leading the output when non-empty (the same "warning before the
+  numbers it invalidates" convention `workspace-metrics` already uses).
+  Deliberately narrow: a broken contract is a consumer call site that
+  **used to resolve to a producer and no longer does** (the producer
+  moved, changed method, or its route disappeared) — reusing
+  `workspace-diagnostics`'s own classification to say *why*
+  (`method-mismatch`/`no-producer-anywhere`) rather than re-deriving it.
+  A consumer call site that's gone entirely (the calling code itself was
+  deleted) is not reported as broken — that's not a contract break, just
+  gone. Every call **both reads and overwrites** the snapshot with its
+  own current matches, the same "current run becomes the new baseline"
+  model `repowise update` already uses for `.repowise/index.json` — so a
+  first run against a fresh workspace reports nothing broken (no
+  baseline to compare against yet) and polling `serve-dashboard`'s
+  `/api/workspace-contracts` on a schedule is itself how the baseline
+  stays current. An unwritable state directory degrades to "nothing
+  persisted for next time" rather than failing the read it's attached
+  to.
 - `repowise workspace-diagnostics --workspace <path> [--json]` explains
   that link count, because a short match list is ambiguous on its own:
   it's either an architecture finding or a tooling artifact, and those
@@ -3141,6 +3166,14 @@ the one shared `cross_repo_import_edges` function. Still out of scope:
 TypeScript/JavaScript/C/C++/Ruby/Swift/Dart/Shell resolve imports
 directly against the filesystem rather than through a module map — a
 different resolution mechanism this pass didn't touch.
+
+Issue #339, another follow-on parity gap, added the breaking-change
+detection described above under "Breaking-change detection (issue
+#339)" — see that section for the full behavior. It's the first thing
+in this port to write workspace-level state to disk
+(`.repowise-workspace/`, via the new `workspace_state_dir` helper),
+rather than everything workspace-related being recomputed fresh from
+each member repo's own `.repowise/index.json` on every call.
 
 ## Testing
 

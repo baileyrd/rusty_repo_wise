@@ -6,6 +6,50 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #344 — Contract breaking-change detection
+**2026-07-30** · closes [#339](https://github.com/baileyrd/rusty_repo_wise/issues/339)
+
+- Second of `ParityGaps.md`'s open gaps worked, highest-priority-first:
+  `workspace-contracts` matched producer/consumer API contracts for one
+  point-in-time snapshot only, with no memory of a prior run, so it couldn't
+  tell "this route never existed" apart from "this route used to resolve and
+  just broke".
+- **New `repowise-workspace::breaking_changes` module** and
+  `workspace_contract_changes(repos, state_dir)`: persists a snapshot of each
+  run's matched contracts to `.repowise-workspace/contracts.json` (sibling to
+  the workspace TOML file itself, via the new `workspace_state_dir` helper —
+  matching upstream repowise's own `.repowise-workspace/` naming for the same
+  concept), diffs the current run against it, and reports any contract that
+  used to resolve and no longer does, tagged with *why* by reusing
+  `workspace_diagnostics`'s existing classification
+  (`method-mismatch`/`no-producer-anywhere`) rather than re-deriving it.
+  Deliberately narrow: a consumer call site that's gone entirely isn't
+  reported as broken, only one that still exists but no longer resolves.
+- Every call **both reads and overwrites** the snapshot with its own current
+  matches, the same "current run becomes the new baseline" model `repowise
+  update` already uses for `.repowise/index.json` — a first run against a
+  fresh workspace reports nothing broken (no baseline yet), and polling
+  `serve-dashboard`'s `/api/workspace-contracts` on a schedule is itself how
+  the baseline stays current.
+- Wired through the whole stack: `repowise workspace-contracts` gains
+  `--json` and leads its output with a `BROKEN:` section when non-empty
+  (same "warning before the numbers it invalidates" convention
+  `workspace-metrics` already uses); `GET /api/workspace-contracts` gains a
+  `broken` field; the dashboard's Contracts section gets a matching
+  warning-styled list.
+- This is the first thing in this port to persist workspace-level state to
+  disk on its own initiative, rather than only ever reading each member
+  repo's already-written `.repowise/index.json` — and `repowise-workspace`'s
+  first use of `serde_json` (added as a new dependency, already present
+  everywhere else in the workspace).
+- New tests: an end-to-end `repowise-workspace` integration test (real files
+  on disk, a producer route removed between two calls) and a matching
+  `repowise-server` HTTP-level test (two `app()` instances sharing one
+  on-disk snapshot, proving the baseline lives on disk and not in server
+  memory).
+
+---
+
 ## PR #343 — Generalize cross-repo import resolution beyond Rust
 **2026-07-30** · closes [#338](https://github.com/baileyrd/rusty_repo_wise/issues/338)
 

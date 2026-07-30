@@ -6,6 +6,57 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #331 — ADR mining: README/docs-prose decision source + decision confidence
+**2026-07-30** · closes [#71](https://github.com/baileyrd/rusty_repo_wise/issues/71)
+
+- **New 9th decision source, `DecisionSource::ReadmeMining`** — mines
+  decision-flavored prose sections of `README.md`/`ARCHITECTURE.md` (both
+  checked independently, unlike the changelog source's first-match-wins).
+  Checked upstream's real design for this exact source
+  (`docs/layers/DECISIONS.md`) before building it: a README is a much
+  noisier signal than an ADR file or a `WHY:` marker, so it needed real
+  false-positive mitigation, not just a smaller heading allowlist. Two
+  mitigations, mirroring upstream: a **structural gate** (only text under
+  a Markdown heading counts, and only when that heading's own section —
+  flat section boundaries, like the changelog source, not
+  nesting-aware — reads decision-like via the existing keyword
+  heuristic), and **confidence, not exclusion** (see below).
+- **New `DecisionRecord::confidence: f64` field**, ported faithfully from
+  upstream's rank-based confidence formula: `0.4 + 0.5 * (rank / 9)`,
+  clamped to `[0, 0.99]`, over a 9-source rank ladder (`Manual` 9 → `Adr`
+  8 → `PullRequest` 7 → `CommitMessage` 6 → `Changelog` 5 →
+  `InlineMarker` 4 → `CodeComment`/`ReadmeMining` 3 (tied) → `Inferred`
+  2). Retrofitted onto all 8 existing sources via a new
+  `DecisionRecord::new` constructor, so every decision — not just
+  README-mined ones — now carries a real confidence score. Deliberately
+  **not** implemented, as a documented scope cut: upstream's per-field
+  grounding-verification penalty (a no-op here since every source quotes
+  verbatim rather than paraphrasing — `Inferred` already has an
+  equivalent binary anchor-presence gate) and cross-source corroboration
+  bonus (a separable same-decision-detection subsystem, left as a
+  follow-up).
+- **Every decision-displaying surface updated**: `repowise decisions`
+  prints `(confidence: N.NN)` per record and mentions the new source in
+  its "no decisions found" message; the static and live dashboards add a
+  Confidence column; `get_why` (MCP) and `GET /api/decisions` both add a
+  `confidence` field per decision, and their tool/response docs mention
+  the new source.
+- 7 new tests in `repowise-adr::readme_docs` (a decision-like section is
+  mined, ordinary descriptive sections are ignored, a subsection with its
+  own decision prose is mined independently of its non-decision-like
+  parent section, both README and ARCHITECTURE are mined when present,
+  confidence matches the shared formula and ties with `CodeComment`,
+  no-file-present degrades to empty, and the heading-detection edge case
+  of a `#!`-shebang-style line not being mistaken for a heading). Local
+  gate (all six CI steps by exit status) passes.
+- Verified live against a fixture repo with a README containing an
+  "## Installation"/"## Why sled over rocksdb"/"## Usage" structure:
+  `repowise decisions` found exactly the "Why" section, with
+  `confidence: 0.57` (rank 3, matching the formula) and no false
+  positives from the other two sections.
+
+---
+
 ## PR #330 — Terraform support: `TerraformResource`/`TerraformModule` models
 **2026-07-30** · closes [#326](https://github.com/baileyrd/rusty_repo_wise/issues/326) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319)) — the last of #319's four schema/declarative-infra formats
 

@@ -243,7 +243,7 @@ fn decisions_section(decisions: &[DecisionRecord]) -> String {
         );
     }
 
-    out.push_str("<table><tr><th>ID</th><th>Title</th><th>Status</th><th>Source</th><th class=\"num\">Linked files</th></tr>\n");
+    out.push_str("<table><tr><th>ID</th><th>Title</th><th>Status</th><th>Source</th><th class=\"num\">Confidence</th><th class=\"num\">Linked files</th></tr>\n");
     for d in decisions {
         // Only ADR files carry a `Status:` line. The absent case used to
         // render as "commit", from when commits were the only other
@@ -262,15 +262,19 @@ fn decisions_section(decisions: &[DecisionRecord]) -> String {
             DecisionSource::CodeComment { .. } => "comment".to_string(),
             DecisionSource::InlineMarker { marker, .. } => escape(marker),
             DecisionSource::Changelog { .. } => "changelog".to_string(),
+            DecisionSource::ReadmeMining { heading, .. } => {
+                format!("README ({})", escape(heading))
+            }
             DecisionSource::Inferred { model, .. } => {
                 format!("<span class=\"badge\">inferred</span> {}", escape(model))
             }
             DecisionSource::Manual { .. } => "<span class=\"badge\">manual</span>".to_string(),
         };
         out.push_str(&format!(
-            "<tr><td class=\"mono\">{}</td><td>{}</td><td>{status}</td><td>{source}</td><td class=\"num\">{}</td></tr>\n",
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td>{status}</td><td>{source}</td><td class=\"num\">{:.2}</td><td class=\"num\">{}</td></tr>\n",
             escape(&d.id),
             escape(&d.title),
+            d.confidence,
             d.linked_files.len()
         ));
     }
@@ -447,18 +451,17 @@ mod tests {
             average_score: 10.0,
         };
         let decisions = vec![DecisionRecord {
-            id: "inferred:src/queue.rs:7".to_string(),
-            title: "Bounded work queue".to_string(),
-            source: DecisionSource::Inferred {
-                file: root.join("src/queue.rs"),
-                line: 7,
-                model: "some-model".to_string(),
-            },
-            status: None,
-            superseded_by: None,
-            date: None,
-            body: "Backpressure over unbounded growth.".to_string(),
             linked_files: vec![root.join("src/queue.rs")],
+            ..DecisionRecord::new(
+                "inferred:src/queue.rs:7",
+                "Bounded work queue",
+                DecisionSource::Inferred {
+                    file: root.join("src/queue.rs"),
+                    line: 7,
+                    model: "some-model".to_string(),
+                },
+                "Backpressure over unbounded growth.",
+            )
         }];
 
         let index = empty_index(&root);
@@ -518,16 +521,18 @@ mod tests {
             last_touch: None,
         }];
         let decisions = vec![DecisionRecord {
-            id: "ADR-0001".to_string(),
-            title: "Use sled".to_string(),
-            source: DecisionSource::Adr {
-                file: root.join("docs/adr/0001.md"),
-            },
             status: Some("Superseded by ADR-0002".to_string()),
             superseded_by: Some("ADR-0002".to_string()),
             date: Some("2026-01-01".to_string()),
-            body: String::new(),
             linked_files: vec![root.join("hot.rs")],
+            ..DecisionRecord::new(
+                "ADR-0001",
+                "Use sled",
+                DecisionSource::Adr {
+                    file: root.join("docs/adr/0001.md"),
+                },
+                "",
+            )
         }];
 
         let index = empty_index(&root);

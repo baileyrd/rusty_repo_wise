@@ -231,7 +231,8 @@ crate can layer an LLM-written summary on top of each one (`repowise
 generate`, see "LLM-assisted wiki summaries" below) — a first, narrow slice
 of what was previously a fully-deferred LLM tier; RAG chat and refactor-plan
 codegen remain deferred. ADR mining is fully ported now (all 8 of the
-original's decision sources are implemented —
+original's decision sources are implemented, plus a 9th — decision-flavored
+README/ARCHITECTURE prose, issue #71 — that isn't in the original eight —
 see "Architectural decision mining" below). The MCP server covers all ten of
 the original's flagship tools, and adds three the original doesn't have — see "MCP server" below. The
 dashboard is one static page with no per-file drill-down or live search
@@ -294,8 +295,10 @@ dashboard is one static page with no per-file drill-down or live search
 - `repowise-adr` — architectural-decision mining from ADR files,
   decision-like commit messages, decision-like merged PR bodies (via the
   GitHub API, opt-in behind a token env var), decision-like code
-  comments, inline decision markers, and keep-a-changelog-style
-  CHANGELOG sections, linked to the files/symbols they mention.
+  comments, inline decision markers, keep-a-changelog-style CHANGELOG
+  sections, and decision-flavored README/ARCHITECTURE prose, linked to
+  the files/symbols they mention and each carrying a source-ranked
+  confidence score.
 - `repowise-mcp` — an MCP server (via the official `rmcp` SDK) exposing
   the index/graph/health/git-analytics/mined-decisions data, plus a
   deterministic per-commit change-risk score and confidence-tiered
@@ -2100,7 +2103,10 @@ a caveat.
 
 ## Architectural decision mining
 
-`repowise decisions` mines all eight of the original's decision sources:
+`repowise decisions` mines all eight of the original's decision sources,
+plus a ninth (README/ARCHITECTURE prose, issue #71) that isn't in the
+original eight — see below for why it needed its own false-positive
+mitigation the other eight didn't:
 
 - **`docs/adr/*.md` files**, parsed against this repo's own ADR template
   (`# ADR-XXXX: Title`, then `Status:`/`Date:` lines). An unfilled
@@ -2160,12 +2166,29 @@ a caveat.
   index) rather than an authoritative self-link to the changelog file:
   the changelog file itself isn't what the decision is *about*, unlike a
   PR's diff or the file a comment sits in.
+- **Decision-flavored README/ARCHITECTURE prose** (issue #71) — the
+  ninth source, and by far the noisiest: a README describes the system,
+  not (mostly) the choices behind it, so scanning every paragraph for a
+  decision keyword would flag ordinary descriptive prose constantly. The
+  mitigation is two-part, mirroring the real repowise's own design for
+  this source: a **structural gate** (only text under a Markdown heading
+  counts, and only when that heading's own section — flat, like the
+  changelog source's sections, not nesting-aware, so a "### Tradeoff"
+  subsection is checked independently of its "## Why" parent — contains
+  keyword-heuristic prose), plus **confidence, not exclusion**: rather
+  than an allowlist of "safe" heading titles (which would just as
+  reliably miss a real decision under an unanticipated heading), every
+  survivor is ranked at confidence 3 — see "Decision confidence" below.
+  Checks `README.md` and `ARCHITECTURE.md` independently (both mined if
+  both exist, unlike the changelog source's first-match-wins). Linked
+  the same text-matched way ADR-file/commit-message/changelog decisions
+  are.
 - **Decisions a model inferred from code** — the one source that isn't a
   written artifact, and treated differently everywhere because of it.
   See "LLM-inferred decisions" below.
 - **Decisions typed in directly, via `repowise decide <title> <rationale>`**
   — not mined from any artifact at all: the user states the decision and
-  why, and it's recorded verbatim. The most trustworthy of the eight
+  why, and it's recorded verbatim. The most trustworthy of the nine
   sources and the only one with no keyword heuristic, no anchor-checking,
   and no network call — there's nothing to guess or verify, since it's the
   user's own stated intent. See "Manually recorded decisions" below.
@@ -2181,14 +2204,46 @@ won't be linked. Supersession is read directly from an ADR's
 was needed since the
 existing template already has one.
 
-Not implemented, and outside the eight sources above: mining Slack and
+Not implemented, and outside the nine sources above: mining Slack and
 issue-tracker conversations for decisions — this repo doesn't have
-integrations for either anyway. Recency/confidence scoring on mined
-decisions is also not implemented.
+integrations for either anyway. Recency scoring on mined decisions is
+also not implemented.
+
+### Decision confidence
+
+Every `DecisionRecord` carries a `confidence` in `[0, 1]`, saying how much
+to trust it as a record of actual intent — an ADR file outranks a
+freeform README paragraph, independent of how confidently either one's
+*text* happens to read. Ported from the real repowise's own
+rank-based confidence formula (`docs/layers/DECISIONS.md` upstream):
+`0.4 + 0.5 * (rank / 9)`, clamped to `[0, 0.99]` (never a false 100% —
+even a rank-9 `Manual` record is self-reported, not independently
+verified), where `rank` comes from a 9-source ladder (highest to lowest):
+`Manual` (9) → `Adr` (8) → `PullRequest` (7) → `CommitMessage` (6) →
+`Changelog` (5) → `InlineMarker` (4) → `CodeComment`/`ReadmeMining`
+(3, tied — both are freeform prose written *near* a decision rather than
+*as* one) → `Inferred` (2).
+
+Two other terms the upstream formula also computes are a deliberate scope
+cut here, not an oversight:
+
+- **Per-field grounding verification** (an exact/fuzzy/unverified penalty
+  for a paraphrased quote). Every source in this port quotes verbatim
+  rather than paraphrasing, so the check would be a no-op in practice;
+  the LLM-inferred source already has an equivalent binary
+  anchor-presence gate for the one place a citation could be invented
+  (see "LLM-inferred decisions" below).
+- **Cross-source corroboration** (a confidence bonus when two sources
+  describe the same decision). This needs same-decision detection across
+  records first — a separable subsystem, not a per-record computation —
+  and is left as a documented follow-up.
+
+`repowise decisions` prints each record's confidence alongside its
+source; `get_why` (MCP) and both dashboards surface the same field.
 
 ### LLM-inferred decisions
 
-Seven of the eight sources read something a person wrote or typed on
+Eight of the nine sources read something a person wrote or typed on
 purpose. This one reads what a *model* inferred from code while
 `repowise generate` was already writing wiki summaries. "We chose X
 because Y" gets read as
@@ -2251,9 +2306,10 @@ judging an inferred claim is entitled to know what inferred it.
 
 `repowise decide <title> <rationale> [PATH]` records a decision you
 already made, directly — no mining, no keyword heuristic, no model. It's
-the eighth source (issue #66's `cli` half; a bundled `session` half,
-mining a coding agent's transcript, stays not planned since this port has
-no such transcript format to mine — see issue #315).
+the last of the original eight sources (issue #66's `cli` half; a
+bundled `session` half, mining a coding agent's transcript, stays not
+planned since this port has no such transcript format to mine — see
+issue #315).
 
 **Append-only.** Each call is a single, deliberate, permanent record under
 `.repowise/manual-decisions.json`; there is no `repowise decide --edit`
@@ -2436,14 +2492,17 @@ below):
   the returned span possibly being off if line numbers have since shifted.
 - **`get_why(targets?)`** — architectural decisions mined from
   `docs/adr/*.md`, decision-like commit messages, decision-like merged PR
-  bodies, decision-like code comments, inline decision markers, and
-  keep-a-changelog-style CHANGELOG sections (via `repowise-adr`), the
-  same data as `repowise decisions --for-file`. `targets` is a list
-  of file paths or symbol ids (mixing both is fine — a symbol id resolves
-  to its own file); a decision is returned if its body links to at least
-  one target's file. Omit `targets` (or pass an empty list) to get every
-  mined decision. A thin wrapper with no new mining logic of its own —
-  the same "reuse an existing library call" shape as `get_overview`/
+  bodies, decision-like code comments, inline decision markers,
+  keep-a-changelog-style CHANGELOG sections, and decision-flavored
+  README/ARCHITECTURE prose (via `repowise-adr`), the same data as
+  `repowise decisions --for-file`. `targets` is a list of file paths or
+  symbol ids (mixing both is fine — a symbol id resolves to its own
+  file); a decision is returned if its body links to at least one
+  target's file. Omit `targets` (or pass an empty list) to get every
+  mined decision. Each result carries a `confidence` in `[0, 1]` (see
+  "Decision confidence" above) — weigh a low-confidence hit more
+  skeptically. A thin wrapper with no new mining logic of its own — the
+  same "reuse an existing library call" shape as `get_overview`/
   `search_codebase`.
   - **One source isn't a written artifact.** Decisions marked
     `inferred: true` were inferred by a model from code (see

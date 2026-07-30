@@ -61,16 +61,17 @@ pub fn parse_adr_file(path: &Path) -> anyhow::Result<Option<DecisionRecord>> {
     let superseded_by = status_raw.as_deref().and_then(extract_superseded_by);
 
     Ok(Some(DecisionRecord {
-        id,
-        title,
-        source: DecisionSource::Adr {
-            file: path.to_path_buf(),
-        },
         status: status_raw,
         superseded_by,
         date,
-        body: text,
-        linked_files: Vec::new(),
+        ..DecisionRecord::new(
+            id,
+            title,
+            DecisionSource::Adr {
+                file: path.to_path_buf(),
+            },
+            text,
+        )
     }))
 }
 

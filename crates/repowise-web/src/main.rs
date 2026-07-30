@@ -2160,6 +2160,7 @@ fn language_color(language: &str) -> &'static str {
         "PHP" => "#4F5D95",
         "Dart" => "#00B4AB",
         "Shell" => "#89e051",
+        "Luau" => "#00A2FF",
         "Objective-C" => "#438eff",
         "R" => "#198CE7",
         "Zig" => "#ec915c",

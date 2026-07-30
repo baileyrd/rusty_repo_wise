@@ -48,6 +48,12 @@ pub enum Language {
     Php,
     Dart,
     Shell,
+    /// Luau (issue #341), Roblox's Lua dialect -- via the community
+    /// `tree-sitter-luau` grammar, the same "Full tier" extraction depth
+    /// as every language above it, not the shallower "Partial" tier
+    /// upstream repowise defines for it (see `repowise_parser::luau`'s
+    /// module doc for why that tier concept isn't needed here).
+    Luau,
     ObjectiveC,
     R,
     Zig,
@@ -152,6 +158,14 @@ impl Language {
             "php" => Language::Php,
             "dart" => Language::Dart,
             "sh" | "bash" | "zsh" => Language::Shell,
+            // `.lua` is deliberately NOT mapped here: plain Lua and Luau
+            // share the `.lua` extension in the wild, but this port only
+            // has a Luau grammar (which rejects some plain-Lua-5.1-only
+            // syntax) -- `.luau` is Roblox tooling's own unambiguous
+            // convention for "this file is Luau", so only that extension
+            // is recognized, the same "don't guess past an ambiguous
+            // extension" call already made for C++'s `.h`.
+            "luau" => Language::Luau,
             "m" | "mm" => Language::ObjectiveC,
             // Capital `.R` is the dominant convention for R scripts;
             // lowercase `.r` also appears, so both are accepted.
@@ -200,6 +214,7 @@ impl Language {
             Language::Php => "PHP",
             Language::Dart => "Dart",
             Language::Shell => "Shell",
+            Language::Luau => "Luau",
             Language::ObjectiveC => "Objective-C",
             Language::R => "R",
             Language::Zig => "Zig",

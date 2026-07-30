@@ -6,6 +6,76 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #347 — Luau language support (Full tier)
+**2026-07-30** · closes [#341](https://github.com/baileyrd/rusty_repo_wise/issues/341)
+
+- Fourth of `ParityGaps.md`'s open gaps worked, highest-priority-first (after
+  #338/PR #343, #339/PR #344, and #335/PR #345). Upstream repowise recognizes
+  Luau/Roblox as its own "Partial" support tier — more than a regex import
+  graph, less than a full tree-sitter grammar with health markers. This port
+  had no Luau coverage at all going in.
+- Answered issue #341's own open question by research rather than by
+  guessing: a real, actively-maintained `tree-sitter-luau` grammar exists
+  (v1.2.0, ~25k downloads, maintained under the official
+  `tree-sitter-grammars` GitHub org — the same community org behind other
+  widely-used tree-sitter grammars). So **Luau joins the Full tier directly**,
+  the same "Full tier" extraction depth as this port's other 16 tree-sitter
+  languages — no new "Partial" tier concept needed just for this one
+  language.
+- New `repowise-parser::luau` module (`crates/repowise-parser/src/luau.rs`):
+  symbols (`function`/`local function` → `Function`; `function
+  obj.method()`/`function obj:method()` → `Method`, attributed to `obj`),
+  calls, and imports (`require(...)` — Luau has no `import`/`use` keyword,
+  handled the same shape JavaScript's CommonJS `require()` is), plus the same
+  complexity/nesting-depth/bumpy-road/param-count/body-hash metrics every
+  other Full-tier language gets. Field accesses deliberately left empty,
+  matching Kotlin's and Go's own extraction depth.
+- Grammar node-kind names were grounded empirically against
+  `tree-sitter-luau`'s own `node-types.json`/`grammar.json` and real parsed
+  snippets, not guessed from memory or other Lua grammars — several shapes
+  are easy to get wrong otherwise (`function foo()` and `local function
+  foo()` parse to the *same* node kind; `binary_expression` has no
+  `operator` field, unlike Go/Kotlin/JS).
+- Import resolution is a real, documented gap: a Roblox instance-tree path
+  (`require(script.Parent.Foo)`) has no filesystem mapping at all, and a
+  plain string path (`require("Bar")`) has no fixed extension/directory
+  convention — `repowise-graph` puts Luau's `require` edges in the same
+  "no module-map index" bucket as Swift's/Dart's package imports, alongside
+  TypeScript/JavaScript/C/C++/Ruby (unresolved single-repo; also out of
+  scope for #338's cross-repo resolution pass).
+- `.luau` is the only extension mapped to `Language::Luau` — `.lua` is
+  deliberately excluded, since plain Lua and Luau share that extension in
+  the wild but this port only has a Luau grammar (which rejects some
+  plain-Lua-5.1-only syntax).
+- README.md/ARCHITECTURE.md language lists and every "N other languages"
+  count updated (16 → 17 tree-sitter-parsed languages).
+- New tests: 9 unit tests in `luau.rs` covering function/method extraction,
+  `require` import extraction (both Roblox-path and string forms),
+  call-target extraction, cyclomatic complexity, param counts, body hashing,
+  complex-conditional detection, and the empty-field-accesses contract.
+
+---
+
+## PR #346 — Close #336 and #340 as not planned
+**2026-07-30** · closes [#336](https://github.com/baileyrd/rusty_repo_wise/issues/336), closes [#340](https://github.com/baileyrd/rusty_repo_wise/issues/340)
+
+Docs-only `ParityGaps.md` status update for two gaps resolved by decision
+rather than code (full reasoning recorded as resolution comments on each
+issue):
+
+- **#336** (native multi-provider LLM support): `rusty_provider` — a real,
+  already-existing companion project, already the documented way to
+  configure `REPOWISE_LLM_BASE_URL` — is the accepted permanent answer.
+  Building native multi-provider support into `repowise-llm` would
+  duplicate `rusty_provider`'s entire reason to exist.
+- **#340** (git-worktree auto-seeding for incremental indexing): this port
+  has no incremental re-indexing anywhere today, even for the far more
+  common "one file changed, same tree" case — building worktree-specific
+  incremental diffing before the general capability it would really be a
+  special case of is the wrong order to build this in.
+
+---
+
 ## PR #345 — Webhook-triggered auto-sync (GitHub/GitLab)
 **2026-07-30** · partially closes [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335)
 

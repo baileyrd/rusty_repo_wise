@@ -15,6 +15,7 @@ mod java;
 mod javascript;
 mod kotlin;
 pub mod lightweight;
+mod luau;
 mod metrics;
 mod php;
 mod python;
@@ -64,6 +65,7 @@ pub fn parse_file(
         Language::Php => Ok(Some(php::extract(path, source)?)),
         Language::Dart => Ok(Some(dart::extract(path, source)?)),
         Language::Shell => Ok(Some(shell::extract(path, source)?)),
+        Language::Luau => Ok(Some(luau::extract(path, source)?)),
         Language::ObjectiveC
         | Language::R
         | Language::Zig

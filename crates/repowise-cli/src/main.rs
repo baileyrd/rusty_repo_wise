@@ -243,6 +243,18 @@ enum Command {
         #[command(subcommand)]
         action: HookAction,
     },
+    /// Adapters for Claude Code's own hook JSON contract (issue #333's
+    /// Claude Code plugin, `.claude-plugin/hooks/hooks.json`) --
+    /// distinct from `hook`/`hook rewrite` above, which are
+    /// harness-agnostic (a git hook, and a stdin/stdout command
+    /// rewriter any agent harness can point at). These speak Claude
+    /// Code's specific per-event stdin/stdout JSON contract directly,
+    /// since that's what a Claude Code hook command is invoked with.
+    /// Not meant to be run by hand -- installed by the plugin.
+    ClaudeHook {
+        #[command(subcommand)]
+        action: ClaudeHookAction,
+    },
     /// Report index freshness: whether an index exists, when it was
     /// written, and how much of it the working tree has moved past.
     ///
@@ -651,6 +663,25 @@ enum RewriteAction {
     Apply,
 }
 
+#[derive(Subcommand)]
+enum ClaudeHookAction {
+    /// `SessionStart`: bootstraps the index if none exists yet
+    /// (`repowise init`'s own implementation), and reports freshness
+    /// otherwise -- never auto-updates a stale index, the same "report,
+    /// don't silently refresh behind the caller's back" stance the MCP
+    /// server's own `_meta.stale_warning` already takes, and cheap
+    /// enough to run synchronously on every session start (the same
+    /// mtime-diffing `repowise status` already does, no git history
+    /// walk).
+    SessionStart,
+    /// `PreToolUse` (matched to `Bash` only): routes the command
+    /// through the exact same fail-open Distill decision logic `hook
+    /// rewrite apply` already uses, wrapped in Claude Code's
+    /// `PreToolUse` JSON contract instead of a raw stdin/stdout command
+    /// string.
+    PreToolUse,
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -716,6 +747,7 @@ fn main() -> anyhow::Result<()> {
         Command::ImpactedTests { revspec, path } => cmd_impacted_tests(revspec.as_deref(), &path),
         Command::Doctor { path } => cmd_doctor(&path),
         Command::Hook { action } => cmd_hook(action),
+        Command::ClaudeHook { action } => cmd_claude_hook(action),
         Command::Status { path, verbose } => cmd_status(&path, verbose),
         Command::Risk { revspec, path } => cmd_risk(revspec.as_deref(), &path),
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
@@ -2335,6 +2367,43 @@ fn cmd_hook(action: HookAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs one command through Distill's fail-open rewrite decision,
+/// recording a skip for `saved --missed` accounting the same way `hook
+/// rewrite apply` always has. Shared by that command and the Claude
+/// Code `PreToolUse` adapter (`claude-hook pre-tool-use`), so the exact
+/// same decision logic backs both surfaces rather than two copies of it
+/// drifting apart.
+fn distill_apply(input: &str) -> String {
+    let decision = repowise_distill::decide(input);
+    // Recording skips is what makes `saved --missed` real: it's the
+    // feature auditing its own coverage, the difference between "the
+    // hook is working" and "the hook is installed". Best-effort --
+    // accounting must never break a command.
+    if let repowise_distill::Decision::Skip(reason) = &decision {
+        if let Ok(cwd) = std::env::current_dir() {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let dir = repowise_distill::store::store_dir(&cwd, home.as_deref());
+            let program = input
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            if !program.is_empty() {
+                repowise_distill::ledger::record_skipped(&dir, program, reason.label());
+            }
+        }
+    }
+    match decision {
+        repowise_distill::Decision::Rewrite { .. } => repowise_distill::rewrite::rewrite(input),
+        // Every skip path returns the input verbatim. This is the
+        // fail-open contract: the hook must be incapable of changing a
+        // command it doesn't understand.
+        repowise_distill::Decision::Skip(_) => input.trim().to_string(),
+    }
+}
+
 /// `apply` reads stdin and writes stdout with no trailing newline --
 /// it's called from a shell script that captures its output as a
 /// command line, so a stray newline would end up inside the command.
@@ -2348,36 +2417,7 @@ fn cmd_hook_rewrite(action: RewriteAction) -> anyhow::Result<()> {
         RewriteAction::Apply => {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
-            let decision = repowise_distill::decide(&input);
-            // Recording skips is what makes `saved --missed` real: it's
-            // the feature auditing its own coverage, the difference
-            // between "the hook is working" and "the hook is installed".
-            // Best-effort -- accounting must never break a command.
-            if let repowise_distill::Decision::Skip(reason) = &decision {
-                if let Ok(cwd) = std::env::current_dir() {
-                    let home = std::env::var_os("HOME").map(PathBuf::from);
-                    let dir = repowise_distill::store::store_dir(&cwd, home.as_deref());
-                    let program = input
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("");
-                    if !program.is_empty() {
-                        repowise_distill::ledger::record_skipped(&dir, program, reason.label());
-                    }
-                }
-            }
-            let out = match decision {
-                repowise_distill::Decision::Rewrite { .. } => {
-                    repowise_distill::rewrite::rewrite(&input)
-                }
-                // Every skip path returns the input verbatim. This is
-                // the fail-open contract: the hook must be incapable of
-                // changing a command it doesn't understand.
-                repowise_distill::Decision::Skip(_) => input.trim().to_string(),
-            };
+            let out = distill_apply(&input);
             let mut stdout = std::io::stdout();
             write!(stdout, "{out}")?;
             stdout.flush()?;
@@ -2385,6 +2425,121 @@ fn cmd_hook_rewrite(action: RewriteAction) -> anyhow::Result<()> {
         }
     };
     println!("{message}");
+    Ok(())
+}
+
+/// `SessionStart`'s pure logic, split from `cmd_claude_hook` so it's
+/// callable directly in tests without stdin/stdout plumbing: `None`
+/// means "say nothing" (an unreadable root, or a directory this port
+/// can't index at all -- SessionStart must never turn a non-repowise
+/// project into a broken session).
+///
+/// Bootstraps the index via `repowise_parser::build_index` (the same
+/// one implementation `init`/`update`/the background reindex job all
+/// share) when none exists yet; otherwise reports freshness via the
+/// same mtime-diffing `collect_status` already does for `repowise
+/// status`, without auto-updating a stale one -- see
+/// `ClaudeHookAction::SessionStart`'s own doc comment for why.
+fn claude_hook_session_start(root: &Path) -> Option<serde_json::Value> {
+    let additional_context = match RepoIndex::load(root) {
+        Err(_) => repowise_parser::build_index(root).ok().and_then(|index| {
+            let file_count = index.files.len();
+            index.save(root).ok().map(|_| {
+                format!(
+                    "repowise: indexed {file_count} file(s) for the first time. MCP tools \
+                     (search_codebase, get_context, get_risk, ...) are now available."
+                )
+            })
+        }),
+        Ok(_) => collect_status(root).indexed.map(|indexed| {
+            if indexed.stale.is_empty() && indexed.missing.is_empty() {
+                format!(
+                    "repowise: index is up to date ({} file(s)).",
+                    indexed.file_count
+                )
+            } else {
+                format!(
+                    "repowise: index is stale ({} file(s) changed, {} removed since the \
+                     last `repowise update`). MCP tool results may lag the working tree \
+                     until you run `repowise update`.",
+                    indexed.stale.len(),
+                    indexed.missing.len(),
+                )
+            }
+        }),
+    };
+
+    additional_context.map(|additional_context| {
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": additional_context,
+            }
+        })
+    })
+}
+
+/// `PreToolUse`'s pure logic, split out for the same reason
+/// `claude_hook_session_start` is. `None` on any shape this hook
+/// doesn't recognize (unparseable JSON, a tool other than `Bash`, a
+/// command Distill leaves unchanged) -- fail-open in the same sense
+/// `distill_apply` already is: nothing to say means nothing is printed,
+/// never an error.
+fn claude_hook_pre_tool_use(input: &str) -> Option<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_str(input).ok()?;
+    if parsed.get("tool_name").and_then(|v| v.as_str()) != Some("Bash") {
+        return None;
+    }
+    let command = parsed
+        .pointer("/tool_input/command")
+        .and_then(|v| v.as_str())?;
+
+    let rewritten = distill_apply(command);
+    if rewritten == command {
+        // Nothing to say: emitting an "unchanged" updatedInput would be
+        // noise, and there's no decision to report on a command this
+        // hook isn't touching.
+        return None;
+    }
+
+    Some(serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": { "command": rewritten },
+        }
+    }))
+}
+
+/// See `ClaudeHookAction`'s own doc comments for what each event does.
+/// Both are fail-open by construction (see
+/// `claude_hook_session_start`/`claude_hook_pre_tool_use`): a hook that
+/// can break session start or block a tool call would be worse than one
+/// that occasionally says nothing.
+fn cmd_claude_hook(action: ClaudeHookAction) -> anyhow::Result<()> {
+    use std::io::Read;
+
+    // Claude Code always sends a JSON payload on stdin for both events;
+    // `SessionStart` doesn't need any of its fields (it reads the
+    // *current* index/tree state directly), but draining it either way
+    // avoids ever leaving a parent process's pipe write blocked on an
+    // unread payload.
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+
+    let output = match action {
+        ClaudeHookAction::SessionStart => {
+            let Ok(root) = std::env::current_dir() else {
+                return Ok(());
+            };
+            claude_hook_session_start(&root)
+        }
+        ClaudeHookAction::PreToolUse => claude_hook_pre_tool_use(&input),
+    };
+
+    if let Some(output) = output {
+        println!("{output}");
+    }
     Ok(())
 }
 
@@ -4716,6 +4871,146 @@ mod tests {
         assert!(
             out.contains("get_symbol"),
             "an MCP-only ledger must still report its estimate:\n{out}"
+        );
+    }
+
+    /// Build a throwaway directory for `claude_hook_session_start`
+    /// tests -- this crate's own convention (see `hook::tests::
+    /// fake_repo`) rather than adding a `tempfile` dev-dependency.
+    fn fake_project(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("repowise-claude-hook-test-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn claude_hook_session_start_bootstraps_an_index_on_first_run() {
+        let root = fake_project("bootstrap");
+        std::fs::write(root.join("lib.rs"), "pub fn helper() {}\n").unwrap();
+
+        assert!(RepoIndex::load(&root).is_err(), "no index should exist yet");
+        let output =
+            claude_hook_session_start(&root).expect("a first run always has something to say");
+        let text = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.contains("indexed 1 file(s) for the first time"),
+            "{text}"
+        );
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert!(
+            RepoIndex::load(&root).is_ok(),
+            "the bootstrap must actually persist the index"
+        );
+    }
+
+    #[test]
+    fn claude_hook_session_start_reports_an_up_to_date_index() {
+        let root = fake_project("up-to-date");
+        std::fs::write(root.join("lib.rs"), "pub fn helper() {}\n").unwrap();
+        // Second call, after the first already bootstrapped it.
+        claude_hook_session_start(&root);
+
+        let output =
+            claude_hook_session_start(&root).expect("an existing index still has status to report");
+        let text = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("up to date"), "{text}");
+    }
+
+    #[test]
+    fn claude_hook_session_start_reports_a_stale_index() {
+        let root = fake_project("stale");
+        let file = root.join("lib.rs");
+        std::fs::write(&file, "pub fn helper() {}\n").unwrap();
+        claude_hook_session_start(&root);
+
+        // A real, later write gives the file a strictly newer mtime than
+        // the index its own `save` just stamped -- the same mechanism
+        // `collect_status`/`repowise status` staleness detection relies
+        // on, not a special case for this test.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&file, "pub fn helper() {}\npub fn other() {}\n").unwrap();
+
+        let output =
+            claude_hook_session_start(&root).expect("a stale index still has status to report");
+        let text = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("stale"), "{text}");
+        assert!(text.contains("repowise update"), "{text}");
+    }
+
+    /// A root with nothing indexable at all still gets a bootstrap
+    /// message -- `build_index` succeeds with zero files, which is a
+    /// legitimate (if unusual) first run, not a reason to say nothing.
+    #[test]
+    fn claude_hook_session_start_bootstraps_even_an_empty_directory() {
+        let root = fake_project("empty");
+
+        let output = claude_hook_session_start(&root).expect("even an empty repo bootstraps");
+        let text = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("indexed 0 file(s)"), "{text}");
+    }
+
+    #[test]
+    fn claude_hook_pre_tool_use_rewrites_a_recognized_command() {
+        let input = serde_json::json!({
+            "session_id": "abc",
+            "tool_name": "Bash",
+            "tool_input": { "command": "cargo test" },
+        })
+        .to_string();
+
+        let output = claude_hook_pre_tool_use(&input).expect("cargo test is rewritable");
+        assert_eq!(
+            output["hookSpecificOutput"]["updatedInput"]["command"],
+            "repowise distill cargo test"
+        );
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    }
+
+    #[test]
+    fn claude_hook_pre_tool_use_says_nothing_for_an_unrecognized_command() {
+        let input = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "echo hi" },
+        })
+        .to_string();
+
+        assert!(
+            claude_hook_pre_tool_use(&input).is_none(),
+            "an unrewritten command has nothing to report"
+        );
+    }
+
+    #[test]
+    fn claude_hook_pre_tool_use_ignores_non_bash_tools() {
+        let input = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": "/etc/hosts" },
+        })
+        .to_string();
+
+        assert!(claude_hook_pre_tool_use(&input).is_none());
+    }
+
+    #[test]
+    fn claude_hook_pre_tool_use_fails_open_on_malformed_input() {
+        assert!(claude_hook_pre_tool_use("not json").is_none());
+        assert!(claude_hook_pre_tool_use("{}").is_none());
+        assert!(
+            claude_hook_pre_tool_use(r#"{"tool_name": "Bash"}"#).is_none(),
+            "missing tool_input.command"
         );
     }
 }

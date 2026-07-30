@@ -1,0 +1,14 @@
+{
+  "name": "repowise",
+  "displayName": "repowise",
+  "version": "0.1.0",
+  "description": "Codebase intelligence for this repo: an MCP server (search, per-file risk/health, dependency graph, mined architectural decisions), a SessionStart hook that keeps the index fresh, and a safety-vetted Bash command-rewrite hook.",
+  "author": {
+    "name": "baileyrd",
+    "url": "https://github.com/baileyrd"
+  },
+  "homepage": "https://github.com/baileyrd/rusty_repo_wise",
+  "repository": "https://github.com/baileyrd/rusty_repo_wise",
+  "license": "MIT",
+  "keywords": ["codebase-intelligence", "mcp", "code-search", "code-health", "architecture-decisions"]
+}

@@ -350,6 +350,7 @@ repowise coverage status [PATH]    # per-file coverage summary + per-test map st
 repowise impacted-tests [REVSPEC] [PATH]  # tests a change provably exercises (needs coverage + per-test map)
 repowise doctor [PATH]             # setup diagnostics: git, history depth, index, optional env vars
 repowise hook install|uninstall|status [PATH]  # post-commit hook that refreshes the index after each commit
+repowise claude-hook session-start|pre-tool-use  # Claude Code plugin hook adapters -- not meant to be run by hand, see claude-plugin/
 repowise status [PATH]             # index freshness: stale/missing files, wiki + dashboard state
                                     #   --verbose to list the individual stale/missing files
 repowise dead-code [PATH]          # confidence-tiered dead-code candidates
@@ -2655,6 +2656,72 @@ Three deliberate choices here:
 `repowise init`/`update` stamp the index with the commit they built it
 from; an index written before this existed loads fine and simply reports
 its commit as unknown until the next re-index.
+
+## Claude Code plugin
+
+Issue #333's first slice: upstream repowise ships `plugins/claude-code`
+and `plugins/codex`, plus documented `opencode` support (a `SessionStart`
+hook, a `PostToolUse` enrichment hook, an opt-in Distill `PreToolUse`
+hook, and AGENTS.md generation) — this port had nothing packaged as an
+actual plugin wired into a coding agent's own hook lifecycle, only the
+CLI pieces those hooks would call (`generate-claude-md`, `hook rewrite`).
+
+`claude-plugin/` at this repo's root is a real, installable Claude Code
+plugin (`claude --plugin-dir ./claude-plugin`, or see
+`claude-plugin/README.md` for a persistent skills-directory install).
+**Claude Code only, for now** — the issue's own first open question
+("worth a single first target before generalizing to Codex/opencode?")
+is answered yes, since this port's own development already runs inside
+Claude Code. **Ships in this repo, not a separate plugin repo** — the
+issue's second open question — so the plugin's manifest, hooks, and
+skill content stay versioned in lockstep with the CLI/MCP capabilities
+they wrap, rather than two repos needing to agree on a JSON output shape
+across releases.
+
+- **MCP server** (`.mcp.json`): starts `repowise serve ${CLAUDE_PROJECT_DIR}`
+  automatically, exposing every existing `repowise-mcp` tool. No new
+  tools — this is packaging, not new capability.
+- **`SessionStart` hook** (`repowise claude-hook session-start`):
+  bootstraps `.repowise/index.json` via `repowise_parser::build_index`
+  (the same one implementation `init`/`update`/the background reindex
+  job all share) if none exists yet; otherwise reports freshness via the
+  same mtime-diffing `collect_status` already computes for `repowise
+  status`, **without** auto-updating a stale one — the same "report,
+  don't silently refresh behind the caller's back" stance the MCP
+  server's own `_meta.stale_warning` already takes. This answers the
+  issue's third open question (which hook events have cheap-enough data
+  for a synchronous hook) for `SessionStart`: `repowise status`'s
+  filesystem-mtime check needs no git history walk, so it's safe to run
+  on every session start.
+- **`PreToolUse` hook** (`repowise claude-hook pre-tool-use`, matched to
+  `Bash` only): the same answer to that third open question, the other
+  direction — routes a command through the exact same fail-open Distill
+  decision logic `repowise hook rewrite apply` already uses (a closed
+  set of recognized program names, no shell-syntax parsing, unconditional
+  pass-through for anything else), wrapped in Claude Code's `PreToolUse`
+  JSON contract (`tool_input.command` in, `hookSpecificOutput.updatedInput`
+  out) instead of a raw stdin/stdout pipe. `distill_apply` is the one
+  function backing both surfaces, so they can't drift apart.
+- **A skill** (`skills/repowise-overview/SKILL.md`): which MCP tool or
+  CLI command answers which kind of question, so the model reaches for
+  `search_codebase` over `Grep`, `get_context` before editing, `get_risk`
+  before touching a hotspot, and the CLI escape hatches (`decisions`,
+  `coverage`, `doctor`) that have no MCP-tool equivalent yet.
+
+**Deliberately not included in this first slice**, both left as
+documented future work rather than shipped slow or half-right:
+
+- **`PostToolUse` enrichment.** Upstream's own `PostToolUse` hook shows
+  contextual info (related decisions, health) after
+  Grep/Glob/Read/Edit/Write/Bash calls. `repowise decisions` — the data
+  source for "related decisions" — walks full git history and isn't
+  cheap enough to run synchronously after every tool call without new
+  caching/plumbing this slice doesn't add.
+- **Multi-repo workspace scoping.** The bundled MCP server config
+  doesn't pass `--workspace`, so `list_repos`/`get_architecture`/
+  `get_blast_radius`/`search_codebase`'s `repo` parameter aren't
+  reachable through this plugin's default config yet.
+- **Codex/opencode.** See the first open question above.
 
 ## Dashboard
 

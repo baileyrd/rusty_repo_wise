@@ -201,8 +201,12 @@ build-stage extraction" below. Six more — Elixir, Clojure, Haskell,
 Lean 4, Erlang, and F# (issue #69's "Lightweight tier") — sit a level
 above the Structural tier: a real, regex-only file-level import graph,
 still no symbols/calls/complexity — see "Lightweight-tier languages"
-below. Every other repowise language, and every other config/data
-format in its lower-depth tier, is unimplemented. The health scorer now
+below. SQL/dbt (issue #317, its own tier in repowise) gets the same
+"recognized, git-history only" `FileRecord` treatment plus a parallel
+`SqlObject`/`LineageEdge` model read by a separate `repowise sql`
+command — see "SQL/dbt support" below. Every other repowise language,
+and every other config/data format in its lower-depth tier, is
+unimplemented. The health scorer now
 implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
@@ -1633,6 +1637,58 @@ resolvers is a bigger, separately-decidable commitment than "extract
 what a file imports," so every import here reports as unresolved in
 `repowise overview`'s stats — the same choice already made for Swift's
 and Dart's own package imports.
+
+## SQL/dbt support
+
+`.sql` files (issue #317, the buildable follow-up to #67's design
+decision) get the same "recognized, git-history only" `FileRecord`
+treatment as the Structural tier — no symbols, since a SQL table/view
+isn't a function or class. Their real content is a parallel model, read
+by a separate `repowise sql` command, not folded into the graph.
+
+```
+$ repowise sql
+5 SQL object(s), 3 lineage edge(s) found under .
+  models/orders.sql
+    [view] orders  lines 1-3
+      ref: stg_orders -> models/stg_orders.sql (line 2)
+      ref: customers -> unresolved (line 3)
+  schema.sql
+    [table] raw_orders  lines 1-4  columns: id, customer_id, total
+```
+
+**Two kinds of `.sql` file, told apart by whether they contain `{{`.**
+A plain SQL file (migrations, schema scripts) is parsed with
+[`sqlparser`](https://crates.io/crates/sqlparser) into real `SqlObject`s
+— one per `CREATE TABLE`/`VIEW`/`FUNCTION`/`PROCEDURE` statement, with
+column names read off a table's column list. A dbt model file contains
+Jinja templating (`{{ ref(...) }}`, `{{ config(...) }}`, `{% if %}`)
+that `sqlparser` can't parse — rather than write a Jinja-stripping
+preprocessor, a file containing `{{` is treated as one dbt model: the
+whole file *is* the object, named after its own file stem (per dbt's
+own convention) and given kind `View` (dbt's default materialization;
+this port doesn't parse `{{ config(materialized=...) }}` to know
+better). A malformed non-Jinja file degrades to zero objects rather than
+failing the whole walk, the same graceful-degradation call the
+Structural tier already makes.
+
+**dbt lineage gets its own edge type, not `ImportRef`/`CallRef`.**
+Those mean "this file's code invokes that file's code" and feed
+hotspot/health/coupling scoring on that assumption; `ref()`/`source()`
+is data lineage — a different semantic that would quietly corrupt those
+signals if merged in. `{{ ref('model') }}` calls are matched by regex
+(only the common single-argument form — cross-package `ref('pkg',
+'model')` is out of scope) and resolved against every other `SqlObject`
+this port discovers, by name. `{{ source('src', 'table') }}` calls
+point at a raw external table declared in a `.yml` config, not a
+`.sql` file, so they always report unresolved — the same "no index
+needed" bucket already used for Swift's/Dart's package imports.
+
+**Deliberately narrow, matching #317's own scope.** No column-level
+lineage, no wiki pages, no graph integration, and no full dbt-project
+semantics beyond `ref()`/`source()` (materializations, tests, exposures
+aren't modeled) — table/view-level lineage and object cataloging only,
+matching sqlglot's typical usage in the original tool.
 
 ## Git analytics
 

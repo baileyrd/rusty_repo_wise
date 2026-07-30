@@ -191,6 +191,7 @@ impl RepoGraph {
                 | Language::Nim
                 | Language::D
                 | Language::Dockerfile
+                | Language::Sql
                 | Language::Elixir
                 | Language::Clojure
                 | Language::Haskell
@@ -233,6 +234,7 @@ impl RepoGraph {
                 | Language::Nim
                 | Language::D
                 | Language::Dockerfile
+                | Language::Sql
                 | Language::Elixir
                 | Language::Clojure
                 | Language::Haskell

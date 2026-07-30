@@ -330,6 +330,15 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List SQL/dbt objects (tables/views/functions/procedures, plus
+    /// dbt models -- a whole `{{ ... }}`-templated `.sql` file, treated
+    /// as one model named after its file stem) and dbt `ref()`/
+    /// `source()` lineage edges (issue #317, the buildable follow-up to
+    /// #67's design decision). No wiki pages or graph integration yet.
+    Sql {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -668,6 +677,7 @@ fn main() -> anyhow::Result<()> {
             path,
         } => cmd_decide(&path, title, rationale),
         Command::DockerStages { path } => cmd_docker_stages(&path),
+        Command::Sql { path } => cmd_sql(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2641,6 +2651,62 @@ fn cmd_docker_stages(path: &Path) -> anyhow::Result<()> {
                     .unwrap_or_else(|| format!("stage {}", target.index));
                 println!("      copies from: {target_label} (line {})", edge.line);
             }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_sql(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let (objects, edges) = repowise_sql::collect_sql(&root)?;
+
+    if objects.is_empty() {
+        println!("No SQL objects found under {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} SQL object(s), {} lineage edge(s) found under {}",
+        objects.len(),
+        edges.len(),
+        root.display()
+    );
+
+    let mut by_file: std::collections::BTreeMap<&Path, Vec<&repowise_core::sql::SqlObject>> =
+        std::collections::BTreeMap::new();
+    for object in &objects {
+        by_file.entry(&object.file).or_default().push(object);
+    }
+
+    for (file, file_objects) in by_file {
+        println!("  {}", display_path(file, &root));
+        for object in &file_objects {
+            let columns = if object.columns.is_empty() {
+                String::new()
+            } else {
+                format!("  columns: {}", object.columns.join(", "))
+            };
+            println!(
+                "    [{}] {}  lines {}-{}{columns}",
+                object.kind.label(),
+                object.name,
+                object.start_line,
+                object.end_line
+            );
+        }
+        for edge in edges.iter().filter(|e| e.from == *file) {
+            let target = match &edge.resolved_file {
+                Some(f) => display_path(f, &root),
+                None => "unresolved".to_string(),
+            };
+            let keyword = match edge.kind {
+                repowise_core::sql::LineageKind::Ref => "ref",
+                repowise_core::sql::LineageKind::Source => "source",
+            };
+            println!(
+                "      {keyword}: {} -> {target} (line {})",
+                edge.name, edge.line
+            );
         }
     }
     Ok(())

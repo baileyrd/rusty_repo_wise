@@ -6,6 +6,7 @@
 pub mod coverage;
 pub mod docker;
 pub mod org_signals;
+pub mod sql;
 mod walk;
 
 pub use walk::{discover_files, DiscoveredFile};
@@ -77,6 +78,16 @@ pub enum Language {
     Lean,
     Erlang,
     FSharp,
+    /// SQL, including dbt models (issue #317, the buildable follow-up to
+    /// #67's design decision): recognized here and given the same
+    /// "Structural tier" bare zero-symbol `FileRecord` treatment as
+    /// Dockerfile above, so `.sql` files are visible in
+    /// `repowise overview`'s per-language counts and git-history views.
+    /// Its actual content -- tables/views/functions/procedures, dbt
+    /// `ref()`/`source()` lineage -- is a parallel model
+    /// ([`sql::SqlObject`]/[`sql::LineageEdge`]) computed separately by
+    /// `repowise_sql::collect_sql`, not part of `FileRecord` at all.
+    Sql,
     Other,
 }
 
@@ -126,6 +137,7 @@ impl Language {
             "lean" => Language::Lean,
             "erl" | "hrl" => Language::Erlang,
             "fs" | "fsi" | "fsx" => Language::FSharp,
+            "sql" => Language::Sql,
             _ => Language::Other,
         }
     }
@@ -164,6 +176,7 @@ impl Language {
             Language::Lean => "Lean 4",
             Language::Erlang => "Erlang",
             Language::FSharp => "F#",
+            Language::Sql => "SQL",
             Language::Other => "Other",
         }
     }
@@ -285,7 +298,7 @@ pub struct Symbol {
     /// symbol, where acquiring the lock once outside the loop is usually
     /// possible instead of repeated lock/unlock churn per iteration.
     /// Empty for symbols with no body, and for languages this extraction
-    /// isn't implemented for yet -- currently Rust, Python, and
+    /// isn't implemented for yet -- currently Rust and Python, and
     /// TypeScript/JavaScript, matching `io_in_loop`'s scope.
     pub lock_in_loop: Vec<LockInLoopRef>,
     /// Calls recognized as inserting at index 0 of a list/vector

@@ -377,6 +377,7 @@ repowise generate [PATH]            # add an LLM-written summary to each wiki pa
 repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
                                      #   --addr <ADDR> (default 127.0.0.1:8080), --static-dir <DIR> (repowise-web's `trunk build` output)
                                      #   --workspace <FILE> to opt into the Workspace/Workspace Co-Changes/System Map/Conformance/Contracts sections
+                                     #   POST /api/webhook/github, POST /api/webhook/gitlab -- webhook-triggered reindex, needs REPOWISE_WEBHOOK_SECRET (see "Auto-sync" below)
 repowise workspace-repos --workspace <FILE>  # list every repo in a workspace TOML file + indexed status
 repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own most-coupled file pairs
                                      #   --top <N> (default 10) how many pairs to list per repo
@@ -1420,17 +1421,16 @@ make `hotspots`/`coupled` fail, it makes them *quietly under-report*, which is
 far harder to notice. That check is skipped entirely outside a git repo rather
 than reporting a misleading "full history".
 
-## Auto-sync (post-commit hook)
-
-`repowise hook install` writes a `post-commit` hook into `.git/hooks` that
-refreshes the index after each commit; `uninstall` removes it and `status`
-reports which of three states you're in.
+## Auto-sync
 
 The reference repowise drives auto-sync five ways (post-commit hook, file
-watcher, GitHub webhook, GitLab webhook, polling). Only the hook is
-implemented here, deliberately: it's the one mechanism needing **no new
-dependency, no daemon, and no server**. `repowise watch` would require a
-filesystem-notification crate and is not implemented.
+watcher, GitHub webhook, GitLab webhook, polling). This port now implements
+three of the five: the post-commit hook, file-watching, and — as of issue
+#335 — both webhooks.
+
+**Post-commit hook.** `repowise hook install` writes a `post-commit` hook
+into `.git/hooks` that refreshes the index after each commit; `uninstall`
+removes it and `status` reports which of three states you're in.
 
 **The hook runs `repowise update` detached and silenced.** Git waits for
 `post-commit` to exit, so a slow re-index would stall every commit — which
@@ -1446,6 +1446,40 @@ own hook is idempotent.
 A worktree or submodule (where `.git` is a *file*, not a directory) is
 reported as a clear error rather than silently creating a `.git/hooks`
 directory that git will never consult.
+
+**File watching.** `repowise watch [PATH] [--debounce MS]` re-indexes after
+each quiet period following a filesystem change, running until `Ctrl+C`.
+Needs no server, but does need a process staying alive for the life of the
+watch, unlike the post-commit hook.
+
+**Webhooks (issue #335).** `repowise serve-dashboard` gains `POST
+/api/webhook/github` and `POST /api/webhook/gitlab`, both triggering the
+exact same background-reindex job `POST /api/reindex` already exposes (one
+job-triggering code path, not three that could drift). Previously out of
+scope because there was no server to receive a webhook; `repowise-server`
+closed that gap for a different reason (issue #59/#65's live-dashboard
+pivot) and these endpoints just reuse it.
+
+Gated behind `REPOWISE_WEBHOOK_SECRET`: unset, both endpoints report `503`
+rather than silently accepting unauthenticated requests — a webhook endpoint
+with no verification is an open invitation to force a reindex from anyone
+who can reach the port. GitHub's `X-Hub-Signature-256` (HMAC-SHA256 over the
+raw request body) and GitLab's `X-Gitlab-Token` (a plain shared secret) are
+different auth shapes by design on their end, so this port verifies each the
+way its own forge expects rather than forcing one scheme onto both — see
+`repowise-server`'s `verify_github_signature`/`verify_gitlab_token`, both
+constant-time comparisons (a non-constant-time secret check is exactly the
+kind of subtle bug a webhook secret shouldn't be exposed to). Any event
+triggers a reindex; there's no per-event-type filtering, since a push, a
+merge, and a branch update all mean "the tree may have changed" and a
+reindex is cheap enough not to need finer-grained triggering.
+
+**Polling is still not implemented, and is likely to stay that way.** A
+workspace with no forge to send it webhooks in the first place already has
+`repowise watch` or the post-commit hook, and this port has no persisted
+"when did I last check" state a poller would need — unlike the other four
+mechanisms, polling would be new state, not new use of state this port
+already tracks.
 
 ## Index status
 

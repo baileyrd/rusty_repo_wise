@@ -6,6 +6,44 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #345 — Webhook-triggered auto-sync (GitHub/GitLab)
+**2026-07-30** · partially closes [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335)
+
+- Third of `ParityGaps.md`'s open gaps worked, highest-priority-first: upstream
+  repowise drives auto-sync five ways (post-commit hook, file watcher, GitHub
+  webhook, GitLab webhook, polling); this port had the first two, both
+  CLI-only. The other two needed a running server to receive them, which
+  `repowise-server` didn't exist yet to provide when auto-sync was first
+  built. It does now (issue #59/#65's live-dashboard pivot).
+- **`POST /api/webhook/github`** (`X-Hub-Signature-256`, HMAC-SHA256 over
+  the raw body) and **`POST /api/webhook/gitlab`** (`X-Gitlab-Token`, a
+  plain shared secret) both trigger the exact same background-reindex job
+  `POST /api/reindex` already exposes, via a new shared `trigger_reindex`
+  helper so all three endpoints can't drift out of sync with each other.
+- Gated behind a new `REPOWISE_WEBHOOK_SECRET` env var: unset, both
+  endpoints report `503` rather than silently accepting unauthenticated
+  requests (a webhook receiver with no verification is an open invitation to
+  force a reindex from anyone who can reach the port). An invalid
+  signature/token reports `401`.
+- Verification is genuinely constant-time, not just HMAC'd: GitHub's tag
+  check uses `ring::hmac::verify`; GitLab's plain-token check needed its own
+  small constant-time comparison since `ring::constant_time::verify_slices_are_equal`
+  is explicitly deprecated for this kind of external use as of the `ring`
+  version already in this workspace's dependency tree.
+- `repowise doctor` gains a `REPOWISE_WEBHOOK_SECRET` check (warn, not
+  fail, same convention as `REPOWISE_GITHUB_TOKEN`/`REPOWISE_LLM_BASE_URL`).
+- Deliberately **not** implemented: polling. A workspace with no forge to
+  send it webhooks in the first place already has `repowise watch` or the
+  post-commit hook, and this port has no persisted "when did I last check"
+  state a poller would need — unlike the other four mechanisms, polling
+  would be new state, not new use of state this port already tracks. Issue
+  #335 stays open, narrowed to that one remaining question.
+- `repowise-server` gains its first `ring` dependency (already fully
+  resolved in `Cargo.lock`, pulled in transitively via `rustls`, so this
+  added no new crate version to the dependency tree).
+
+---
+
 ## PR #344 — Contract breaking-change detection
 **2026-07-30** · closes [#339](https://github.com/baileyrd/rusty_repo_wise/issues/339)
 

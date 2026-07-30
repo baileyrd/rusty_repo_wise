@@ -2379,8 +2379,8 @@ below):
 
 - **`get_overview`** — the same data as `repowise overview`: file/language/
   symbol counts, edge counts, most-depended-on files.
-- **`search_codebase(query, mode?, kind?, symbol_kind?, limit?)`** — the
-  same search as `repowise search`, with the same modes and filters.
+- **`search_codebase(query, mode?, kind?, symbol_kind?, limit?, repo?)`** —
+  the same search as `repowise search`, with the same modes and filters.
   - `mode`: `symbol` (default, the historical behavior), `path`,
     `hybrid`, or `semantic`. **Path search was previously impossible to
     express** — only symbol names were searchable, so "which file is the
@@ -2390,6 +2390,23 @@ below):
     in `unknown` as its own bucket rather than defaulting into
     `implementation` and being wrongly included or excluded.
   - `symbol_kind`: restrict symbol hits to one kind.
+  - `repo` (issue #337's first federated-query slice): omit to search this
+    server's own indexed root only, the unchanged default; name a specific
+    workspace repo (as configured via `--workspace`) to search just that
+    repo instead; or pass `"all"` to federate the same search across
+    *every* configured workspace repo in one call — each match then
+    carries which `repo` it came from (omitted entirely on an unscoped
+    search, so existing callers see no shape change). Requires
+    `--workspace` for any value other than omitted; errors on an unknown
+    repo name rather than silently returning nothing. `semantic` mode
+    doesn't support `repo` yet — its embedding index is tied to this
+    server's own indexed root, and federating that is real added
+    complexity left for a later slice; the substring modes (`symbol`,
+    `path`, `hybrid`) are where federation lives today. Per-call,
+    load-on-demand repo resolution, not a persistent multi-repo-resident
+    server — the query volume this tool actually sees doesn't justify
+    holding every workspace repo's index in memory at once, and every
+    other MCP tool already re-loads its index fresh per call the same way.
   - The response echoes back the `filters` it applied, so an empty result
     is readable — "nothing matches" and "your filters excluded
     everything" are otherwise indistinguishable.
@@ -3185,7 +3202,10 @@ route-shaped string that isn't actually a route) are both expected.
   section**.
 - This closes out all five items #64 originally bundled. There's still
   no way to switch which repo the rest of the dashboard/MCP server
-  operates on — `root` stays fixed for the life of the process.
+  operates on — `root` stays fixed for the life of the process (issue
+  #337's `search_codebase` `repo` parameter, below, is the first crack in
+  that: one tool can now be pointed at another workspace repo per call,
+  though the dashboard and every other MCP tool still can't).
 
 Issue #338, filed after #64 as a follow-on parity gap (this port's
 cross-repo resolution covered only Rust, where upstream repowise
@@ -3208,6 +3228,25 @@ in this port to write workspace-level state to disk
 (`.repowise-workspace/`, via the new `workspace_state_dir` helper),
 rather than everything workspace-related being recomputed fresh from
 each member repo's own `.repowise/index.json` on every call.
+
+Issue #337 is the one piece of #64 left open by its own closing note
+above: no surface could switch which repo it operated on. `MCP
+Tools`/`search_codebase`'s new `repo` parameter is the first slice of an
+answer, deliberately narrow — the MCP server (agent-facing) rather than
+the dashboard, since that's the surface upstream repowise's own
+`repo="all"` feature specifically targets, and one tool (the most
+naturally federatable: a query string in, matches out, easy to tag each
+match with which repo it came from) rather than all eleven root-scoped
+tools at once. Per-call, load-on-demand repo resolution — `RepoIndex::
+load`+`RepoGraph::build` fresh for each named/federated target, no
+persistent multi-repo-resident state — answers this issue's other open
+question: this port has no telemetry suggesting the query volume
+justifies holding N repos' indexes in memory at once, and every other
+MCP tool already re-loads its own index fresh per call the same way, so
+federated search just does the same thing N times rather than
+introducing a different caching model. Extending the same `repo`
+parameter to `get_symbol`/other root-scoped tools, and to the dashboard,
+are both natural follow-ups this slice doesn't take on.
 
 ## Testing
 

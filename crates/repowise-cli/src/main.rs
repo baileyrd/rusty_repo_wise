@@ -547,9 +547,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Producer/consumer API contract matches across the workspace, plus
+    /// any that used to match and stopped -- see the persisted
+    /// `.repowise-workspace/contracts.json` snapshot this command reads
+    /// and updates every run.
     WorkspaceContracts {
         #[arg(long)]
         workspace: PathBuf,
+        /// Emit matches, unmatched consumers, and broken contracts as
+        /// JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -753,7 +761,9 @@ fn main() -> anyhow::Result<()> {
             json,
             allow_unverified,
         } => cmd_workspace_conformance(&workspace, json, allow_unverified),
-        Command::WorkspaceContracts { workspace } => cmd_workspace_contracts(&workspace),
+        Command::WorkspaceContracts { workspace, json } => {
+            cmd_workspace_contracts(&workspace, json)
+        }
     }
 }
 
@@ -3627,14 +3637,84 @@ fn cmd_workspace_diagnostics(workspace: &Path, json: bool) -> anyhow::Result<()>
     Ok(())
 }
 
+/// The report as JSON, hand-built for the same reason
+/// `diagnostics_json` is: `repowise-workspace`'s in-memory types aren't
+/// the CLI's output contract.
+fn contract_changes_json(
+    report: &repowise_workspace::ContractsReport,
+    broken: &[repowise_workspace::BrokenContract],
+) -> serde_json::Value {
+    serde_json::json!({
+        "matches": report.matches.iter().map(|m| serde_json::json!({
+            "path": m.path,
+            "producer_repo": m.producer_repo,
+            "producer_file": m.producer_file.display().to_string(),
+            "consumer_repo": m.consumer_repo,
+            "consumer_file": m.consumer_file.display().to_string(),
+        })).collect::<Vec<_>>(),
+        "unmatched_consumers": report.unmatched_consumers.iter().map(|c| serde_json::json!({
+            "path": c.path,
+            "repo": c.repo,
+            "file": c.file.display().to_string(),
+        })).collect::<Vec<_>>(),
+        "broken": broken.iter().map(|b| serde_json::json!({
+            "path": b.key.path,
+            "consumer_repo": b.key.consumer_repo,
+            "consumer_file": b.key.consumer_file.display().to_string(),
+            "previous_producer_repo": b.key.producer_repo,
+            "reason": b.reason.map(|r| r.label()),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// See `repowise-workspace`'s own docs for the workspace TOML format.
-fn cmd_workspace_contracts(workspace: &Path) -> anyhow::Result<()> {
+///
+/// Persists a snapshot of this run's matches to
+/// `.repowise-workspace/contracts.json` (sibling to `workspace`, via
+/// `repowise_workspace::workspace_state_dir`) and diffs against
+/// whatever the *previous* run left there, so a contract that used to
+/// resolve and stopped is reported as broken rather than silently
+/// dropping out of the match list. Every run overwrites the snapshot
+/// with its own current state, the same "current run becomes the new
+/// baseline" model `repowise update` uses for `.repowise/index.json`.
+fn cmd_workspace_contracts(workspace: &Path, json: bool) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
     if repos.is_empty() {
         println!("No repos configured in {}", workspace.display());
         return Ok(());
     }
-    let report = repowise_workspace::workspace_contracts(&repos);
+    let state_dir = repowise_workspace::workspace_state_dir(workspace);
+    let (report, broken) = repowise_workspace::workspace_contract_changes(&repos, &state_dir);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&contract_changes_json(&report, &broken))?
+        );
+        return Ok(());
+    }
+
+    if !broken.is_empty() {
+        println!(
+            "BROKEN: {} contract(s) that used to resolve no longer do:",
+            broken.len()
+        );
+        for b in &broken {
+            let reason = match b.reason {
+                Some(r) => r.explanation(),
+                None => "the consumer call site itself is gone",
+            };
+            println!(
+                "  {} ({} :: {}) used to resolve to {} -- {}",
+                b.key.path,
+                b.key.consumer_repo,
+                b.key.consumer_file.display(),
+                b.key.producer_repo,
+                reason
+            );
+        }
+        println!();
+    }
 
     if report.matches.is_empty() {
         println!("No cross-repo API contracts matched.");

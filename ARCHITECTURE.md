@@ -91,7 +91,21 @@ cross-repo symbol resolution to delegate to `repowise-graph` at all, so
 it lives directly in `repowise-workspace`. Its `regex = "1"` dependency
 was already fully resolved in `Cargo.lock` (pulled in transitively via
 `tree-sitter`, a `repowise-parser` dependency), so adding it added no
-new crate version to the dependency tree.
+new crate version to the dependency tree. Issue #339's `breaking_changes`
+module sits alongside `contracts` for the same reason (no cross-repo
+resolution to delegate) and adds `repowise-workspace`'s one genuinely
+new dependency, `serde_json` (already present everywhere else in the
+workspace, just not previously needed here — `contracts.rs`'s own doc
+comment on `ContractDiagnostics` explains why that type still doesn't
+derive `Serialize` even now: the CLI/server JSON shapes are their own
+output contracts, deliberately free to diverge from the in-memory
+types). It's also the first thing in this port to persist
+workspace-level state to disk on its own initiative
+(`.repowise-workspace/contracts.json`, via the new
+`workspace_state_dir` helper) rather than only ever reading each member
+repo's already-written `.repowise/index.json` — every other
+`workspace-*` command/endpoint still recomputes everything fresh from
+member indexes on each call.
 
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`

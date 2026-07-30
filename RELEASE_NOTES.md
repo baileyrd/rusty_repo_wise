@@ -6,6 +6,48 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #321 — Lightweight-tier languages: regex-only import graph for six languages
+**2026-07-30** · closes [#69](https://github.com/baileyrd/rusty_repo_wise/issues/69)
+
+- **Six new `Language` variants** — Elixir, Clojure, Haskell, Lean 4, Erlang,
+  F# — get repowise's own "Lightweight" tier: a real, file-level import graph
+  via regex, and nothing else. No symbols, no calls, no complexity — a
+  deliberately shallower extraction pipeline than every other supported
+  language, all of which get full tree-sitter AST extraction.
+- **One regex per language, hand-written, no tree-sitter grammar**: `import`/
+  `alias`/`require`/`use` (Elixir), `import [qualified]` (Haskell), `import`
+  (Lean 4), `open` (F#), and `-import(module, [...])`/
+  `-include("path")`/`-include_lib("path")` (Erlang — flat module atoms, not
+  dotted, the closest thing that language has to a second import form).
+  Clojure is the one exception: its `(:require [...])`/`(:import [...])`
+  forms are s-expressions this crate doesn't attempt to parse, so any
+  bracketed or quoted **dotted** token (2+ segments) is treated as a
+  namespace reference instead, matching the near-universal style-guide
+  convention of one namespace per line.
+- **Every import is deliberately left unresolved** (`resolved_file: None`):
+  each language's module-naming convention diverges from the "dotted segment
+  = directory name" mapping this port already has for Python/Java/Go/etc. in
+  a genuinely different way (Elixir needs CamelCase→snake_case, Clojure needs
+  hyphen→underscore, Erlang references are flat not dotted, F#'s `open`
+  doesn't reliably correspond to a file path at all). Building six
+  language-specific resolvers was a bigger, separately-decidable commitment
+  than "extract what a file imports" — the same choice already made for
+  Swift's/Dart's package imports, reusing that exact `("", &no_modules)`
+  bucket in `repowise-graph` rather than adding new resolution logic.
+  Unresolved imports still show up in `repowise overview`'s
+  `unresolved_imports` count, so the extraction isn't invisible even without
+  resolution.
+- 11 new tests: 9 in `repowise-parser`'s new `lightweight` module (one per
+  language's regex, plus Clojure's bare-quoted-require form and its
+  local-binding false-positive avoidance), 1 `parse_file`-level dispatch test
+  covering all six languages, 1 `build_index` integration test. Local gate
+  (all six CI steps by exit status) passes. Verified live against six real
+  files (one per language, Elixir/Haskell/Clojure/F#/Erlang/Lean) indexed
+  together: `repowise overview` reported exactly 16 unresolved imports,
+  matching a hand-count of every import statement across all six fixtures.
+
+---
+
 ## PR #320 — `repowise docker-stages`: Dockerfile build-stage extraction
 **2026-07-30** · closes [#318](https://github.com/baileyrd/rusty_repo_wise/issues/318) (split from [#68](https://github.com/baileyrd/rusty_repo_wise/issues/68))
 

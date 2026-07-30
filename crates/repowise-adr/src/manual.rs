@@ -101,20 +101,19 @@ pub fn mine_manual_decisions(root: &Path) -> Vec<DecisionRecord> {
     ManualDecisionStore::load(root)
         .decisions
         .into_iter()
-        .map(|d| DecisionRecord {
-            id: d.id,
-            title: d.title,
-            source: DecisionSource::Manual {
-                recorded_at: d.recorded_at,
-            },
-            status: None,
-            superseded_by: None,
-            date: None,
-            body: d.rationale,
-            // Filled in by `mine_reporting`'s text-linking pass -- a
-            // manually typed decision has no inherently known file
-            // location the way a code comment or PR does.
-            linked_files: Vec::new(),
+        .map(|d| {
+            DecisionRecord::new(
+                d.id,
+                d.title,
+                DecisionSource::Manual {
+                    recorded_at: d.recorded_at,
+                },
+                d.rationale,
+            )
+            // linked_files stays empty here -- filled in by
+            // `mine_reporting`'s text-linking pass, since a manually
+            // typed decision has no inherently known file location the
+            // way a code comment or PR does.
         })
         .collect()
 }

@@ -84,22 +84,18 @@ fn parse_changelog(path: &Path, rel: &Path, text: &str) -> Vec<DecisionRecord> {
         }
         let body = body_lines.join("\n");
 
-        records.push(DecisionRecord {
-            id: format!("changelog:{}:{start_line}", rel.display()),
-            title: format!(
+        records.push(DecisionRecord::new(
+            format!("changelog:{}:{start_line}", rel.display()),
+            format!(
                 "{section}: {}",
                 body_lines.first().copied().unwrap_or_default()
             ),
-            source: DecisionSource::Changelog {
+            DecisionSource::Changelog {
                 file: path.to_path_buf(),
                 section: section.to_string(),
             },
-            status: None,
-            superseded_by: None,
-            date: None,
             body,
-            linked_files: Vec::new(),
-        });
+        ));
 
         i = j;
     }

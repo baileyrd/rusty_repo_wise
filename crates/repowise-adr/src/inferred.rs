@@ -186,21 +186,20 @@ pub fn mine_inferred_decisions(root: &Path) -> (Vec<DecisionRecord>, InferredSta
         };
 
         records.push(DecisionRecord {
-            id: format!("inferred:{}:{line}", decision.file),
-            title: decision.title.clone(),
-            source: DecisionSource::Inferred {
-                file: path.clone(),
-                line,
-                model: store.model.clone(),
-            },
-            status: None,
-            superseded_by: None,
-            date: None,
-            body: decision.rationale.clone(),
             // Authoritative, like a code comment's own file: the anchor
             // was found in this file, so there's nothing for text
             // matching to improve and plenty for it to get wrong.
-            linked_files: vec![path],
+            linked_files: vec![path.clone()],
+            ..DecisionRecord::new(
+                format!("inferred:{}:{line}", decision.file),
+                decision.title.clone(),
+                DecisionSource::Inferred {
+                    file: path,
+                    line,
+                    model: store.model.clone(),
+                },
+                decision.rationale.clone(),
+            )
         });
     }
 

@@ -307,6 +307,10 @@ struct DecisionDto {
     status: Option<String>,
     superseded_by: Option<String>,
     linked_file_count: usize,
+    /// How much to trust this decision as recorded intent, in `[0, 1]` --
+    /// derived from the source alone (an ADR file outranks a freeform
+    /// README paragraph).
+    confidence: f64,
     /// Where this came from, e.g. `adr:docs/adr/0001.md` or
     /// `inferred:src/queue.rs:12 by smart`.
     source: String,
@@ -344,6 +348,13 @@ fn source_label(root: &Path, source: &repowise_adr::DecisionSource) -> String {
             format!("marker:{marker}:{}:{line}", relative(root, file))
         }
         S::Changelog { file, section } => format!("changelog:{section}:{}", relative(root, file)),
+        S::ReadmeMining {
+            file,
+            line,
+            heading,
+        } => {
+            format!("readme:{}:{line} ({heading:?})", relative(root, file))
+        }
         S::Inferred { file, line, model } => {
             format!("inferred:{}:{line} by {model}", relative(root, file))
         }
@@ -850,6 +861,7 @@ async fn get_decisions(
             .map(|d| DecisionDto {
                 source: source_label(&state.root, &d.source),
                 inferred: d.source.is_inferred(),
+                confidence: d.confidence,
                 id: d.id,
                 title: d.title,
                 status: d.status,

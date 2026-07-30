@@ -2575,7 +2575,8 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
     if decisions.is_empty() {
         println!(
             "  No decisions found (docs/adr/*.md, decision-like commit messages, merged PR \
-             bodies, code comments, inline markers, and CHANGELOG sections)."
+             bodies, code comments, inline markers, CHANGELOG sections, and README/ \
+             ARCHITECTURE prose)."
         );
         return Ok(());
     }
@@ -2603,6 +2604,13 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
             repowise_adr::DecisionSource::Changelog { file, section } => {
                 format!("{section} (changelog: {})", display_path(file, &index.root))
             }
+            repowise_adr::DecisionSource::ReadmeMining {
+                file,
+                line,
+                heading,
+            } => {
+                format!("\"{heading}\" ({}:{line})", display_path(file, &index.root))
+            }
             repowise_adr::DecisionSource::Inferred { file, line, model } => {
                 format!(
                     "LLM-INFERRED from {}:{line} by model {model} -- not a written decision",
@@ -2619,7 +2627,10 @@ fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
         // source line to learn this one was guessed.
         let marker = if d.source.is_inferred() { "~" } else { " " };
         println!("{marker} {:<10} {:<10} {}", d.id, status, d.title);
-        println!("    source: {source_label}");
+        println!(
+            "    source: {source_label} (confidence: {:.2})",
+            d.confidence
+        );
         if let Some(target) = &d.superseded_by {
             println!("    superseded by: {target}");
         }

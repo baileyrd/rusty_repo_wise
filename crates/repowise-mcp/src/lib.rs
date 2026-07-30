@@ -683,6 +683,10 @@ struct DecisionOutput {
     /// signal — every decision without it came from a written artifact.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     inferred: bool,
+    /// How much to trust this decision as recorded intent, in `[0, 1]` --
+    /// derived from the source alone (an ADR file outranks a freeform
+    /// README paragraph), not from how confidently the text itself reads.
+    confidence: f64,
     /// Raw `Status:` line value (ADR source only).
     status: Option<String>,
     /// Normalized `ADR-XXXX` this decision is superseded by, if any.
@@ -1534,7 +1538,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_why",
-        description = "Architectural decisions mined from docs/adr/*.md, decision-like commit messages, merged PR bodies, code comments, inline WHY:/DECISION: markers, and CHANGELOG sections (via repowise-adr), same data as `repowise decisions --for-file`. Given `targets` (file paths or symbol ids), returns only decisions whose body links to at least one target's file. Given no targets (or an empty list), returns every mined decision. One source is NOT a written artifact: decisions marked `inferred: true` were inferred by a model from code during `repowise generate`, anchored to a verbatim quote that is re-checked against the file on every read. `inferred_source` always reports what that source contributed, so an absent contribution can't be mistaken for a repo with nothing to infer."
+        description = "Architectural decisions mined from docs/adr/*.md, decision-like commit messages, merged PR bodies, code comments, inline WHY:/DECISION: markers, CHANGELOG sections, and decision-flavored README/ARCHITECTURE prose (via repowise-adr), same data as `repowise decisions --for-file`. Given `targets` (file paths or symbol ids), returns only decisions whose body links to at least one target's file. Given no targets (or an empty list), returns every mined decision. Each decision carries a `confidence` in [0, 1], derived from how trustworthy its source is as a record of actual intent (an ADR file or a `repowise decide` record outranks a freeform README paragraph or code comment) -- weigh a low-confidence hit more skeptically. One source is NOT a written artifact: decisions marked `inferred: true` were inferred by a model from code during `repowise generate`, anchored to a verbatim quote that is re-checked against the file on every read. `inferred_source` always reports what that source contributed, so an absent contribution can't be mistaken for a repo with nothing to infer."
     )]
     fn get_why(
         &self,
@@ -1583,6 +1587,16 @@ impl RepowiseServer {
                     repowise_adr::DecisionSource::Changelog { file, section } => {
                         format!("changelog:{section}:{}", display_rel(file, &index.root))
                     }
+                    repowise_adr::DecisionSource::ReadmeMining {
+                        file,
+                        line,
+                        heading,
+                    } => {
+                        format!(
+                            "readme:{}:{line} ({heading:?})",
+                            display_rel(file, &index.root)
+                        )
+                    }
                     repowise_adr::DecisionSource::Inferred { file, line, model } => {
                         format!(
                             "inferred:{}:{line} by {model}",
@@ -1599,6 +1613,7 @@ impl RepowiseServer {
                     title: d.title,
                     source,
                     inferred,
+                    confidence: d.confidence,
                     status: d.status,
                     superseded_by: d.superseded_by,
                     date: d.date,

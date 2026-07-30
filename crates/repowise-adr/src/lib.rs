@@ -1,25 +1,31 @@
 //! Best-effort architectural-decision mining: extracts decisions from
-//! eight sources — `docs/adr/*.md` files, commit messages, merged PR
+//! nine sources — `docs/adr/*.md` files, commit messages, merged PR
 //! bodies, decision-like code comments, explicit inline decision markers
 //! (`WHY:`, `DECISION:`, etc.), keep-a-changelog-style CHANGELOG
-//! sections, decisions a model inferred from code during `repowise
-//! generate`, and decisions the user typed in directly via `repowise
-//! decide` — links each to the indexed files/symbols its body mentions
-//! (or, for PRs, the files the GitHub API reports it actually touched;
-//! or, for code comments/inline markers, the file the comment sits in),
-//! and tracks supersession via an ADR's
+//! sections, decision-flavored prose sections in README.md/
+//! ARCHITECTURE.md, decisions a model inferred from code during
+//! `repowise generate`, and decisions the user typed in directly via
+//! `repowise decide` — links each to the indexed files/symbols its body
+//! mentions (or, for PRs, the files the GitHub API reports it actually
+//! touched; or, for code comments/inline markers, the file the comment
+//! sits in), and tracks supersession via an ADR's
 //! `Status: ... Superseded by ADR-XXXX` line.
 //!
 //! All 8 of the original repowise's decision sources are now implemented
 //! here (see #315/#66 for the `cli` source's history: split off from a
 //! bundled issue whose other half, transcript-mining a coding agent's
 //! `session`, stays not planned — this port has no such transcript
-//! format to mine). The PR-body source is the one place this crate makes
-//! a network call at all, and only when a `REPOWISE_GITHUB_TOKEN` env var
-//! is set — see the `pull_requests` module doc comment for why that's an
-//! explicit opt-in rather than an unauthenticated fallback.
+//! format to mine), plus a 9th ([`readme_docs`], issue #71) that isn't in
+//! the original eight: README/ARCHITECTURE prose is a much noisier
+//! signal than an ADR file or a `WHY:` marker, so it needs the
+//! false-positive mitigation the other eight don't — see `confidence_for`
+//! below and the `readme_docs` module doc for why. The PR-body source is
+//! the one place this crate makes a network call at all, and only when a
+//! `REPOWISE_GITHUB_TOKEN` env var is set — see the `pull_requests`
+//! module doc comment for why that's an explicit opt-in rather than an
+//! unauthenticated fallback.
 //!
-//! Seven of the eight read something a person wrote down. The eighth
+//! Eight of the nine read something a person wrote down. The ninth
 //! ([`inferred`]) reads what a model guessed, and is labelled as such at
 //! every surface that displays it — see that module for why the
 //! distinction is load-bearing rather than cosmetic. This crate still
@@ -36,6 +42,7 @@ mod inline_markers;
 mod linking;
 mod manual;
 mod pull_requests;
+mod readme_docs;
 
 pub use inferred::{InferredDecision, InferredState, InferredStore};
 pub use manual::{ManualDecision, ManualDecisionStore};
@@ -69,6 +76,16 @@ pub enum DecisionSource {
     Changelog {
         file: PathBuf,
         section: String,
+    },
+    /// A decision-flavored prose section in README.md/ARCHITECTURE.md
+    /// (issue #71), e.g. a "## Why we chose X" heading. `heading` is the
+    /// section's own heading text, kept alongside `file`/`line` because
+    /// — unlike an ADR's `# ADR-XXXX: Title` — there's no separate title
+    /// line to pull a label from.
+    ReadmeMining {
+        file: PathBuf,
+        line: usize,
+        heading: String,
     },
     /// A decision a **model inferred** from code during `repowise
     /// generate`, anchored to text it quoted from `file`.
@@ -129,23 +146,100 @@ pub struct DecisionRecord {
     /// or the commit message/subject).
     pub body: String,
     pub linked_files: Vec<PathBuf>,
+    /// How much to trust this decision as recorded intent, in `[0, 1]`.
+    /// Set once, from `source` alone, at construction time — see
+    /// `confidence_for`.
+    pub confidence: f64,
 }
 
 impl DecisionRecord {
+    /// Build a record with `confidence` derived from `source`, and
+    /// `status`/`superseded_by`/`date`/`linked_files` at their common
+    /// defaults (`None`/`None`/`None`/empty). Callers that have one of
+    /// those (an ADR's `Status:` line, a PR's already-known file list,
+    /// ...) set it with struct-update syntax on the result, e.g.
+    /// `DecisionRecord { status: Some(s), ..DecisionRecord::new(...) }`.
+    pub fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        source: DecisionSource,
+        body: impl Into<String>,
+    ) -> Self {
+        let confidence = confidence_for(&source);
+        DecisionRecord {
+            id: id.into(),
+            title: title.into(),
+            source,
+            status: None,
+            superseded_by: None,
+            date: None,
+            body: body.into(),
+            linked_files: Vec::new(),
+            confidence,
+        }
+    }
+
     pub fn is_superseded(&self) -> bool {
         self.superseded_by.is_some()
     }
 }
 
+/// Upstream repowise's source-rank ladder (`docs/layers/DECISIONS.md`),
+/// mapped onto this port's nine sources: higher rank means more
+/// trustworthy as a record of actual intent, independent of how
+/// convincing any one record's text happens to read. `CodeComment` and
+/// `ReadmeMining` tie at rank 3 — both are freeform prose a person wrote
+/// near (rather than *as*) the decision itself, so they carry the same
+/// false-positive profile.
+fn source_rank(source: &DecisionSource) -> u8 {
+    match source {
+        DecisionSource::Manual { .. } => 9,
+        DecisionSource::Adr { .. } => 8,
+        DecisionSource::PullRequest { .. } => 7,
+        DecisionSource::CommitMessage { .. } => 6,
+        DecisionSource::Changelog { .. } => 5,
+        DecisionSource::InlineMarker { .. } => 4,
+        DecisionSource::CodeComment { .. } => 3,
+        DecisionSource::ReadmeMining { .. } => 3,
+        DecisionSource::Inferred { .. } => 2,
+    }
+}
+
+/// Upstream's confidence formula: `0.4 + 0.5 * (rank / 9)`, clamped to
+/// `[0, 0.99]` — never a false 100%, since even a rank-9 `Manual` record
+/// is self-reported, not independently verified.
+///
+/// This is the rank term of upstream's confidence model, ported
+/// faithfully. Two other terms upstream also computes are deliberately
+/// *not* implemented here, as a documented scope cut rather than an
+/// oversight:
+///
+/// - **Per-field grounding verification** (exact/fuzzy/unverified quote
+///   matching, penalizing a paraphrase). Every source in this crate
+///   quotes verbatim rather than paraphrasing, so the verification tier
+///   would be a no-op in practice; [`inferred`] already has an
+///   equivalent binary anchor-presence gate (`inferred::anchor_line`)
+///   for the one source where a model could invent a citation.
+/// - **Cross-source corroboration** (a confidence bonus when two sources
+///   describe the same decision). This needs a same-decision-detection
+///   pass across records first — a separable subsystem, not a per-record
+///   computation — and is left as a follow-up rather than folded in
+///   here.
+pub fn confidence_for(source: &DecisionSource) -> f64 {
+    let rank = f64::from(source_rank(source));
+    (0.4 + 0.5 * (rank / 9.0)).clamp(0.0, 0.99)
+}
+
 /// Mine decisions from `docs/adr/*.md`, decision-like commit messages,
 /// decision-like merged PR bodies, decision-like code comments, inline
-/// decision markers, keep-a-changelog-style CHANGELOG sections, the
+/// decision markers, keep-a-changelog-style CHANGELOG sections,
+/// decision-flavored README.md/ARCHITECTURE.md prose sections, the
 /// LLM-inferred store, and the manually-recorded store under
 /// `index.root`, linking each to the files/symbols its body mentions.
 /// Missing `docs/adr/`, an unreadable git history, an
-/// unavailable/unauthenticated GitHub API, no changelog file, or no
-/// inferred/manual store each degrade to an empty result for that source
-/// rather than failing the whole call — all eight sources are
+/// unavailable/unauthenticated GitHub API, no changelog/README file, or
+/// no inferred/manual store each degrade to an empty result for that
+/// source rather than failing the whole call — all nine sources are
 /// independent.
 ///
 /// Use [`mine_reporting`] on any path that *displays* decisions: it also
@@ -177,6 +271,7 @@ pub fn mine_reporting(index: &RepoIndex) -> anyhow::Result<(Vec<DecisionRecord>,
     records.extend(code_comments::mine_code_comment_decisions(index));
     records.extend(inline_markers::mine_inline_marker_decisions(index));
     records.extend(changelog::mine_changelog_decisions(&index.root));
+    records.extend(readme_docs::mine_readme_decisions(&index.root));
 
     // Read from disk like every other source here -- the inference
     // itself happened at `repowise generate` time. No network call, no

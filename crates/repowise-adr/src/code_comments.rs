@@ -50,17 +50,16 @@ pub fn mine_code_comment_decisions(index: &RepoIndex) -> Vec<DecisionRecord> {
 
             let rel = file.path.strip_prefix(&index.root).unwrap_or(&file.path);
             records.push(DecisionRecord {
-                id: format!("comment:{}:{comment_line}", rel.display()),
-                title: summarize(&text),
-                source: DecisionSource::CodeComment {
-                    file: file.path.clone(),
-                    line: comment_line,
-                },
-                status: None,
-                superseded_by: None,
-                date: None,
-                body: text,
                 linked_files: vec![file.path.clone()],
+                ..DecisionRecord::new(
+                    format!("comment:{}:{comment_line}", rel.display()),
+                    summarize(&text),
+                    DecisionSource::CodeComment {
+                        file: file.path.clone(),
+                        line: comment_line,
+                    },
+                    text,
+                )
             });
         }
     }

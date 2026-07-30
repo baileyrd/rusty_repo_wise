@@ -45,18 +45,17 @@ pub fn mine_inline_marker_decisions(index: &RepoIndex) -> Vec<DecisionRecord> {
                 continue;
             };
             records.push(DecisionRecord {
-                id: format!("marker:{}:{line}", rel.display()),
-                title: detail.clone(),
-                source: DecisionSource::InlineMarker {
-                    file: file.path.clone(),
-                    line,
-                    marker: marker.to_string(),
-                },
-                status: None,
-                superseded_by: None,
-                date: None,
-                body: detail,
                 linked_files: vec![file.path.clone()],
+                ..DecisionRecord::new(
+                    format!("marker:{}:{line}", rel.display()),
+                    detail.clone(),
+                    DecisionSource::InlineMarker {
+                        file: file.path.clone(),
+                        line,
+                        marker: marker.to_string(),
+                    },
+                    detail,
+                )
             });
         }
     }

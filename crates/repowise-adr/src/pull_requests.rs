@@ -102,17 +102,16 @@ pub fn mine_pull_request_decisions(prs: &[MergedPullRequest], root: &Path) -> Ve
     prs.iter()
         .filter(|pr| is_decision_message(&pr.body) || is_decision_message(&pr.title))
         .map(|pr| DecisionRecord {
-            id: format!("pr:{}", pr.number),
-            title: pr.title.clone(),
-            source: DecisionSource::PullRequest {
-                number: pr.number,
-                author: pr.author.clone(),
-            },
-            status: None,
-            superseded_by: None,
-            date: None,
-            body: pr.body.clone(),
             linked_files: pr.files.iter().map(|f| root.join(f)).collect(),
+            ..DecisionRecord::new(
+                format!("pr:{}", pr.number),
+                pr.title.clone(),
+                DecisionSource::PullRequest {
+                    number: pr.number,
+                    author: pr.author.clone(),
+                },
+                pr.body.clone(),
+            )
         })
         .collect()
 }

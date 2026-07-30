@@ -41,18 +41,16 @@ pub fn mine_commit_decisions(commits: &[CommitInfo]) -> Vec<DecisionRecord> {
     commits
         .iter()
         .filter(|c| is_decision_message(&c.message))
-        .map(|c| DecisionRecord {
-            id: format!("commit:{}", short_hash(&c.hash)),
-            title: c.message.clone(),
-            source: DecisionSource::CommitMessage {
-                hash: c.hash.clone(),
-                author: c.author.clone(),
-            },
-            status: None,
-            superseded_by: None,
-            date: None,
-            body: c.message.clone(),
-            linked_files: Vec::new(),
+        .map(|c| {
+            DecisionRecord::new(
+                format!("commit:{}", short_hash(&c.hash)),
+                c.message.clone(),
+                DecisionSource::CommitMessage {
+                    hash: c.hash.clone(),
+                    author: c.author.clone(),
+                },
+                c.message.clone(),
+            )
         })
         .collect()
 }

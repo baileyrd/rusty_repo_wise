@@ -40,7 +40,7 @@
 //! port.
 //!
 //! `get_architecture`/`get_blast_radius` are the next slice: real
-//! cross-repo Rust `use` resolution (via
+//! cross-repo import resolution (via
 //! `repowise_workspace::workspace_architecture`/`workspace_blast_radius`,
 //! themselves built on `repowise_graph::cross_repo_import_edges`).
 //! `get_architecture` degrades to empty lists like `list_repos` (no
@@ -48,9 +48,11 @@
 //! specific repo+file target, so it errors like `get_context` instead:
 //! no workspace configured, an unknown repo name, or an unindexed
 //! file/repo are all reported as errors rather than an empty result.
-//! Both are Rust-only for now -- the only language this port anchors to
-//! a `Cargo.toml`-derived crate name; every other language's cross-repo
-//! imports are left unresolved, deliberately, for a future slice.
+//! Both cover every language resolved single-repo via a name -> file
+//! module map (Rust, Python, Java/Kotlin/Scala, Go, C#, PHP -- see
+//! `repowise_graph::cross_repo::MODULE_MAP_LANGUAGES`); every other
+//! language's cross-repo imports are left unresolved, deliberately, for
+//! a future slice.
 
 use repowise_core::{RepoIndex, SymbolKind};
 use repowise_graph::RepoGraph;
@@ -1975,7 +1977,7 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_architecture",
-        description = "Workspace-wide cross-repo Rust import resolution: which workspace repos depend on which others, and the individual `use` sites behind each dependency. Rust-only (the only language this port anchors to a Cargo.toml-derived crate name); every other language's cross-repo imports are left unresolved. Returns empty lists (not an error) when no --workspace was given, same degrade-gracefully shape as list_repos."
+        description = "Workspace-wide cross-repo import resolution: which workspace repos depend on which others, and the individual import sites behind each dependency. Covers Rust, Python, Java, Kotlin, Scala, Go, C#, and PHP (every language resolved single-repo via a name-to-file module map); every other language's cross-repo imports are left unresolved. Returns empty lists (not an error) when no --workspace was given, same degrade-gracefully shape as list_repos."
     )]
     fn get_architecture(&self) -> Result<Json<Envelope<ArchitectureOutput>>, ErrorData> {
         let started = Instant::now();

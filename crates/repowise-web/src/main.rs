@@ -13,10 +13,10 @@
 //! literally co-change together -- just each repo's own coupling
 //! rendered together in one view.
 //!
-//! `SystemMapSection` is the next #64 slice: real cross-repo Rust `use`
+//! `SystemMapSection` is the next #64 slice: real cross-repo import
 //! resolution over `GET /api/workspace-architecture`, rendered as a
 //! plain repo-pair table with the individual import sites listed
-//! underneath. Rust-only.
+//! underneath. Covers Rust, Python, Java, Kotlin, Scala, Go, C#, and PHP.
 //!
 //! `ConformanceSection` is the next #64 slice: circular cross-repo
 //! dependencies over `GET /api/workspace-conformance`, reusing exactly
@@ -2613,14 +2613,15 @@ fn CoChangesSection() -> impl IntoView {
     }
 }
 
-/// The next slice of #64 after co-changes: real cross-repo Rust `use`
+/// The next slice of #64 after co-changes: real cross-repo import
 /// resolution over `GET /api/workspace-architecture`, rendered as a
 /// plain repo-pair table (from/to/edge count) with the individual
 /// import sites listed underneath -- a table is more honest than
 /// forcing this into `GraphSection`'s SVG force-layout machinery given
-/// repo-level granularity is small. Rust-only -- see
-/// `repowise-workspace`'s own doc comment for why every other
-/// language's cross-repo imports are left unresolved.
+/// repo-level granularity is small. Covers Rust, Python, Java, Kotlin,
+/// Scala, Go, C#, and PHP -- see `repowise-workspace`'s own doc comment
+/// for why every other language's cross-repo imports are left
+/// unresolved.
 #[component]
 fn SystemMapSection() -> impl IntoView {
     let architecture =
@@ -2641,7 +2642,7 @@ fn SystemMapSection() -> impl IntoView {
                         .into_any(),
                         Ok(a) if a.repo_edges.is_empty() => view! {
                             <p class="empty">
-                                "No cross-repo Rust imports resolved between the configured repos."
+                                "No cross-repo imports resolved between the configured repos."
                             </p>
                         }
                         .into_any(),

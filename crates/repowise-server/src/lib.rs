@@ -1677,9 +1677,11 @@ struct WorkspaceArchitectureDto {
     total_edges: usize,
 }
 
-/// Real cross-repo Rust `use` resolution across every workspace repo --
-/// which repos depend on which others, and the individual import sites
-/// behind each dependency. `edges` is capped at
+/// Real cross-repo import resolution across every workspace repo (Rust,
+/// Python, Java, Kotlin, Scala, Go, C#, PHP -- see
+/// `repowise_graph::cross_repo::MODULE_MAP_LANGUAGES`) -- which repos
+/// depend on which others, and the individual import sites behind each
+/// dependency. `edges` is capped at
 /// `WORKSPACE_ARCHITECTURE_EDGES_LIMIT`; `total_edges` reports the
 /// uncapped count. `available: false` (empty lists) when no workspace
 /// was configured, same shape as `/api/workspace-repos`.

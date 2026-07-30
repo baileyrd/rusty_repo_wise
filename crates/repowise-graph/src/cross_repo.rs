@@ -1,9 +1,20 @@
-//! Cross-repo Rust import resolution: a `use` import in one workspace
-//! repo, resolved against another workspace repo's Rust module-path
-//! map. Rust-only -- the only language this port anchors to a
-//! `Cargo.toml`-derived crate name (see `modpath::rust_module_path`);
-//! every other language's cross-repo imports are left unresolved,
-//! deliberately, for a future slice.
+//! Cross-repo import resolution: an unresolved import in one workspace
+//! repo, resolved against another workspace repo's module-path map.
+//!
+//! Covers every language this port already resolves single-repo via a
+//! name -> file module map: Rust, Python, Java/Kotlin/Scala, Go, C#,
+//! and PHP's `use Namespace\Class;` form (see `MODULE_MAP_LANGUAGES`
+//! and `RepoGraph::build`'s own per-language `(separator, map)` table,
+//! which this reuses rather than re-deriving). TypeScript/JavaScript/C/
+//! C++/Ruby/Swift/Dart/Shell resolve imports directly against the
+//! filesystem at parse time instead of through a name -> file map --  a
+//! different resolution mechanism entirely (it would mean walking every
+//! sibling repo's filesystem looking for a relative-path match, not
+//! matching a dotted/`::`/`/`-separated name), so they have no
+//! cross-repo equivalent here; a future slice. The Structural and
+//! Lightweight tiers carry no module-path concept at all (no grammar,
+//! or regex-only unresolved imports respectively) and were never
+//! candidates for this pass.
 //!
 //! This is a separate pass from `RepoGraph::build`, which only ever
 //! sees one repo's `RepoIndex` at a time. Callers (`repowise-workspace`)
@@ -16,22 +27,75 @@ use repowise_core::{Language, RepoIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Rust module path -> defining file, for one repo's `RepoIndex`. A
-/// freestanding duplicate of the map `RepoGraph::build` computes
-/// internally for its own single-repo resolution -- kept as a pure
-/// function so it's usable per-repo before any single-repo `RepoGraph`
-/// exists, without building a full `RepoGraph` per other repo just to
-/// read one field back out.
-pub fn rust_module_map(index: &RepoIndex) -> HashMap<String, PathBuf> {
+/// Every language this cross-repo pass resolves, in the same order
+/// `RepoGraph::build` lists them -- see this module's own doc comment
+/// for why the rest are out of scope here.
+pub const MODULE_MAP_LANGUAGES: &[Language] = &[
+    Language::Rust,
+    Language::Python,
+    Language::Java,
+    Language::Kotlin,
+    Language::Scala,
+    Language::Go,
+    Language::CSharp,
+    Language::Php,
+];
+
+/// This language's import-path separator, matching `RepoGraph::build`'s
+/// own table exactly. Empty for a language `module_map` never returns
+/// entries for.
+fn separator(language: Language) -> &'static str {
+    match language {
+        Language::Rust => "::",
+        Language::Python
+        | Language::Java
+        | Language::Kotlin
+        | Language::Scala
+        | Language::CSharp => ".",
+        Language::Go => "/",
+        Language::Php => "\\",
+        _ => "",
+    }
+}
+
+/// name -> defining file for one `language` in one repo's `RepoIndex`.
+/// A freestanding duplicate of the maps `RepoGraph::build` computes
+/// internally for its own single-repo resolution (same `modpath::*`
+/// function per language) -- kept as a pure function so it's usable
+/// per-repo before any single-repo `RepoGraph` exists, without building
+/// a full `RepoGraph` per other repo just to read one field back out.
+/// Empty for any language outside `MODULE_MAP_LANGUAGES`.
+pub fn module_map(index: &RepoIndex, language: Language) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     for file in &index.files {
-        if file.language == Language::Rust {
-            if let Some(mp) = modpath::rust_module_path(&file.path) {
-                map.insert(mp, file.path.clone());
+        if file.language != language {
+            continue;
+        }
+        let mp = match language {
+            Language::Rust => modpath::rust_module_path(&file.path),
+            Language::Python => modpath::python_module_path(&file.path, &index.root),
+            Language::Java | Language::Kotlin | Language::Scala => {
+                modpath::jvm_module_path(&file.path, &index.root)
             }
+            Language::Go => modpath::go_module_path(&file.path),
+            Language::CSharp => modpath::csharp_namespace_path(&file.path, &index.root),
+            Language::Php => modpath::php_namespace_path(&file.path, &index.root),
+            _ => None,
+        };
+        if let Some(mp) = mp {
+            map.insert(mp, file.path.clone());
         }
     }
     map
+}
+
+/// Rust module path -> defining file, for one repo's `RepoIndex`.
+/// Retained as a thin wrapper over `module_map` for existing callers
+/// that only ever wanted Rust (e.g. tests written before this pass
+/// covered other languages) -- new code should call `module_map`
+/// directly with the language it needs.
+pub fn rust_module_map(index: &RepoIndex) -> HashMap<String, PathBuf> {
+    module_map(index, Language::Rust)
 }
 
 /// One `use` import in `from_repo`/`from_file` resolved to a specific
@@ -48,46 +112,58 @@ pub struct CrossRepoImportEdge {
     pub import_path: String,
 }
 
-/// Cross-repo Rust `use` resolution over every repo in `repos`.
+/// Cross-repo import resolution over every repo in `repos`, for every
+/// language in `MODULE_MAP_LANGUAGES`.
 ///
 /// An import counts as a cross-repo candidate only if it's unresolved
 /// BOTH at parse time (`resolved_file: None`) AND against its own
-/// repo's module map -- the same two-part "did this end up unresolved"
-/// test `RepoGraph::build` applies for single-repo resolution, re-
-/// derived here so an import already fully explained by a sibling crate
-/// within the SAME repo (this port's own multi-crate layout, for
-/// example) is never mistaken for a cross-repo edge, even if another
-/// repo happens to define a module at the same dotted path.
+/// repo's own-language module map -- the same two-part "did this end up
+/// unresolved" test `RepoGraph::build` applies for single-repo
+/// resolution, re-derived here so an import already fully explained by
+/// a sibling crate/package within the SAME repo (this port's own
+/// multi-crate layout, for example) is never mistaken for a cross-repo
+/// edge, even if another repo happens to define a module at the same
+/// dotted path. Each language's maps are built once per repo up front
+/// (`per_language_maps`, keyed by `(repo_index, language)`) rather than
+/// once per file, since multiple files in one repo share the same
+/// language's map.
 pub fn cross_repo_import_edges(repos: &[(String, RepoIndex)]) -> Vec<CrossRepoImportEdge> {
-    let maps: Vec<(&str, HashMap<String, PathBuf>)> = repos
+    let per_language_maps: Vec<HashMap<Language, HashMap<String, PathBuf>>> = repos
         .iter()
-        .map(|(name, index)| (name.as_str(), rust_module_map(index)))
+        .map(|(_, index)| {
+            MODULE_MAP_LANGUAGES
+                .iter()
+                .map(|&lang| (lang, module_map(index, lang)))
+                .collect()
+        })
         .collect();
 
     let mut edges = Vec::new();
     for (i, (from_repo, index)) in repos.iter().enumerate() {
-        let own_map = &maps[i].1;
         for file in &index.files {
-            if file.language != Language::Rust {
+            if !MODULE_MAP_LANGUAGES.contains(&file.language) {
                 continue;
             }
+            let sep = separator(file.language);
+            let own_map = &per_language_maps[i][&file.language];
             for imp in &file.imports {
                 if imp.resolved_file.is_some() {
                     continue;
                 }
-                if modpath::resolve_import(&imp.path, "::", own_map).is_some() {
+                if modpath::resolve_import(&imp.path, sep, own_map).is_some() {
                     continue; // resolves within its own repo -- not a cross-repo candidate
                 }
-                for (other_repo, other_map) in &maps {
-                    if *other_repo == from_repo.as_str() {
+                for (j, (other_repo, _)) in repos.iter().enumerate() {
+                    if other_repo == from_repo {
                         continue;
                     }
-                    if let Some(target) = modpath::resolve_import(&imp.path, "::", other_map) {
+                    let other_map = &per_language_maps[j][&file.language];
+                    if let Some(target) = modpath::resolve_import(&imp.path, sep, other_map) {
                         edges.push(CrossRepoImportEdge {
                             from_repo: from_repo.clone(),
                             from_file: file.path.clone(),
                             line: imp.line,
-                            to_repo: other_repo.to_string(),
+                            to_repo: other_repo.clone(),
                             to_file: target.clone(),
                             import_path: imp.path.clone(),
                         });

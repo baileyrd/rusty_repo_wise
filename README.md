@@ -194,7 +194,12 @@ Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
 at all: no grammar exists for them, so their hotspot score is always
 `0` (churn × 0 complexity) and they carry no imports/calls to resolve.
-Every other repowise language is unimplemented. The health scorer now
+Dockerfiles get the same "recognized, git-history only" treatment for the
+same reason, plus a separate `repowise docker-stages` command that reads
+their actual content (build stages, `COPY --from` edges) — see "Docker
+build-stage extraction" below. Every other repowise language, and every
+other config/data format in its lower-depth tier, is unimplemented. The
+health scorer now
 implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
@@ -336,6 +341,8 @@ repowise decisions [PATH]          # mined ADRs + decision-like commits, with li
                                     #   --for-file <FILE> to filter to one file
 repowise decide <TITLE> <RATIONALE> [PATH]  # record a decision you already made, directly
                                     #   (append-only; see "Manually recorded decisions")
+repowise docker-stages [PATH]      # Dockerfile build stages + same-file COPY --from edges
+                                    #   (prototype for #68's config/data tier; see issue #318)
 repowise refactor [PATH]           # deterministic refactor candidates: import cycles, god
                                     #   classes, low-cohesion classes, duplicate functions --
                                     #   read-only, never generates a diff (see issue #304)
@@ -1531,6 +1538,54 @@ re-arrange the code is left to whoever reads the report.
 analysis runs first, and near-duplicate detection alone measured
 ~6 seconds on this port's own workspace (the same cost `repowise health`
 already pays for its `near-duplicate-code` marker).
+
+## Docker build-stage extraction
+
+`repowise docker-stages [PATH]` lists every Dockerfile's build stages
+and the same-file `COPY --from` edges between them — issue #318, the
+prototype for #68's config/data-format tier (ten formats bundled into
+one design question; Dockerfile was picked to prototype against first,
+since a build stage is the closest thing in that bundle to this port's
+existing function/import model).
+
+```
+$ repowise docker-stages
+2 Docker build stage(s) found under .
+  Dockerfile
+    [0] builder (rust:1.75)  lines 1-5
+    [1] stage 1 (debian:bookworm-slim)  lines 6-9
+      copies from: builder (line 7)
+```
+
+**A parallel model, not a `Symbol`.** A build stage isn't a function or
+class — it carries none of `Symbol`'s per-symbol metrics (complexity,
+nesting depth, ...) — so it's `repowise_core::docker::DockerStage`, a
+small type of its own, the same call #317 made for SQL objects. `COPY
+--from=<stage>` becomes a `DockerCopyFromEdge` when `<stage>` resolves to
+an earlier stage in the same file (by name or by numeric index); a
+`--from` naming an external image (`COPY --from=alpine:3.18 ...`)
+produces no edge, since there's nothing in the repo for it to point to.
+
+**Detected by filename, not extension.** The conventional `Dockerfile`
+has no extension for `Language::from_extension` to look at, so
+`discover_files` checks the filename first: `Dockerfile`,
+`Dockerfile.<suffix>` (e.g. `Dockerfile.dev`), and `<name>.dockerfile`
+are all recognized. Once detected, a Dockerfile gets the same treatment
+as the Structural-tier languages (#70): a real, zero-symbol `FileRecord`
+so it's visible to `repowise overview`'s per-language counts and to
+git-history views (`hotspots`/`ownership`/`coupled`), but no tree-sitter
+parsing — Dockerfile syntax is simple and line-oriented enough that this
+crate hand-parses it directly, no grammar or external crate needed.
+
+**Deliberately narrow, matching the issue's own prototype scope.** No
+wiki pages, dashboard section, or MCP tool yet — those are follow-ups
+once this model proves out, not assumed here. Parser-directive comments
+(`# syntax=`, `# escape=`), `ARG`-before-`FROM` substitution, and heredoc
+(`<<EOF`) instruction bodies aren't handled. Every other format #68
+bundled (OpenAPI, Protobuf, GraphQL, Terraform) is tracked separately,
+pending whether this design generalizes; YAML/JSON/TOML/Makefile/
+Markdown were rejected outright — no natural symbol-like unit the way a
+build stage has one.
 
 ## Git analytics
 

@@ -323,6 +323,13 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List Dockerfile build stages and same-file `COPY --from` edges
+    /// (issue #318, the prototype for #68's config/data-format tier).
+    /// No wiki pages or graph integration yet -- see that issue.
+    DockerStages {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -660,6 +667,7 @@ fn main() -> anyhow::Result<()> {
             rationale,
             path,
         } => cmd_decide(&path, title, rationale),
+        Command::DockerStages { path } => cmd_docker_stages(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2582,6 +2590,59 @@ fn cmd_decide(path: &Path, title: String, rationale: String) -> anyhow::Result<(
 
     println!("Recorded {} -- {}", decision.id, decision.title);
     println!("  Run `repowise decisions` to see it alongside every other mined decision.");
+    Ok(())
+}
+
+fn cmd_docker_stages(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let (stages, edges) = repowise_parser::collect_docker_stages(&root)?;
+
+    if stages.is_empty() {
+        println!("No Dockerfiles found under {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} Docker build stage(s) found under {}",
+        stages.len(),
+        root.display()
+    );
+
+    let mut by_file: std::collections::BTreeMap<&Path, Vec<&repowise_core::docker::DockerStage>> =
+        std::collections::BTreeMap::new();
+    for stage in &stages {
+        by_file.entry(&stage.file).or_default().push(stage);
+    }
+
+    for (file, file_stages) in by_file {
+        println!("  {}", display_path(file, &root));
+        for stage in &file_stages {
+            let label = stage
+                .name
+                .as_deref()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| format!("stage {}", stage.index));
+            println!(
+                "    [{}] {label} ({})  lines {}-{}",
+                stage.index, stage.base_image, stage.start_line, stage.end_line
+            );
+            for edge in edges
+                .iter()
+                .filter(|e| e.file == stage.file && e.from_stage == stage.index)
+            {
+                let target = &file_stages
+                    .iter()
+                    .find(|s| s.index == edge.to_stage)
+                    .expect("edge target stage must exist in the same file");
+                let target_label = target
+                    .name
+                    .as_deref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| format!("stage {}", target.index));
+                println!("      copies from: {target_label} (line {})", edge.line);
+            }
+        }
+    }
     Ok(())
 }
 

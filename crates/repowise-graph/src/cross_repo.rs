@@ -11,10 +11,13 @@
 //! different resolution mechanism entirely (it would mean walking every
 //! sibling repo's filesystem looking for a relative-path match, not
 //! matching a dotted/`::`/`/`-separated name), so they have no
-//! cross-repo equivalent here; a future slice. The Structural and
-//! Lightweight tiers carry no module-path concept at all (no grammar,
-//! or regex-only unresolved imports respectively) and were never
-//! candidates for this pass.
+//! cross-repo equivalent here; a future slice. Luau's `require(...)`
+//! joins that same "no index needed" bucket, but for a different reason:
+//! it has no module-path map to resolve against *at all*, single-repo or
+//! cross-repo (see `repowise_parser::luau`'s module doc). The Structural
+//! and Lightweight tiers carry no module-path concept at all (no
+//! grammar, or regex-only unresolved imports respectively) and were
+//! never candidates for this pass.
 //!
 //! This is a separate pass from `RepoGraph::build`, which only ever
 //! sees one repo's `RepoIndex` at a time. Callers (`repowise-workspace`)

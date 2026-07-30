@@ -174,6 +174,15 @@ impl RepoGraph {
                 // unresolved by design (see `repowise_parser::
                 // lightweight`'s module doc), so it needs no branch
                 // here beyond a home in this exhaustive match.
+                // Luau's only import mechanism is `require(...)` (see
+                // `repowise_parser::luau`'s module doc): a Roblox
+                // instance-tree path (`script.Parent.Foo`) has no
+                // filesystem mapping at all, and a plain string path has
+                // no fixed extension/directory convention the way JS's
+                // `./` imports do -- so, like Swift's/Dart's package
+                // imports, there's no module-path index to build and
+                // every `require` stays unresolved by design, joining the
+                // same "no index needed" bucket.
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C
@@ -182,6 +191,7 @@ impl RepoGraph {
                 | Language::Swift
                 | Language::Dart
                 | Language::Shell
+                | Language::Luau
                 | Language::ObjectiveC
                 | Language::R
                 | Language::Zig
@@ -228,6 +238,7 @@ impl RepoGraph {
                 | Language::Swift
                 | Language::Dart
                 | Language::Shell
+                | Language::Luau
                 | Language::ObjectiveC
                 | Language::R
                 | Language::Zig

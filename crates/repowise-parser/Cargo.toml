@@ -25,6 +25,7 @@ tree-sitter-swift.workspace = true
 tree-sitter-php.workspace = true
 tree-sitter-dart.workspace = true
 tree-sitter-bash.workspace = true
+tree-sitter-luau.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

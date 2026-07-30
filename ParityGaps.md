@@ -79,7 +79,7 @@ list:
 | 7 | Cross-repo import resolution beyond Rust | [#338](https://github.com/baileyrd/rusty_repo_wise/issues/338) | closed via PR #343 — now covers Rust/Python/Java/Kotlin/Scala/Go/C#/PHP |
 | 8 | Contract breaking-change detection | [#339](https://github.com/baileyrd/rusty_repo_wise/issues/339) | closed via PR #344 — persisted `.repowise-workspace/contracts.json` snapshot, diffed every `workspace-contracts` run |
 | 9 | Git-worktree auto-seeding for incremental indexing | [#340](https://github.com/baileyrd/rusty_repo_wise/issues/340) | closed, not planned — this port has no incremental re-indexing at all yet, even for the common case; building it narrowly for worktrees first is the wrong order, see the issue |
-| 10 | Luau ("Partial" tier) language support | [#341](https://github.com/baileyrd/rusty_repo_wise/issues/341) | open |
+| 10 | Luau ("Partial" tier) language support | [#341](https://github.com/baileyrd/rusty_repo_wise/issues/341) | closed via PR #347 — Luau joins the Full tier directly (real `tree-sitter-luau` grammar available), no new "Partial" tier concept needed; see `repowise_parser::luau`'s module doc |
 
 See each linked issue for the gap/why/reference/open-questions detail —
 this table is kept in sync with issue numbers once filed.

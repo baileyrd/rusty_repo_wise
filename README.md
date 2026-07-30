@@ -17,7 +17,7 @@ specifics per layer), not full feature parity:
 
 - Walk a codebase (respecting `.gitignore`), detect Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
-  Swift, PHP, Dart, and shell (`.sh`/`.bash`/`.zsh`) files, plus
+  Swift, PHP, Dart, Luau, and shell (`.sh`/`.bash`/`.zsh`) files, plus
   Objective-C, R, Zig, Julia, Elm, OCaml, Crystal, Nim, and D by name
   for git-history coverage only (see "Structural-tier languages" below).
 - Parse each file with tree-sitter, extracting function/method/class/struct
@@ -187,8 +187,8 @@ specifics per layer), not full feature parity:
 - Persist the index to `.repowise/index.json` and query it from the CLI.
 
 Only Rust, Python, TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#,
-Scala, Ruby, Swift, PHP, Dart, and shell scripts are tree-sitter parsed
-(symbols/imports/calls/complexity). Nine more — Objective-C, R, Zig,
+Scala, Ruby, Swift, PHP, Dart, Luau, and shell scripts are tree-sitter
+parsed (symbols/imports/calls/complexity). Nine more — Objective-C, R, Zig,
 Julia, Elm, OCaml, Crystal, Nim, and D (issue #70's "Structural tier")
 — are recognized by name and get git-history coverage (`hotspots`/
 `ownership`/`coupled`, churn/blame/co-change) but no symbol extraction
@@ -244,7 +244,7 @@ dashboard is one static page with no per-file drill-down or live search
   etc.), `.gitignore`-aware file discovery, and JSON index persistence.
 - `repowise-parser` — tree-sitter-based extraction for Rust, Python,
   TypeScript, JavaScript, Java, Kotlin, Go, C, C++, C#, Scala, Ruby,
-  Swift, PHP, Dart, and shell scripts, including per-function
+  Swift, PHP, Dart, Luau, and shell scripts, including per-function
   complexity/nesting-depth/bumpy-road/param-count/body-hash metrics, plus
   per-method `self`/`this` field-access tracking for Rust/Python/TS+JS
   (feeds LCOM4), per-condition boolean-operator-chain detection for
@@ -480,7 +480,7 @@ groups (no shared field access between groups at all). Field-access
 extraction (`self`/`this` field reads/writes) is currently implemented
 for **Rust, Python, and TypeScript/JavaScript only** — the three
 languages issue #51's own acceptance criteria named explicitly, out of
-the 16 languages this port otherwise parses; the other 13 have an empty
+the 17 languages this port otherwise parses; the other 14 have an empty
 field-access list per file and are silently skipped for this one marker
 (not enough data, not "cohesive"), not flagged. A method that never
 touches a field of its own (a pure delegator, a static-style helper) is
@@ -559,7 +559,7 @@ on cyclomatic complexity but read very differently, and only nesting
 depth tells them apart. Computed by `repowise-parser::metrics::max_nesting_depth`
 alongside the existing `cyclomatic_complexity` — same recursive
 decision-node classification per language, just tracking depth reached
-rather than a flat count — for **all 16 parsed languages** (unlike
+rather than a flat count — for **all 17 parsed languages** (unlike
 LCOM4, this needed no new per-language extraction logic, since every
 language's `is_decision` classification already existed for cyclomatic
 complexity).
@@ -595,7 +595,7 @@ that pulls the `condition` sub-expression out of an `if`/`while`/etc. node,
 and a separate `is_boolean_operator` closure (deliberately distinct from
 each language's existing `is_decision` classifier) that counts chained
 boolean operators within just that condition's own subtree, not the whole
-function body. The other 13 languages have no per-language
+function body. The other 14 languages have no per-language
 `condition_of`/`is_boolean_operator` logic yet and so never produce any
 entries for this marker.
 
@@ -641,7 +641,7 @@ call's own `line` and `callee_name`). Like `unresolved_import_stems` and
 deliberately coarse and heuristic: matching on a call's last name/segment
 means it can't tell a database cursor's `.execute(..)` from an unrelated
 `execute` method on some other type, and it can't recognize I/O hidden
-behind a wrapper function the table doesn't name. The other 13 languages
+behind a wrapper function the table doesn't name. The other 14 languages
 have no `is_loop`/I/O-callee-table logic yet and so never produce any
 entries for this marker.
 
@@ -693,7 +693,7 @@ Vec<ResourceConstructionInLoopRef>`, each entry carrying the call's own
 `line` and `callee_name`). Like the other two, this is deliberately
 coarse and heuristic: it can't recognize an expensive constructor hidden
 behind a type alias or a wrapper function the table doesn't name. The
-other 13 languages have no per-language table yet and so never produce
+other 14 languages have no per-language table yet and so never produce
 any entries for this marker.
 
 **Lock in loop (`lock_in_loop`)** flags a mutex/lock acquisition call
@@ -716,7 +716,7 @@ common userland lock libraries (e.g. `async-mutex`) since JS has no
 native mutex. `repowise-parser::metrics::locks_in_loops` reuses the same
 "currently inside a loop" tracking shape as the other three loop-body
 markers (`Symbol::lock_in_loop: Vec<LockInLoopRef>`, each entry carrying
-the call's own `line` and `callee_name`). The other 13 languages have no
+the call's own `line` and `callee_name`). The other 14 languages have no
 per-language table yet and so never produce any entries for this marker.
 
 **List insert-zero in loop (`list_insert_zero_in_loop`)** flags
@@ -766,7 +766,7 @@ loop-body markers (`Symbol::json_parse_in_loop: Vec<JsonParseInLoopRef>`,
 each entry carrying the call's own `line` and `callee_name`). Like the
 others, this is deliberately coarse and heuristic: it can't recognize
 JSON parsing hidden behind a wrapper function or a type alias the table
-doesn't name. The other 13 languages have no per-language table yet and
+doesn't name. The other 14 languages have no per-language table yet and
 so never produce any entries for this marker.
 
 **Regex compile in loop (`regex_compile_in_loop`)** flags a known
@@ -796,7 +796,7 @@ deliberately excludes `Regex::new`/`re.compile`/`new RegExp` — without
 that exclusion the same call would double-flag under both markers. Like
 the others, this is deliberately coarse and heuristic: it can't
 recognize regex compilation hidden behind a wrapper function or a type
-alias the table doesn't name. The other 13 languages have no
+alias the table doesn't name. The other 14 languages have no
 per-language table yet and so never produce any entries for this marker.
 
 **Nested loop with I/O (`nested_loop_with_io`)** flags an I/O-shaped
@@ -829,7 +829,7 @@ markers double-count the same call on purpose: the outer one measures
 "any loop-body I/O", the inner one measures the specifically worse
 nested case, and its default penalty (−0.6) is double the flat −0.3
 every other loop-body marker uses to reflect that added severity. The
-other 13 languages have no per-language table yet and so never produce
+other 14 languages have no per-language table yet and so never produce
 any entries for this marker.
 
 **Nested loop quadratic (`nested_loop_quadratic`)** flags an inner loop
@@ -867,7 +867,7 @@ traversal, whereas iterating one *collection* twice is the accidental
 scan this marker is after. Its default penalty (−0.6) matches
 `nested_loop_with_io`'s — both flag a quadratic-complexity *shape*
 rather than a single expensive call, a tier above the flat −0.3
-per-occurrence loop-body markers. The other 13 languages have no
+per-occurrence loop-body markers. The other 14 languages have no
 per-language normalizer yet and so never produce any entries for this
 marker.
 
@@ -903,7 +903,7 @@ and returns the awaited call's callee name. Two deliberate narrowings:
 Its default penalty (−0.3) matches the other per-occurrence loop-body
 markers rather than the −0.6 quadratic-*shape* tier: one serialized
 await is one extra round-trip, not an order-of-magnitude blowup. The
-other 13 languages have no per-language extractor yet and so never
+other 14 languages have no per-language extractor yet and so never
 produce any entries for this marker.
 
 **pandas concat in loop (`pd_concat_in_loop`)** flags a

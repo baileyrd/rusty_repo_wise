@@ -71,7 +71,7 @@ list:
 | # | Gap | Issue | Status |
 |---|-----|-------|--------|
 | 1 | VS Code extension | [#332](https://github.com/baileyrd/rusty_repo_wise/issues/332) | open |
-| 2 | Claude Code / Codex / opencode agent plugins (hooks, skills, commands) | [#333](https://github.com/baileyrd/rusty_repo_wise/issues/333) | open |
+| 2 | Claude Code / Codex / opencode agent plugins (hooks, skills, commands) | [#333](https://github.com/baileyrd/rusty_repo_wise/issues/333) | partially closed via PR #349 — `claude-plugin/` at repo root: bundles the MCP server, a `SessionStart` index-freshness hook, a `PreToolUse` Distill hook, and a skill; Claude Code only, Codex/opencode/PostToolUse/workspace-scoping left open, see the issue |
 | 3 | GitHub PR bot | [#334](https://github.com/baileyrd/rusty_repo_wise/issues/334) | open |
 | 4 | Webhook- and polling-triggered auto-sync | [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335) | partially closed via PR #345 — `POST /api/webhook/github`/`/gitlab` added (both trigger the shared reindex job, `REPOWISE_WEBHOOK_SECRET`-gated); polling deliberately declined, see the issue |
 | 5 | Native multi-provider LLM support in `repowise-llm` | [#336](https://github.com/baileyrd/rusty_repo_wise/issues/336) | closed, not planned — `rusty_provider` is the accepted permanent answer, see the issue |

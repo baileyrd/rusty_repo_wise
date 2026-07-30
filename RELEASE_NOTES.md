@@ -6,6 +6,60 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #349 — Claude Code plugin (`claude-plugin/`)
+**2026-07-30** · partially closes [#333](https://github.com/baileyrd/rusty_repo_wise/issues/333)
+
+- Sixth of `ParityGaps.md`'s open gaps worked, highest-priority-first (after
+  #338/PR #343, #339/PR #344, #335/PR #345, #341/PR #347, and #337/PR #348).
+  Upstream repowise ships `plugins/claude-code`/`plugins/codex` plus
+  documented `opencode` support; this port had the CLI pieces those plugins'
+  hooks would call (`generate-claude-md`, `hook rewrite`) but nothing
+  packaged as an actual plugin wired into a coding agent's own hook
+  lifecycle.
+- Answered all three of issue #333's open questions: **Claude Code only**
+  for now (this port's own development already runs inside it); **ships in
+  this repo** (`claude-plugin/` at the root) rather than a separate plugin
+  repo, so the plugin's manifest/hooks/skill stay versioned in lockstep with
+  the CLI/MCP capabilities they wrap; and **which hook events have cheap
+  enough data** — `repowise status`'s filesystem-mtime check (no git
+  history walk) is safe for a synchronous `SessionStart` hook, `repowise
+  decisions`' full git-log walk is not safe for a synchronous `PostToolUse`
+  hook, so only the former is wired up this slice.
+- **`claude-plugin/`**: a real, `claude plugin validate --strict`-clean
+  Claude Code plugin. `.mcp.json` starts `repowise serve
+  ${CLAUDE_PROJECT_DIR}` automatically (no new MCP tools — packaging, not
+  new capability). `hooks/hooks.json` wires a `SessionStart` hook and a
+  `PreToolUse` hook (matched to `Bash`). `skills/repowise-overview/SKILL.md`
+  explains which MCP tool or CLI command answers which kind of question.
+- **New `repowise claude-hook session-start|pre-tool-use`** CLI subcommands
+  (`crates/repowise-cli/src/main.rs`) implement the two hook adapters as
+  real, unit-tested Rust rather than bash+jq: `session-start` bootstraps
+  the index via `repowise_parser::build_index` if none exists, or reports
+  freshness via the same `collect_status` that backs `repowise status`
+  (never auto-updating a stale one); `pre-tool-use` routes a Bash command
+  through the exact same fail-open Distill decision logic `repowise hook
+  rewrite apply` already used, via a new shared `distill_apply` helper
+  factored out of that command so both surfaces stay backed by one
+  implementation. Both speak Claude Code's documented hook JSON contract
+  (`tool_input`/`hookSpecificOutput.updatedInput`/`additionalContext`)
+  directly.
+- Deliberately **not** included, both left as documented future work:
+  `PostToolUse` enrichment (upstream's own hook shows related decisions
+  after Grep/Glob/Read/Edit/Write/Bash — not cheap enough without new
+  caching this slice doesn't add) and multi-repo workspace scoping (the
+  bundled MCP server doesn't pass `--workspace`, so `list_repos`/
+  `get_architecture`/`get_blast_radius`/`search_codebase`'s `repo`
+  parameter aren't reachable through the plugin's default config yet).
+  Codex/opencode support also stays out of scope. Issue #333 stays open,
+  narrowed to those.
+- New tests: 8 in `repowise-cli` covering `session-start` (bootstrap,
+  up-to-date, stale, and empty-directory cases) and `pre-tool-use`
+  (rewrite, unrecognized command, non-Bash tool, malformed input) as pure
+  functions, plus manual end-to-end verification of the real compiled
+  binary against realistic Claude Code hook JSON payloads.
+
+---
+
 ## PR #348 — Federated `search_codebase` across a workspace (`repo` parameter)
 **2026-07-30** · partially closes [#337](https://github.com/baileyrd/rusty_repo_wise/issues/337)
 

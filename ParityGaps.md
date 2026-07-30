@@ -74,11 +74,11 @@ list:
 | 2 | Claude Code / Codex / opencode agent plugins (hooks, skills, commands) | [#333](https://github.com/baileyrd/rusty_repo_wise/issues/333) | open |
 | 3 | GitHub PR bot | [#334](https://github.com/baileyrd/rusty_repo_wise/issues/334) | open |
 | 4 | Webhook- and polling-triggered auto-sync | [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335) | partially closed via PR #345 — `POST /api/webhook/github`/`/gitlab` added (both trigger the shared reindex job, `REPOWISE_WEBHOOK_SECRET`-gated); polling deliberately declined, see the issue |
-| 5 | Native multi-provider LLM support in `repowise-llm` | [#336](https://github.com/baileyrd/rusty_repo_wise/issues/336) | open |
+| 5 | Native multi-provider LLM support in `repowise-llm` | [#336](https://github.com/baileyrd/rusty_repo_wise/issues/336) | closed, not planned — `rusty_provider` is the accepted permanent answer, see the issue |
 | 6 | Federated workspace queries (`repo="all"`) | [#337](https://github.com/baileyrd/rusty_repo_wise/issues/337) | open |
 | 7 | Cross-repo import resolution beyond Rust | [#338](https://github.com/baileyrd/rusty_repo_wise/issues/338) | closed via PR #343 — now covers Rust/Python/Java/Kotlin/Scala/Go/C#/PHP |
 | 8 | Contract breaking-change detection | [#339](https://github.com/baileyrd/rusty_repo_wise/issues/339) | closed via PR #344 — persisted `.repowise-workspace/contracts.json` snapshot, diffed every `workspace-contracts` run |
-| 9 | Git-worktree auto-seeding for incremental indexing | [#340](https://github.com/baileyrd/rusty_repo_wise/issues/340) | open |
+| 9 | Git-worktree auto-seeding for incremental indexing | [#340](https://github.com/baileyrd/rusty_repo_wise/issues/340) | closed, not planned — this port has no incremental re-indexing at all yet, even for the common case; building it narrowly for worktrees first is the wrong order, see the issue |
 | 10 | Luau ("Partial" tier) language support | [#341](https://github.com/baileyrd/rusty_repo_wise/issues/341) | open |
 
 See each linked issue for the gap/why/reference/open-questions detail —

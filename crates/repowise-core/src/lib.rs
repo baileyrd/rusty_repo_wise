@@ -7,6 +7,7 @@ pub mod coverage;
 pub mod docker;
 pub mod openapi;
 pub mod org_signals;
+pub mod protobuf;
 pub mod sql;
 mod walk;
 
@@ -89,6 +90,18 @@ pub enum Language {
     /// ([`sql::SqlObject`]/[`sql::LineageEdge`]) computed separately by
     /// `repowise_sql::collect_sql`, not part of `FileRecord` at all.
     Sql,
+    /// Protobuf (issue #324, the buildable follow-up to #319's design
+    /// decision): recognized here and given the same "Structural tier"
+    /// bare zero-symbol `FileRecord` treatment as Dockerfile/SQL above,
+    /// so `.proto` files are visible in `repowise overview`'s
+    /// per-language counts and git-history views -- unlike OpenAPI
+    /// (#323), `.proto` has an unambiguous extension, so there's no
+    /// content-sniffing problem to avoid here. Its actual content --
+    /// messages/services/RPCs -- is a parallel model
+    /// ([`protobuf::ProtoObject`]) computed separately by
+    /// `repowise_protobuf::collect_protobuf`, not part of `FileRecord`
+    /// at all.
+    Proto,
     Other,
 }
 
@@ -139,6 +152,7 @@ impl Language {
             "erl" | "hrl" => Language::Erlang,
             "fs" | "fsi" | "fsx" => Language::FSharp,
             "sql" => Language::Sql,
+            "proto" => Language::Proto,
             _ => Language::Other,
         }
     }
@@ -178,6 +192,7 @@ impl Language {
             Language::Erlang => "Erlang",
             Language::FSharp => "F#",
             Language::Sql => "SQL",
+            Language::Proto => "Protobuf",
             Language::Other => "Other",
         }
     }

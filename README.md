@@ -208,9 +208,13 @@ command — see "SQL/dbt support" below. OpenAPI (issue #323, the first
 of #319's four schema/declarative-infra formats) gets a parallel
 `OpenApiObject` model read by a separate `repowise openapi` command,
 with no `Language`/`repowise overview` visibility yet — see "OpenAPI
-support" below. Every other repowise language, and every other
-config/data format in its lower-depth tier, is unimplemented. The
-health scorer now
+support" below. Protobuf (issue #324, the second of the four) gets the
+same "recognized, git-history only" `FileRecord` treatment as
+SQL/Dockerfile (unlike OpenAPI, `.proto` has an unambiguous extension)
+plus a parallel `ProtoObject` model read by a separate `repowise
+protobuf` command — see "Protobuf support" below. Every other repowise
+language, and every other config/data format in its lower-depth tier,
+is unimplemented. The health scorer now
 implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
@@ -1742,6 +1746,62 @@ file refs aren't followed), no wiki pages, no graph integration, and
 no `Language`/`repowise overview` visibility — `ownership`/`coupled`
 already work against any file path regardless, but `hotspots` and the
 per-language file counts won't see these files in this first pass.
+
+## Protobuf support
+
+The second of #319's four schema/declarative-infra formats (issue
+#324). Unlike OpenAPI, `.proto` has an unambiguous extension, so this
+one gets a real `Language::Proto` variant (Structural-tier bare
+zero-symbol `FileRecord`, visible in `repowise overview`) alongside
+the parallel `ProtoObject` model, read by a separate `repowise
+protobuf` command.
+
+```
+$ repowise protobuf
+7 protobuf object(s) found under .
+  common/types.proto
+    [message] Money  line 4  fields: cents, currency
+  orders/order.proto
+    [message] Order  line 6  fields: id, total
+    [message] GetOrderRequest  line 11  fields: id
+    [message] ListOrdersRequest  line 17  fields: limit
+    [service] OrderService  line 15
+    [rpc] OrderService.GetOrder  line 11  fields: orders.GetOrderRequest, orders.Order
+    [rpc] OrderService.ListOrders  line 17  fields: orders.ListOrdersRequest, orders.Order
+```
+
+**[`protobuf-parse`](https://crates.io/crates/protobuf-parse)'s pure
+Rust parser**, not `protoc` — no external binary dependency. Each file
+is parsed with the *repo root* as its include path (not the file's own
+directory), so `import "some/other/dir/thing.proto"` resolves against
+other `.proto` files anywhere in the repo, matching the common
+convention of imports being relative to a project root rather than the
+importing file's own location. `google/protobuf/*` well-known-type
+imports resolve even without a real file on disk — `protobuf-parse`
+bundles them internally, confirmed empirically while implementing.
+
+**A service and its RPCs don't share one object.** A service is a
+named *container* for RPCs, not itself a "type with fields" the way a
+message is, so each RPC gets its own flat `ProtoObject` entry (named
+`"Service.Method"`) — the same flat-list shape `OpenApiObject` already
+uses for endpoints, never nested under a resource. An RPC's `fields`
+hold its request/response message names, unqualified (protobuf's
+descriptor format returns those fully package-qualified with a leading
+`.`, which isn't how anyone writes them in `.proto` source).
+
+**A file whose imports don't resolve at all — a genuinely external
+dependency this repo doesn't vendor — is silently skipped**, since
+`parse_and_typecheck` requires every import to resolve. Unlike this
+issue's other explicit scope cuts, this one is a real, documented
+limitation of the first pass rather than a deliberate decision: a file
+importing an un-vendored external `.proto` produces no objects at all,
+not a partial result.
+
+**Deliberately narrow, matching #324's own scope.** No wiki pages, no
+graph integration, no RPC streaming flags (`client_streaming`/
+`server_streaming` are parsed but not modeled), and no dependency
+edges between messages/services beyond what's already visible as a
+type name in `fields`.
 
 ## Git analytics
 

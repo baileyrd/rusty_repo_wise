@@ -83,6 +83,10 @@ pub fn parse_file(
         // a SQL file's real content (`SqlObject`s, dbt lineage) is the
         // separate model `repowise_sql::collect_sql` produces.
         Language::Sql => Ok(Some(structural_only(path, language, source))),
+        // Same treatment again -- a `.proto` file's real content
+        // (messages/services/RPCs) is the separate model
+        // `repowise_protobuf::collect_protobuf` produces.
+        Language::Proto => Ok(Some(structural_only(path, language, source))),
         // The "Lightweight" tier (issue #69): unlike the Structural
         // tier above, these get a real (if unresolved) import list --
         // see `lightweight`'s own module doc for why symbols/calls stay
@@ -290,6 +294,25 @@ mod tests {
 
         assert_eq!(index.files.len(), 1);
         assert_eq!(index.files[0].language, Language::Sql);
+        assert!(index.files[0].symbols.is_empty());
+        assert!(index.files[0].imports.is_empty());
+        assert_eq!(index.other_files, 0);
+    }
+
+    #[test]
+    fn build_index_gives_a_proto_file_a_bare_zero_symbol_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("order.proto"),
+            "syntax = \"proto3\";\nmessage Order { string id = 1; }\n",
+        )
+        .unwrap();
+
+        let index = build_index(&root).unwrap();
+
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].language, Language::Proto);
         assert!(index.files[0].symbols.is_empty());
         assert!(index.files[0].imports.is_empty());
         assert_eq!(index.other_files, 0);

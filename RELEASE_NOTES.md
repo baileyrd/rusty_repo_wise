@@ -6,6 +6,55 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #328 — Protobuf support: a parallel `ProtoObject` model
+**2026-07-30** · closes [#324](https://github.com/baileyrd/rusty_repo_wise/issues/324) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319))
+
+- **New `repowise-protobuf` crate** and `ProtoObject`/`ProtoObjectKind`
+  (`Message`/`Service`/`Rpc`) model in `repowise-core::protobuf` — a parallel
+  model, not new `SymbolKind` variants, the same call already made for Docker
+  build stages (#318), SQL/dbt objects (#317), and OpenAPI objects (#323).
+- **New `Language::Proto` variant** — unlike OpenAPI (#323), `.proto` has an
+  unambiguous extension, so there's no content-sniffing problem to avoid:
+  `.proto` files get the same "Structural tier" bare zero-symbol
+  `FileRecord` treatment as Dockerfile/SQL, visible in `repowise overview`'s
+  per-language counts and git-history views.
+- **[`protobuf-parse`](https://crates.io/crates/protobuf-parse)'s pure Rust
+  parser**, not `protoc` — no external binary dependency. Each file is
+  parsed with the *repo root* as its include path (not the file's own
+  directory), so `import "some/other/dir/thing.proto"` resolves against
+  other `.proto` files anywhere in the repo — verified live with a
+  cross-directory import, and confirmed `google/protobuf/*` well-known-type
+  imports resolve even without a local file (bundled internally by the
+  crate).
+- **A service and its RPCs don't share one object** — a service is a named
+  container for RPCs, not itself a "type with fields" the way a message is,
+  so each RPC gets its own flat object (named `"Service.Method"`), matching
+  the flat, never-nested shape `OpenApiObject` already uses for endpoints.
+  An RPC's `fields` hold its unqualified request/response message names
+  (protobuf's descriptor format returns those with a leading `.` marking
+  "fully package-qualified," stripped for display).
+- **A file whose imports don't resolve at all is silently skipped** — a real,
+  documented limitation of this first pass (an un-vendored external `.proto`
+  produces zero objects, not a partial result), not a deliberate scope cut
+  the way cross-file dependency-edge modeling is.
+- **New `repowise protobuf [PATH]` CLI command**, mirroring `repowise sql`/
+  `repowise openapi`.
+- 7 new tests: 6 in `repowise-protobuf` (message fields, service+RPC flat
+  extraction, well-known-type import resolution, cross-directory import
+  resolution without duplicating the imported message, unresolvable-import
+  skip, non-`.proto`-file skip), plus 1 `build_index` integration test in
+  `repowise-parser` confirming `.proto` files get the Structural-tier bare
+  zero-symbol treatment. Local gate (all six CI steps by exit status)
+  passes.
+- Verified live against a two-file fixture (a cross-package import, a
+  service with a unary and a streaming RPC) plus an unrelated `.txt` file:
+  `repowise protobuf` reported exactly 7 objects with correct kinds/names/
+  fields/line numbers, `Money` reported once despite being imported (not
+  duplicated per importer), and `repowise overview` reported `Protobuf 2`
+  alongside the repo's other languages.
+
+---
+
 ## PR #327 — OpenAPI support: a parallel `OpenApiObject` model
 **2026-07-30** · closes [#323](https://github.com/baileyrd/rusty_repo_wise/issues/323) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319))
 

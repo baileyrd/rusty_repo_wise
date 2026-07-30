@@ -204,9 +204,13 @@ still no symbols/calls/complexity — see "Lightweight-tier languages"
 below. SQL/dbt (issue #317, its own tier in repowise) gets the same
 "recognized, git-history only" `FileRecord` treatment plus a parallel
 `SqlObject`/`LineageEdge` model read by a separate `repowise sql`
-command — see "SQL/dbt support" below. Every other repowise language,
-and every other config/data format in its lower-depth tier, is
-unimplemented. The health scorer now
+command — see "SQL/dbt support" below. OpenAPI (issue #323, the first
+of #319's four schema/declarative-infra formats) gets a parallel
+`OpenApiObject` model read by a separate `repowise openapi` command,
+with no `Language`/`repowise overview` visibility yet — see "OpenAPI
+support" below. Every other repowise language, and every other
+config/data format in its lower-depth tier, is unimplemented. The
+health scorer now
 implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
@@ -1689,6 +1693,55 @@ lineage, no wiki pages, no graph integration, and no full dbt-project
 semantics beyond `ref()`/`source()` (materializations, tests, exposures
 aren't modeled) — table/view-level lineage and object cataloging only,
 matching sqlglot's typical usage in the original tool.
+
+## OpenAPI support
+
+The first of #319's four schema/declarative-infra formats (issue #323).
+Every `.yaml`/`.yml`/`.json` file in the repo is a parse candidate;
+only ones that actually deserialize as a valid OpenAPI 3.x document
+are kept, via a separate `repowise openapi` command.
+
+```
+$ repowise openapi
+5 OpenAPI object(s) found under .
+  openapi.yaml
+    [schema] Order  line 3  fields: id, total, customer
+    [schema] OrderList  line 33
+    [endpoint] listOrders  line 6
+    [endpoint] POST /orders  line 6
+    [endpoint] getOrder  line 16
+```
+
+**No content-sniffing step, and no `Language::OpenApi` variant.**
+[`openapiv3`](https://crates.io/crates/openapiv3)'s `OpenAPI` struct
+requires `openapi`/`info`/`paths` fields (no `Option`, no
+`#[serde(default)]`) — a document that deserializes into it
+successfully is, by construction, a real OpenAPI 3.x spec. That makes
+"try to parse, keep it if it works" itself a reliable filter, so there's
+no separate sniffing pass, and no need to teach `discover_files`'s
+per-file (extension-only) classification about file content. A
+document that fails to parse — because it isn't a spec, or is a
+Swagger 2.0 document, which this crate doesn't support — is silently
+skipped, the same graceful-degradation call already made for a
+malformed non-Jinja `.sql` file.
+
+**One `OpenApiObject` per `components.schemas` entry and per HTTP
+method on a path.** A schema's `fields` come from its property names
+when it's an object type; non-object schema kinds (array, string,
+oneOf/allOf/anyOf, ...) and `$ref`-only entries get no fields. An
+endpoint is named by its `operationId` when present, else `"METHOD
+path"` (e.g. `"DELETE /orders/{id}"`). `openapiv3`'s serde-based
+deserialization carries no line/span info at all, so line numbers are
+a best-effort text search for the schema/path name in the raw
+source — the same tradeoff SQL's `CREATE FUNCTION`/`PROCEDURE`
+fallback already makes.
+
+**Deliberately narrow, matching #323's own scope.** No `$ref`
+resolution beyond a name already visible in the same file (external
+file refs aren't followed), no wiki pages, no graph integration, and
+no `Language`/`repowise overview` visibility — `ownership`/`coupled`
+already work against any file path regardless, but `hotspots` and the
+per-language file counts won't see these files in this first pass.
 
 ## Git analytics
 

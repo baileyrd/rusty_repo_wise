@@ -5,6 +5,7 @@
 
 pub mod coverage;
 pub mod docker;
+pub mod openapi;
 pub mod org_signals;
 pub mod sql;
 mod walk;

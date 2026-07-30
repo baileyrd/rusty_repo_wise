@@ -134,16 +134,20 @@ fn a_two_repo_cycle_lands_in_the_cyclic_core() {
 }
 
 /// The failure this feature had to avoid: a workspace this port cannot
-/// resolve must NOT be reported as perfectly decoupled.
+/// resolve must NOT be reported as perfectly decoupled. Uses TypeScript,
+/// not Python -- Python joined the module-map languages this pass
+/// resolves, so it no longer demonstrates an unresolvable workspace;
+/// TypeScript still resolves imports directly against the filesystem
+/// instead, so it's the language that now proves this guarantee.
 #[test]
-fn a_workspace_with_no_rust_withholds_the_score() {
+fn a_workspace_with_no_resolvable_language_withholds_the_score() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
 
     for name in ["svc-a", "svc-b"] {
         let path = root.join(name);
         fs::create_dir_all(&path).unwrap();
-        fs::write(path.join("app.py"), "import requests\ndef go(): pass\n").unwrap();
+        fs::write(path.join("app.ts"), "export function go(): void {}\n").unwrap();
         index_dir(&path);
     }
     let repos = vec![

@@ -18,15 +18,20 @@
 //!
 //! # The honesty problem this module has to solve
 //!
-//! Cross-repo import resolution in this port is **Rust-only** -- it's
-//! the one language anchored to a `Cargo.toml`-derived crate name.
-//! Every other language's cross-repo imports are left unresolved.
+//! Cross-repo import resolution in this port covers every language
+//! resolved single-repo via a name -> file module map (Rust, Python,
+//! Java/Kotlin/Scala, Go, C#, PHP -- see
+//! `repowise_graph::cross_repo::MODULE_MAP_LANGUAGES`). Every other
+//! language (TypeScript/JavaScript/C/C++/Ruby/Swift/Dart/Shell, and the
+//! Structural/Lightweight tiers) resolves relative imports directly
+//! against the filesystem instead, which has no cross-repo equivalent
+//! here, so those imports are left unresolved.
 //!
 //! That makes the naive version of this feature actively dangerous: a
-//! workspace of six Python services would resolve zero edges, compute a
-//! propagation cost of zero, find no cycles, and report the *best
-//! possible* architecture score. A perfect score is precisely the wrong
-//! answer for a system nobody measured.
+//! workspace of six TypeScript services would resolve zero edges,
+//! compute a propagation cost of zero, find no cycles, and report the
+//! *best possible* architecture score. A perfect score is precisely the
+//! wrong answer for a system nobody measured.
 //!
 //! So [`WorkspaceMetrics`] carries a [`Confidence`], and the score is an
 //! `Option` that is `None` whenever the graph couldn't be resolved
@@ -34,7 +39,7 @@
 //! output; a flattering one isn't.
 
 use crate::{workspace_architecture, ResolvedWorkspaceRepo};
-use repowise_core::{Language, RepoIndex};
+use repowise_core::RepoIndex;
 use std::collections::{BTreeSet, HashMap};
 
 /// How much the numbers below can be trusted.
@@ -43,14 +48,15 @@ pub enum Confidence {
     /// Cross-repo edges were resolved. The metrics describe a real
     /// graph.
     Resolved,
-    /// No edges resolved, and no Rust files exist to resolve them from.
-    /// The zeros below mean "nothing was measured", **not** "nothing is
-    /// coupled". No score is reported.
+    /// No edges resolved, and no files in any resolvable language exist
+    /// to resolve them from. The zeros below mean "nothing was
+    /// measured", **not** "nothing is coupled". No score is reported.
     NoResolvableLanguage,
-    /// No edges resolved, but Rust files are present -- so resolution
-    /// ran and genuinely found nothing. Plausibly a real finding (truly
-    /// independent repos), reported with a score but flagged, because
-    /// an unrecognized layout can produce the same zero.
+    /// No edges resolved, but files in a resolvable language are
+    /// present -- so resolution ran and genuinely found nothing.
+    /// Plausibly a real finding (truly independent repos), reported
+    /// with a score but flagged, because an unrecognized layout can
+    /// produce the same zero.
     NoEdgesFound,
 }
 
@@ -67,14 +73,16 @@ impl Confidence {
         match self {
             Confidence::Resolved => "cross-repo edges were resolved; metrics describe a real graph",
             Confidence::NoResolvableLanguage => {
-                "no cross-repo edges could be resolved and no Rust files were found -- \
-                 cross-repo resolution in this port is Rust-only, so nothing here was \
-                 measured. These zeros are not a finding of low coupling."
+                "no cross-repo edges could be resolved and no files in a resolvable \
+                 language were found -- cross-repo resolution in this port covers Rust, \
+                 Python, Java, Kotlin, Scala, Go, C#, and PHP; every other language is \
+                 left unresolved, so nothing here was measured. These zeros are not a \
+                 finding of low coupling."
             }
             Confidence::NoEdgesFound => {
-                "resolution ran over Rust files and found no cross-repo imports -- either \
-                 genuinely independent repos, or a layout this port's resolver doesn't \
-                 recognize"
+                "resolution ran over a resolvable language and found no cross-repo \
+                 imports -- either genuinely independent repos, or a layout this port's \
+                 resolver doesn't recognize"
             }
         }
     }
@@ -180,14 +188,20 @@ fn transitive_closure(
     reach
 }
 
-/// Does any repo in the workspace contain Rust files?
+/// Does any repo in the workspace contain files in a language cross-repo
+/// resolution can actually resolve (`repowise_graph::cross_repo::MODULE_MAP_LANGUAGES`)?
 ///
 /// The discriminator between "resolution found nothing" and "resolution
 /// never had anything to work with" -- see [`Confidence`].
-fn has_rust_files(repos: &[ResolvedWorkspaceRepo]) -> bool {
+fn has_resolvable_language_files(repos: &[ResolvedWorkspaceRepo]) -> bool {
     repos.iter().any(|repo| {
         RepoIndex::load(&repo.path)
-            .map(|index| index.files.iter().any(|f| f.language == Language::Rust))
+            .map(|index| {
+                index
+                    .files
+                    .iter()
+                    .any(|f| repowise_graph::MODULE_MAP_LANGUAGES.contains(&f.language))
+            })
             .unwrap_or(false)
     })
 }
@@ -232,7 +246,7 @@ pub fn workspace_metrics(repos: &[ResolvedWorkspaceRepo]) -> WorkspaceMetrics {
 
     let confidence = if !edges.is_empty() {
         Confidence::Resolved
-    } else if has_rust_files(repos) {
+    } else if has_resolvable_language_files(repos) {
         Confidence::NoEdgesFound
     } else {
         Confidence::NoResolvableLanguage

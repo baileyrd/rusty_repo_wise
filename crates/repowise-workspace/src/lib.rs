@@ -7,7 +7,7 @@
 //! can't literally co-change together.
 //!
 //! This slice adds the real thing: `workspace_architecture` resolves
-//! Rust `use` imports across repo boundaries (via
+//! imports across repo boundaries (via
 //! `repowise_graph::cross_repo_import_edges`), powering the
 //! `get_architecture` MCP tool and the dashboard's system-map view.
 //! `workspace_blast_radius` answers "which other repos would be
@@ -16,10 +16,14 @@
 //! precedent, which is also one-hop, not transitive), powering
 //! `get_blast_radius`. `detect_workspace_cycles` flags circular
 //! cross-repo dependencies over the same edge data, for the
-//! conformance view. Rust-only for now -- the only language this port
-//! anchors to a `Cargo.toml`-derived crate name; every other language's
-//! cross-repo imports are left unresolved, deliberately, for a future
-//! slice.
+//! conformance view. Covers every language this port resolves
+//! single-repo via a name -> file module map: Rust, Python,
+//! Java/Kotlin/Scala, Go, C#, and PHP's `use Namespace\Class;` form --
+//! see `repowise_graph::cross_repo`'s own doc comment
+//! (`MODULE_MAP_LANGUAGES`) for exactly which and why. Every other
+//! language resolves imports directly against the filesystem instead of
+//! through a module map (a different resolution mechanism entirely) and
+//! has no cross-repo equivalent here, deliberately, for a future slice.
 //!
 //! `workspace_contracts` (in `contracts.rs`) is the last of #64's five
 //! bundled items, and fully independent of the rest of this crate: a

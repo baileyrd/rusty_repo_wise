@@ -380,7 +380,7 @@ repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + o
 repowise workspace-repos --workspace <FILE>  # list every repo in a workspace TOML file + indexed status
 repowise workspace-co-changes --workspace <FILE>  # each workspace repo's own most-coupled file pairs
                                      #   --top <N> (default 10) how many pairs to list per repo
-repowise workspace-architecture --workspace <FILE>  # cross-repo Rust `use` resolution: which repos depend on which
+repowise workspace-architecture --workspace <FILE>  # cross-repo import resolution: which repos depend on which
 repowise workspace-blast-radius --workspace <FILE> --repo <NAME> --file <FILE>  # direct cross-repo importers of one file
 repowise workspace-conformance --workspace <FILE> [--json] [--allow-unverified]  # circular cross-repo dependencies; exits non-zero on findings, so it gates CI
 repowise workspace-contracts --workspace <FILE>  # regex-based HTTP producer/consumer route matching across repos
@@ -2987,14 +2987,24 @@ no new dependency resolution required.
   "path", "available", "pairs": [{"file_a", "file_b", "count"}]}]}`
   shape) and the dashboard gets a **Workspace Co-Changes section**.
 
-The next slice adds the real thing: cross-repo Rust `use` resolution.
+The next slice adds the real thing: cross-repo import resolution.
 `repowise-graph` already builds a per-crate Rust module-path map
 (`crate::path` -> file) from each repo's `Cargo.toml`; merging those
 maps across workspace repos lets an unresolved `use other_crate::Thing`
-in one repo resolve to a real file in another. Rust-only for now — the
-only language this port anchors to a `Cargo.toml`-derived crate name;
-every other language's cross-repo imports are left unresolved,
-deliberately, for a future slice.
+in one repo resolve to a real file in another. Rust-only at first — the
+only language this port anchored to a `Cargo.toml`-derived crate name at
+the time — every other language's cross-repo imports were left
+unresolved, deliberately, for a future slice. That slice arrived with
+issue #338: cross-repo resolution now covers every language this port
+already resolves single-repo via a name -> file module map (Rust,
+Python, Java, Kotlin, Scala, Go, C#, and PHP's `use Namespace\Class;`
+form — see `repowise_graph::cross_repo::MODULE_MAP_LANGUAGES`), reusing
+the exact per-language `(separator, map)` table `RepoGraph::build`
+already computes rather than re-deriving it.
+TypeScript/JavaScript/C/C++/Ruby/Swift/Dart/Shell resolve imports
+directly against the filesystem at parse time instead of through a
+module map — a different resolution mechanism entirely — so they still
+have no cross-repo equivalent here.
 
 - `repowise workspace-architecture --workspace <path>` prints each
   repo's indexed status, a repo-pair dependency summary, and the
@@ -3028,9 +3038,10 @@ further human-specified rule set to detect.
   - It reports one of three verdicts, not two. `PASS` says how many
     edges were actually checked. `FAIL` lists the cycles. **`UNVERIFIED`
     is the third**, and it exists because "no cycles found" and "no
-    edges to check" produce the same empty list — a Rust-only resolver
-    pointed at a Python workspace finds nothing every time, and a gate
-    that greens on that is worse than no gate, because it looks like
+    edges to check" produce the same empty list — a resolver pointed at
+    a workspace of languages outside `MODULE_MAP_LANGUAGES` (e.g. an
+    all-TypeScript workspace) finds nothing every time, and a gate that
+    greens on that is worse than no gate, because it looks like
     coverage. `UNVERIFIED` exits non-zero by default; `--allow-unverified`
     opts into treating it as success, which makes that an explicit,
     reviewable choice rather than a silent default.
@@ -3102,18 +3113,34 @@ route-shaped string that isn't actually a route) are both expected.
     describes structure, and mixing them makes the number drift for
     reasons that aren't architectural.
   - **The score is withheld — not zeroed, not maxed — when nothing was
-    measurable.** Cross-repo resolution here is Rust-only, so a workspace
-    of Python services resolves zero edges, finds no cycles, and would
-    otherwise be handed the *best possible* score for never having been
-    measured. When no Rust exists to resolve from, the report says so and
-    reports no score at all. Every run also states the Rust-only limit,
-    so the numbers read as a lower bound on real coupling.
+    measurable.** Cross-repo resolution here covers Rust, Python, Java,
+    Kotlin, Scala, Go, C#, and PHP (`MODULE_MAP_LANGUAGES`), so a
+    workspace of e.g. only TypeScript services resolves zero edges,
+    finds no cycles, and would otherwise be handed the *best possible*
+    score for never having been measured. When no file in a resolvable
+    language exists, the report says so and reports no score at all.
+    Every run also states the resolution-coverage limit, so the numbers
+    read as a lower bound on real coupling.
 - `repowise serve-dashboard --workspace <path>` gains `GET
   /api/workspace-contracts` and the dashboard gets a **Contracts
   section**.
 - This closes out all five items #64 originally bundled. There's still
   no way to switch which repo the rest of the dashboard/MCP server
   operates on — `root` stays fixed for the life of the process.
+
+Issue #338, filed after #64 as a follow-on parity gap (this port's
+cross-repo resolution covered only Rust, where upstream repowise
+resolves cross-repo imports language-agnostically), generalized
+`cross_repo_import_edges` to every language this port already resolves
+single-repo via a name -> file module map rather than adding one more
+language ad hoc: Rust, Python, Java, Kotlin, Scala, Go, C#, and PHP.
+`workspace-architecture`/`workspace-blast-radius`/`workspace-metrics`/
+`workspace-conformance`, `get_architecture`/`get_blast_radius`, and the
+dashboard's System Map all inherit this for free, since they're built on
+the one shared `cross_repo_import_edges` function. Still out of scope:
+TypeScript/JavaScript/C/C++/Ruby/Swift/Dart/Shell resolve imports
+directly against the filesystem rather than through a module map — a
+different resolution mechanism this pass didn't touch.
 
 ## Testing
 

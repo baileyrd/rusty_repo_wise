@@ -71,8 +71,10 @@ forcing function (scaling, team boundary, fault isolation) that would
 justify it yet. `repowise-workspace` (issue #64's multi-repo/workspace
 support) depends on `repowise-core` (for `RepoIndex::load`),
 `repowise-git` (for per-repo `GitAnalytics`-derived co-change
-reporting), and now `repowise-graph` (for cross-repo Rust `use`
-resolution, via `repowise_graph::cross_repo_import_edges`) —
+reporting), and now `repowise-graph` (for cross-repo import resolution,
+via `repowise_graph::cross_repo_import_edges` — covers every language
+resolved single-repo via a name -> file module map: Rust, Python,
+Java/Kotlin/Scala, Go, C#, and PHP, per issue #338) —
 deliberately kept as its own crate rather than folded into
 `repowise-core` itself: `repowise-core` staying dependency-free of
 every other `repowise-*` crate is a load-bearing invariant the rest of

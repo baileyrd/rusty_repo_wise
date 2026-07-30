@@ -14,7 +14,8 @@ pub mod json_graph;
 pub use search::{classify, parse_symbol_kind, path_matches, FileKind, SearchMode};
 
 pub use cross_repo::{
-    cross_repo_import_edges, detect_repo_cycles, rust_module_map, CrossRepoImportEdge,
+    cross_repo_import_edges, detect_repo_cycles, module_map, rust_module_map, CrossRepoImportEdge,
+    MODULE_MAP_LANGUAGES,
 };
 
 use petgraph::algo::kosaraju_scc;

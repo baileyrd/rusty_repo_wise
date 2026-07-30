@@ -191,17 +191,23 @@ fn workspace_architecture_resolves_same_repo_imports_first_even_with_a_naming_co
 }
 
 #[test]
-fn workspace_architecture_ignores_non_rust_imports() {
+fn workspace_architecture_ignores_relative_import_languages() {
+    // TypeScript resolves its imports directly against the filesystem at
+    // parse time rather than through a name -> file module map (see
+    // `repowise-graph::cross_repo::MODULE_MAP_LANGUAGES`'s own doc
+    // comment), so it has no cross-repo equivalent here -- unlike
+    // Python, which joined the module-map languages this pass covers.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
 
     let repo_a_path = root.join("repo-a");
     fs::create_dir_all(&repo_a_path).unwrap();
-    fs::write(repo_a_path.join("a.py"), "import os\n").unwrap();
+    fs::write(repo_a_path.join("a.ts"), "export const x = 1;\n").unwrap();
     index_dir(&repo_a_path);
 
     let repo_b_path = root.join("repo-b");
-    write_crate(&repo_b_path, "repo-b", &[("src/lib.rs", "\n")]);
+    fs::create_dir_all(&repo_b_path).unwrap();
+    fs::write(repo_b_path.join("b.ts"), "import { x } from './a';\n").unwrap();
     index_dir(&repo_b_path);
 
     let repos = vec![
@@ -217,6 +223,116 @@ fn workspace_architecture_ignores_non_rust_imports() {
 
     let report = workspace_architecture(&repos);
     assert!(report.edges.is_empty());
+}
+
+#[test]
+fn workspace_architecture_resolves_a_cross_repo_python_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    let repo_a_path = root.join("repo-a");
+    fs::create_dir_all(&repo_a_path).unwrap();
+    fs::write(repo_a_path.join("utils.py"), "def bar():\n    return 42\n").unwrap();
+    let index_a = index_dir(&repo_a_path);
+
+    let repo_b_path = root.join("repo-b");
+    fs::create_dir_all(&repo_b_path).unwrap();
+    fs::write(
+        repo_b_path.join("main.py"),
+        "from utils import bar\n\ndef top():\n    return bar()\n",
+    )
+    .unwrap();
+    index_dir(&repo_b_path);
+
+    let repos = vec![
+        ResolvedWorkspaceRepo {
+            name: "repo-a".to_string(),
+            path: repo_a_path,
+        },
+        ResolvedWorkspaceRepo {
+            name: "repo-b".to_string(),
+            path: repo_b_path,
+        },
+    ];
+
+    let report = workspace_architecture(&repos);
+
+    // `from utils import bar` produces two `ImportRef`s (one for the
+    // `utils` module path itself, one for the named `utils.bar` import
+    // -- see `python.rs`'s `import_from_statement` handling), and this
+    // pass reports one edge per resolved import site rather than
+    // deduping to one edge per file pair, matching its existing
+    // (pre-Python) behavior for a multi-item Rust `use` list.
+    assert_eq!(report.edges.len(), 2);
+    assert!(report
+        .edges
+        .iter()
+        .all(|e| e.from_repo == "repo-b" && e.to_repo == "repo-a"));
+    let utils_py = find_file(&index_a, "utils.py").path.clone();
+    assert!(report.edges.iter().all(|e| e.to_file == utils_py));
+    let mut import_paths: Vec<&str> = report
+        .edges
+        .iter()
+        .map(|e| e.import_path.as_str())
+        .collect();
+    import_paths.sort();
+    assert_eq!(import_paths, vec!["utils", "utils.bar"]);
+}
+
+#[test]
+fn workspace_architecture_resolves_a_cross_repo_go_import() {
+    // Go uses `/`-separated module paths (unlike Python/JVM/C#'s `.`) --
+    // exercises `cross_repo::separator` picking the right one per
+    // language rather than hardcoding Rust's `::`.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+
+    let repo_a_path = root.join("repo-a");
+    fs::create_dir_all(&repo_a_path).unwrap();
+    fs::write(
+        repo_a_path.join("go.mod"),
+        "module example.com/repoa\n\ngo 1.21\n",
+    )
+    .unwrap();
+    fs::write(
+        repo_a_path.join("bar.go"),
+        "package repoa\n\nfunc Bar() int {\n\treturn 42\n}\n",
+    )
+    .unwrap();
+    let index_a = index_dir(&repo_a_path);
+
+    let repo_b_path = root.join("repo-b");
+    fs::create_dir_all(&repo_b_path).unwrap();
+    fs::write(
+        repo_b_path.join("go.mod"),
+        "module example.com/repob\n\ngo 1.21\n",
+    )
+    .unwrap();
+    fs::write(
+        repo_b_path.join("main.go"),
+        "package main\n\nimport \"example.com/repoa\"\n\nfunc top() int {\n\treturn repoa.Bar()\n}\n",
+    )
+    .unwrap();
+    index_dir(&repo_b_path);
+
+    let repos = vec![
+        ResolvedWorkspaceRepo {
+            name: "repo-a".to_string(),
+            path: repo_a_path,
+        },
+        ResolvedWorkspaceRepo {
+            name: "repo-b".to_string(),
+            path: repo_b_path,
+        },
+    ];
+
+    let report = workspace_architecture(&repos);
+
+    assert_eq!(report.edges.len(), 1);
+    let edge = &report.edges[0];
+    assert_eq!(edge.from_repo, "repo-b");
+    assert_eq!(edge.to_repo, "repo-a");
+    assert_eq!(edge.to_file, find_file(&index_a, "bar.go").path);
 }
 
 #[test]

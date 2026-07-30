@@ -475,11 +475,11 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         top: usize,
     },
-    /// Resolve Rust `use` imports across workspace repo boundaries:
-    /// which repos depend on which others, and the individual import
-    /// sites behind each dependency. Rust-only -- see
-    /// `repowise-workspace`'s own docs for why every other language's
-    /// cross-repo imports are left unresolved.
+    /// Resolve imports across workspace repo boundaries: which repos
+    /// depend on which others, and the individual import sites behind
+    /// each dependency. Covers Rust, Python, Java, Kotlin, Scala, Go,
+    /// C#, and PHP -- see `repowise-workspace`'s own docs for why every
+    /// other language's cross-repo imports are left unresolved.
     WorkspaceArchitecture {
         #[arg(long)]
         workspace: PathBuf,
@@ -3125,7 +3125,7 @@ fn cmd_workspace_architecture(workspace: &Path) -> anyhow::Result<()> {
     }
 
     if report.repo_edges.is_empty() {
-        println!("\nNo cross-repo Rust imports resolved between the configured repos.");
+        println!("\nNo cross-repo imports resolved between the configured repos.");
         return Ok(());
     }
 
@@ -3187,10 +3187,11 @@ fn cmd_workspace_blast_radius(workspace: &Path, repo: &str, file: &Path) -> anyh
 ///
 /// The third variant is why this is an enum rather than a bool. "No
 /// cycles found" and "no edges to check" produce the same empty cycle
-/// list, and reporting both as a pass is a **false pass**: a Rust-only
-/// resolver pointed at a Python workspace finds nothing every time, and
-/// a CI gate that greens on that is worse than no gate, because it
-/// looks like coverage.
+/// list, and reporting both as a pass is a **false pass**: a resolver
+/// pointed at a workspace of languages it doesn't cover (see
+/// `repowise_graph::cross_repo::MODULE_MAP_LANGUAGES`) finds nothing
+/// every time, and a CI gate that greens on that is worse than no gate,
+/// because it looks like coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConformanceVerdict {
     /// Edges were resolved and no cycle exists among them. A real pass.
@@ -3233,7 +3234,7 @@ impl ConformanceVerdict {
 ///
 /// Built on `workspace_metrics` rather than `detect_workspace_cycles`
 /// alone so this command and `workspace-metrics` cannot disagree about
-/// whether a workspace has cycles, and so the Rust-only resolvability
+/// whether a workspace has cycles, and so the resolvability-language
 /// signal is shared rather than re-derived.
 fn conformance_verdict(m: &repowise_workspace::WorkspaceMetrics) -> ConformanceVerdict {
     if !m.cyclic_core.is_empty() {
@@ -3296,8 +3297,9 @@ fn render_conformance(
     }
 
     out.push_str(
-        "\nCross-repo resolution is Rust-only; other languages' imports are left\n\
-         unresolved, so a clean result bounds what was checked, not what exists.\n",
+        "\nCross-repo resolution covers Rust, Python, Java, Kotlin, Scala, Go, C#, and\n\
+         PHP; other languages' imports are left unresolved, so a clean result bounds\n\
+         what was checked, not what exists.\n",
     );
     out
 }
@@ -3317,8 +3319,8 @@ fn conformance_json(
             "explanation": m.confidence.explanation(),
         },
         "resolution_caveat":
-            "cross-repo import resolution is Rust-only; a clean result bounds what was \
-             checked, not what exists",
+            "cross-repo import resolution covers Rust, Python, Java, Kotlin, Scala, Go, \
+             C#, and PHP; a clean result bounds what was checked, not what exists",
     })
 }
 
@@ -3361,8 +3363,9 @@ fn cmd_workspace_conformance(
 /// without a workspace on disk.
 ///
 /// Leads with the confidence caveat whenever the graph wasn't fully
-/// resolvable. Cross-repo resolution here is Rust-only, so a workspace
-/// of Python services resolves zero edges and would otherwise be
+/// resolvable. Cross-repo resolution here covers Rust, Python, Java,
+/// Kotlin, Scala, Go, C#, and PHP, so a workspace of e.g. only
+/// TypeScript services resolves zero edges and would otherwise be
 /// reported as perfectly decoupled -- the best possible score for a
 /// system nobody measured. That warning has to come before the numbers
 /// it invalidates, not after.
@@ -3430,8 +3433,9 @@ fn render_metrics(m: &repowise_workspace::WorkspaceMetrics) -> String {
     out.push_str(
         "\nStructural edges only; co-change is excluded deliberately -- it moves with\n\
          how a team worked that quarter, and this score describes structure.\n\
-         Cross-repo resolution is Rust-only: every other language's imports are\n\
-         left unresolved, so these numbers are a lower bound on real coupling.\n",
+         Cross-repo resolution covers Rust, Python, Java, Kotlin, Scala, Go, C#, and\n\
+         PHP: every other language's imports are left unresolved, so these numbers\n\
+         are a lower bound on real coupling.\n",
     );
 
     out
@@ -3453,8 +3457,9 @@ fn metrics_json(m: &repowise_workspace::WorkspaceMetrics) -> serde_json::Value {
         },
         "excludes": ["co-change (behavioral, not structural)"],
         "resolution_caveat":
-            "cross-repo import resolution is Rust-only; other languages' imports are \
-             unresolved, so these numbers are a lower bound on real coupling",
+            "cross-repo import resolution covers Rust, Python, Java, Kotlin, Scala, Go, \
+             C#, and PHP; other languages' imports are unresolved, so these numbers are \
+             a lower bound on real coupling",
     })
 }
 
@@ -4193,7 +4198,7 @@ mod tests {
         // means, and a reader who only ever sees clean output would
         // otherwise never learn the limits.
         assert!(out.contains("co-change is excluded"), "{out}");
-        assert!(out.contains("Rust-only"), "{out}");
+        assert!(out.contains("PHP"), "{out}");
         assert!(out.contains("lower bound on real coupling"), "{out}");
     }
 
@@ -4220,10 +4225,7 @@ mod tests {
         ));
         assert_eq!(v["confidence"]["level"], "no-resolvable-language");
         assert!(v["complexity_score"].is_null(), "withheld, not zero or ten");
-        assert!(v["resolution_caveat"]
-            .as_str()
-            .unwrap()
-            .contains("Rust-only"));
+        assert!(v["resolution_caveat"].as_str().unwrap().contains("PHP"));
         assert_eq!(
             v["complexity_scale"],
             repowise_workspace::WorkspaceMetrics::SCALE
@@ -4326,10 +4328,7 @@ mod tests {
         let v = conformance_json(&m, conformance_verdict(&m));
         assert_eq!(v["verdict"], "unverified");
         assert_eq!(v["edges_checked"], 0);
-        assert!(v["resolution_caveat"]
-            .as_str()
-            .unwrap()
-            .contains("Rust-only"));
+        assert!(v["resolution_caveat"].as_str().unwrap().contains("PHP"));
     }
 
     fn rec(

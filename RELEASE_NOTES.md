@@ -6,6 +6,31 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #342 — Add ParityGaps.md and file 10 parity-gap issues vs upstream repowise
+**2026-07-30**
+
+- **New `ParityGaps.md`**: a snapshot audit of where this port still
+  diverges from upstream [repowise-dev/repowise](https://github.com/repowise-dev/repowise),
+  cross-checked against this repo's own README/ARCHITECTURE.md in full and
+  its closed-issue history (120 closed, 0 open at the time) rather than an
+  earlier, partly-stale in-conversation summary — that earlier pass
+  under-read this repo's 3,143-line README and over-stated several gaps
+  that are actually already shipped (the live dashboard server,
+  `repowise-distill`, the post-commit hook, most of workspace support).
+  The corrected file distinguishes genuinely open gaps from capabilities a
+  human already reviewed and declined as permanent non-goals
+  (ML-calibrated health weights, hosted/SaaS).
+- **Ten new tracking issues** (#332–#341), each `[needs-human]`/
+  `parity-gap`/`enhancement`-labeled matching this repo's existing
+  convention (e.g. #64, #319): VS Code extension, Claude Code/Codex/
+  opencode agent plugins, a GitHub PR bot, webhook/polling auto-sync,
+  native multi-provider LLM support, federated workspace queries
+  (`repo="all"`), cross-repo import resolution beyond Rust, contract
+  breaking-change detection, git-worktree auto-seeding, and Luau
+  ("Partial" tier) language support.
+
+---
+
 ## PR #331 — ADR mining: README/docs-prose decision source + decision confidence
 **2026-07-30** · closes [#71](https://github.com/baileyrd/rusty_repo_wise/issues/71)
 

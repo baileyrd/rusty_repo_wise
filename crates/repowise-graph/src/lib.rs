@@ -193,6 +193,7 @@ impl RepoGraph {
                 | Language::Dockerfile
                 | Language::Sql
                 | Language::Proto
+                | Language::GraphQl
                 | Language::Elixir
                 | Language::Clojure
                 | Language::Haskell
@@ -237,6 +238,7 @@ impl RepoGraph {
                 | Language::Dockerfile
                 | Language::Sql
                 | Language::Proto
+                | Language::GraphQl
                 | Language::Elixir
                 | Language::Clojure
                 | Language::Haskell

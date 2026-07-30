@@ -362,6 +362,16 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List GraphQL SDL types, plus the fields on `Query`/`Mutation`/
+    /// `Subscription` root types (issue #325, the buildable follow-up
+    /// to #319's design decision). Root-type detection honors an
+    /// explicit `schema { query: X, ... }` block if present, else falls
+    /// back to the default `Query`/`Mutation`/`Subscription` names. No
+    /// wiki pages or graph integration yet.
+    Graphql {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -703,6 +713,7 @@ fn main() -> anyhow::Result<()> {
         Command::Sql { path } => cmd_sql(&path),
         Command::Openapi { path } => cmd_openapi(&path),
         Command::Protobuf { path } => cmd_protobuf(&path),
+        Command::Graphql { path } => cmd_graphql(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2796,6 +2807,48 @@ fn cmd_protobuf(path: &Path) -> anyhow::Result<()> {
 
     let mut by_file: std::collections::BTreeMap<&Path, Vec<&repowise_core::protobuf::ProtoObject>> =
         std::collections::BTreeMap::new();
+    for object in &objects {
+        by_file.entry(&object.file).or_default().push(object);
+    }
+
+    for (file, file_objects) in by_file {
+        println!("  {}", display_path(file, &root));
+        for object in &file_objects {
+            let fields = if object.fields.is_empty() {
+                String::new()
+            } else {
+                format!("  fields: {}", object.fields.join(", "))
+            };
+            println!(
+                "    [{}] {}  line {}{fields}",
+                object.kind.label(),
+                object.name,
+                object.start_line
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_graphql(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let objects = repowise_graphql::collect_graphql(&root)?;
+
+    if objects.is_empty() {
+        println!("No GraphQL SDL documents found under {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} GraphQL object(s) found under {}",
+        objects.len(),
+        root.display()
+    );
+
+    let mut by_file: std::collections::BTreeMap<
+        &Path,
+        Vec<&repowise_core::graphql::GraphQlObject>,
+    > = std::collections::BTreeMap::new();
     for object in &objects {
         by_file.entry(&object.file).or_default().push(object);
     }

@@ -6,6 +6,53 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #329 — GraphQL support: a parallel `GraphQlObject` model
+**2026-07-30** · closes [#325](https://github.com/baileyrd/rusty_repo_wise/issues/325) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319))
+
+- **New `repowise-graphql` crate** and `GraphQlObject`/`GraphQlObjectKind`
+  (`Type`/`Query`/`Mutation`/`Subscription`) model in `repowise-core::graphql`
+  — a parallel model, not new `SymbolKind` variants, the same call already
+  made for Docker build stages, SQL/dbt objects, OpenAPI objects, and
+  protobuf objects.
+- **New `Language::GraphQl` variant** — like Protobuf (#324), `.graphql`/
+  `.gql` has an unambiguous extension, so there's no content-sniffing
+  problem to avoid: these files get the same "Structural tier" bare
+  zero-symbol `FileRecord` treatment as Dockerfile/SQL/Protobuf, visible in
+  `repowise overview`'s per-language counts and git-history views.
+- **[`graphql-parser`](https://crates.io/crates/graphql-parser)**, this
+  issue's own original suggestion. Unlike `sqlparser`/`openapiv3`/
+  `protobuf-parse`, every definition and field this crate hands back carries
+  a real parsed line/column position — no best-effort text-search fallback
+  needed here, a nicer situation than the other three schema-format crates.
+- **`Query`/`Mutation`/`Subscription` aren't a distinct syntax** — ordinary
+  `type` definitions the GraphQL spec treats as schema roots by default
+  name, unless an explicit `schema { query: X, mutation: Y }` block says
+  otherwise. Root-type detection honors an explicit `schema` block when
+  present, falling back to the default names otherwise — verified live both
+  ways. Each field on a root type becomes its own flat object
+  (`"Query.order"`), never nested under a `Query` object, matching the flat
+  shape `OpenApiObject`'s endpoints and `ProtoObject`'s RPCs already use.
+- **Every other named type gets one object**, with `fields` shaped by its
+  kind: an object/interface's field names, an enum's value names, a union's
+  member type names, nothing for a scalar. `extend type` extensions and
+  directive definitions aren't modeled.
+- **New `repowise graphql [PATH]` CLI command**, mirroring `repowise sql`/
+  `repowise openapi`/`repowise protobuf`.
+- 9 new tests in `repowise-graphql` (object/interface/union/enum/input/
+  scalar extraction, root-query/mutation flattening, real-position
+  verification, default vs. explicit-`schema`-block root naming, malformed-
+  file skip, `.graphql`/`.gql` extension coverage), plus 1 `build_index`
+  integration test in `repowise-parser` confirming the Structural-tier bare
+  zero-symbol treatment. Local gate (all six CI steps by exit status)
+  passes.
+- Verified live against a fixture schema (an explicit `schema` block, 2 root
+  fields, and one each of object/input/enum/interface/union/scalar) plus an
+  unrelated `.txt` file: `repowise graphql` reported exactly 9 objects with
+  correct kinds/names/fields/line numbers, and `repowise overview` reported
+  `GraphQL 1` alongside the repo's other languages.
+
+---
+
 ## PR #328 — Protobuf support: a parallel `ProtoObject` model
 **2026-07-30** · closes [#324](https://github.com/baileyrd/rusty_repo_wise/issues/324) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319))
 

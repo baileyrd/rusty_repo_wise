@@ -208,13 +208,14 @@ command — see "SQL/dbt support" below. OpenAPI (issue #323, the first
 of #319's four schema/declarative-infra formats) gets a parallel
 `OpenApiObject` model read by a separate `repowise openapi` command,
 with no `Language`/`repowise overview` visibility yet — see "OpenAPI
-support" below. Protobuf (issue #324, the second of the four) gets the
-same "recognized, git-history only" `FileRecord` treatment as
-SQL/Dockerfile (unlike OpenAPI, `.proto` has an unambiguous extension)
-plus a parallel `ProtoObject` model read by a separate `repowise
-protobuf` command — see "Protobuf support" below. Every other repowise
-language, and every other config/data format in its lower-depth tier,
-is unimplemented. The health scorer now
+support" below. Protobuf and GraphQL (issues #324/#325, the second and
+third of the four) get the same "recognized, git-history only"
+`FileRecord` treatment as SQL/Dockerfile — unlike OpenAPI, both have
+unambiguous extensions — plus their own parallel `ProtoObject`/
+`GraphQlObject` models read by separate `repowise protobuf`/`repowise
+graphql` commands — see "Protobuf support"/"GraphQL support" below.
+Every other repowise language, and every other config/data format in
+its lower-depth tier, is unimplemented. The health scorer now
 implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
@@ -1802,6 +1803,57 @@ graph integration, no RPC streaming flags (`client_streaming`/
 `server_streaming` are parsed but not modeled), and no dependency
 edges between messages/services beyond what's already visible as a
 type name in `fields`.
+
+## GraphQL support
+
+One of #319's four schema/declarative-infra formats (issue #325). Like
+Protobuf, `.graphql`/`.gql` has an unambiguous extension, so this one
+gets a real `Language::GraphQl` variant alongside the parallel
+`GraphQlObject` model, read by a separate `repowise graphql` command.
+
+```
+$ repowise graphql
+9 GraphQL object(s) found under .
+  schema.graphql
+    [query] Query.order  line 7
+    [query] Query.orders  line 8
+    [mutation] Mutation.createOrder  line 12
+    [type] Order  line 15  fields: id, total, status
+    [type] CreateOrderInput  line 21  fields: customer, total
+    [type] OrderStatus  line 26  fields: PENDING, SHIPPED
+    [type] Node  line 31  fields: id
+    [type] SearchResult  line 35  fields: Order
+    [type] DateTime  line 37
+```
+
+**[`graphql-parser`](https://crates.io/crates/graphql-parser)**, this
+issue's own original suggestion. Unlike `sqlparser`/`openapiv3`/
+`protobuf-parse`, every definition and field this crate hands back
+carries a real parsed line/column position — no best-effort
+text-search fallback needed here, a nicer situation than the other
+three schema-format crates.
+
+**`Query`/`Mutation`/`Subscription` aren't a distinct syntax** — just
+ordinary `type` definitions the GraphQL spec treats as schema roots by
+default name, unless an explicit `schema { query: X, mutation: Y }`
+block says otherwise. This is honored: an explicit `schema` block's
+root names win when present, falling back to the default `Query`/
+`Mutation`/`Subscription` names otherwise (verified live both ways).
+Each field on a root type becomes its own flat `GraphQlObject`
+(`"Query.order"`), never nested under a `Query` object — the same
+flat, never-nested shape `OpenApiObject`'s endpoints and `ProtoObject`'s
+RPCs already use.
+
+**Every other named type gets one object, `fields` shaped by its
+kind**: an object/interface type's field names, an enum's value names,
+a union's member type names, and nothing for a scalar. `extend type`
+extensions and directive definitions aren't modeled — an SDL file's
+named type/root-field declarations only.
+
+**Deliberately narrow, matching #325's own scope.** No wiki pages, no
+graph integration, and no resolver implementations — this is a
+schema-file-only extractor; actual resolver code lives in the host
+language and was never in scope.
 
 ## Git analytics
 

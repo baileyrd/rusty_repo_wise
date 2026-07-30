@@ -87,6 +87,10 @@ pub fn parse_file(
         // (messages/services/RPCs) is the separate model
         // `repowise_protobuf::collect_protobuf` produces.
         Language::Proto => Ok(Some(structural_only(path, language, source))),
+        // Same treatment again -- a GraphQL SDL file's real content
+        // (types/queries/mutations/subscriptions) is the separate
+        // model `repowise_graphql::collect_graphql` produces.
+        Language::GraphQl => Ok(Some(structural_only(path, language, source))),
         // The "Lightweight" tier (issue #69): unlike the Structural
         // tier above, these get a real (if unresolved) import list --
         // see `lightweight`'s own module doc for why symbols/calls stay
@@ -313,6 +317,21 @@ mod tests {
 
         assert_eq!(index.files.len(), 1);
         assert_eq!(index.files[0].language, Language::Proto);
+        assert!(index.files[0].symbols.is_empty());
+        assert!(index.files[0].imports.is_empty());
+        assert_eq!(index.other_files, 0);
+    }
+
+    #[test]
+    fn build_index_gives_a_graphql_file_a_bare_zero_symbol_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("schema.graphql"), "type Order {\n  id: ID!\n}\n").unwrap();
+
+        let index = build_index(&root).unwrap();
+
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].language, Language::GraphQl);
         assert!(index.files[0].symbols.is_empty());
         assert!(index.files[0].imports.is_empty());
         assert_eq!(index.other_files, 0);

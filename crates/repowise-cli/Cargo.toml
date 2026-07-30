@@ -18,6 +18,7 @@ repowise-git = { path = "../repowise-git" }
 repowise-docs = { path = "../repowise-docs" }
 repowise-adr = { path = "../repowise-adr" }
 repowise-distill = { path = "../repowise-distill" }
+repowise-sql = { path = "../repowise-sql" }
 # Cross-platform filesystem events for `repowise watch`. Pinned to the
 # latest stable major (9.x is a release candidate). Its transitive deps
 # are almost entirely platform-gated backends -- inotify on Linux,

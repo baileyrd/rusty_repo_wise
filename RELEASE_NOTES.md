@@ -6,6 +6,68 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #322 — SQL/dbt support: a parallel `SqlObject` model + `LineageEdge` graph
+**2026-07-30** · closes [#317](https://github.com/baileyrd/rusty_repo_wise/issues/317) (design decided in [#67](https://github.com/baileyrd/rusty_repo_wise/issues/67))
+
+- **New `repowise-sql` crate**, following the existing per-concern crate
+  split — kept separate from `repowise-parser` so its `sqlparser` dependency
+  doesn't bleed into the 20+ language extractors that don't need it.
+- **`SqlObject`/`SqlObjectKind`** (`Table`/`View`/`Function`/`Procedure`) and
+  **`LineageEdge`/`LineageKind`** (`Ref`/`Source`) live in `repowise-core::sql`
+  as a parallel model, not new `SymbolKind` variants — a SQL table/view
+  carries none of `Symbol`'s ~20 per-function metrics, the same call #318
+  made for Docker build stages. `LineageEdge` is a distinct type from
+  `ImportRef`/`CallRef` too: those mean "this file's code invokes that
+  file's code" and feed hotspot/health/coupling scoring on that assumption,
+  while dbt's `ref()`/`source()` is data lineage — a different semantic that
+  would quietly corrupt those signals if merged in.
+- **New `Language::Sql` variant** — `.sql` files get the same "Structural
+  tier" bare zero-symbol `FileRecord` treatment as Dockerfile: visible in
+  `repowise overview`'s per-language counts and git-history views, no
+  symbols extracted through that path.
+- **Two kinds of `.sql` file, told apart by whether they contain `{{`.** A
+  plain SQL file is parsed with [`sqlparser`](https://crates.io/crates/sqlparser)
+  into real objects — one per `CREATE TABLE`/`VIEW`/`FUNCTION`/`PROCEDURE`
+  statement, with `CREATE TABLE`'s column list read off directly. A dbt model
+  file's Jinja templating (`{{ ref(...) }}`, `{{ config(...) }}`, `{% if %}`)
+  isn't valid SQL `sqlparser` can parse, and writing a Jinja-stripping
+  preprocessor was ruled out of scope — instead, a file containing `{{` is
+  treated as one dbt model: the whole file *is* the object, named after its
+  file stem per dbt's own convention, kind `View` (dbt's default
+  materialization; this port doesn't parse `{{ config(materialized=...) }}`
+  to know better). `CREATE TABLE`/`VIEW` get real line spans via
+  `sqlparser`'s `Spanned` trait; `CREATE FUNCTION`/`PROCEDURE` don't have
+  span support yet as of `sqlparser` 0.62 (documented as a known gap in that
+  crate's own `Spanned` doc comment), so those fall back to a case-insensitive
+  text search for the `CREATE ... <name>` line — the same best-effort
+  tradeoff every regex-based extractor in this port already makes. A
+  malformed non-Jinja file degrades to zero objects rather than failing the
+  whole `collect_sql` walk.
+- **`ref()` resolves against other discovered `SqlObject`s by name;
+  `source()` always stays unresolved** — it points at a raw external table
+  declared in a `.yml` config, not a `.sql` file, so there's nothing in the
+  repo for it to resolve to. Reuses the exact "no index needed" precedent
+  already established for Swift's/Dart's unresolved package imports, rather
+  than inventing new semantics for an edge that can never resolve.
+- **New `repowise sql` CLI command**, mirroring `docker-stages`'s shape:
+  lists every discovered object grouped by file, with lineage edges shown
+  underneath (resolved target file, or `unresolved`). No wiki pages or graph
+  integration yet, matching the issue's own explicitly-scoped follow-ups.
+- 14 new tests: 13 in `repowise-sql` (9 in its `extract` module covering
+  every statement kind, the dbt-model-file path, the malformed-file
+  fallback, and both lineage macro forms; 4 `collect_sql` integration tests
+  including resolved and unresolved lineage), plus 1 `build_index`
+  integration test in `repowise-parser` confirming `.sql` files get the
+  same bare zero-symbol treatment as Dockerfile. Local gate (all six CI
+  steps by exit status) passes. Verified live against a fixture repo with a plain
+  `schema.sql` (table/view/function) and two dbt model files, one `ref`-ing
+  the other and one `source`-ing a raw table: `repowise sql` reported
+  correct object kinds/names/line ranges/columns, a resolved `ref` edge, an
+  unresolved `ref` to a nonexistent model, and an unresolved `source` edge;
+  `repowise overview` reported `SQL 3` alongside the repo's other languages.
+
+---
+
 ## PR #321 — Lightweight-tier languages: regex-only import graph for six languages
 **2026-07-30** · closes [#69](https://github.com/baileyrd/rusty_repo_wise/issues/69)
 

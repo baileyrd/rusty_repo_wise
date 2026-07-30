@@ -15,6 +15,7 @@ members = [
     "crates/repowise-server",
     "crates/repowise-workspace",
     "crates/repowise-distill",
+    "crates/repowise-sql",
     "crates/repowise-cli",
 ]
 

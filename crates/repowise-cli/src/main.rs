@@ -351,6 +351,17 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List protobuf messages/services/RPCs (issue #324, the buildable
+    /// follow-up to #319's design decision). Parsed with a pure-Rust
+    /// `.proto` parser (no `protoc` binary needed); imports resolve
+    /// against `.proto` files anywhere in the repo, plus bundled
+    /// `google/protobuf/*` well-known types. A file whose imports don't
+    /// resolve at all is silently skipped. No wiki pages or graph
+    /// integration yet.
+    Protobuf {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -691,6 +702,7 @@ fn main() -> anyhow::Result<()> {
         Command::DockerStages { path } => cmd_docker_stages(&path),
         Command::Sql { path } => cmd_sql(&path),
         Command::Openapi { path } => cmd_openapi(&path),
+        Command::Protobuf { path } => cmd_protobuf(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2744,6 +2756,46 @@ fn cmd_openapi(path: &Path) -> anyhow::Result<()> {
         &Path,
         Vec<&repowise_core::openapi::OpenApiObject>,
     > = std::collections::BTreeMap::new();
+    for object in &objects {
+        by_file.entry(&object.file).or_default().push(object);
+    }
+
+    for (file, file_objects) in by_file {
+        println!("  {}", display_path(file, &root));
+        for object in &file_objects {
+            let fields = if object.fields.is_empty() {
+                String::new()
+            } else {
+                format!("  fields: {}", object.fields.join(", "))
+            };
+            println!(
+                "    [{}] {}  line {}{fields}",
+                object.kind.label(),
+                object.name,
+                object.start_line
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_protobuf(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let objects = repowise_protobuf::collect_protobuf(&root)?;
+
+    if objects.is_empty() {
+        println!("No protobuf objects found under {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} protobuf object(s) found under {}",
+        objects.len(),
+        root.display()
+    );
+
+    let mut by_file: std::collections::BTreeMap<&Path, Vec<&repowise_core::protobuf::ProtoObject>> =
+        std::collections::BTreeMap::new();
     for object in &objects {
         by_file.entry(&object.file).or_default().push(object);
     }

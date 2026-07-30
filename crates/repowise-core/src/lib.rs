@@ -4,6 +4,7 @@
 //! structures produced by `repowise-parser` and consumed by `repowise-graph`.
 
 pub mod coverage;
+pub mod docker;
 pub mod org_signals;
 mod walk;
 
@@ -51,6 +52,16 @@ pub enum Language {
     Crystal,
     Nim,
     D,
+    /// A Dockerfile (issue #318, the prototype for #68's config/data
+    /// tier) -- recognized by filename in `discover_files`, not by
+    /// extension (see that module), and given a real zero-symbol
+    /// `FileRecord` the same way the Structural tier is: no grammar to
+    /// extract symbols from, but visible to git-history-derived views.
+    /// Its actual content -- build stages, `COPY --from` edges -- is a
+    /// parallel model ([`docker::DockerStage`]) computed separately by
+    /// `repowise_parser::collect_docker_stages`, not part of
+    /// `FileRecord` at all.
+    Dockerfile,
     Other,
 }
 
@@ -89,6 +100,11 @@ impl Language {
             "cr" => Language::Crystal,
             "nim" => Language::Nim,
             "d" => Language::D,
+            // The bare-filename case (`Dockerfile`, `Dockerfile.dev`) is
+            // handled in `discover_files` before extension lookup even
+            // runs; this arm only covers the `*.dockerfile` suffix
+            // convention (e.g. `backend.dockerfile`).
+            "dockerfile" => Language::Dockerfile,
             _ => Language::Other,
         }
     }
@@ -120,6 +136,7 @@ impl Language {
             Language::Crystal => "Crystal",
             Language::Nim => "Nim",
             Language::D => "D",
+            Language::Dockerfile => "Dockerfile",
             Language::Other => "Other",
         }
     }

@@ -163,6 +163,10 @@ impl RepoGraph {
                 // gives them an empty `imports: Vec::new()`, so there's
                 // nothing to resolve -- but they still need a home in
                 // this exhaustive match; same "no index needed" bucket.
+                // Dockerfile (#318) joins them for the same reason: its
+                // `FileRecord` is the same zero-symbol, zero-import
+                // shape -- its actual content lives in the separate
+                // `DockerStage`/`DockerCopyFromEdge` model instead.
                 Language::TypeScript
                 | Language::JavaScript
                 | Language::C
@@ -180,6 +184,7 @@ impl RepoGraph {
                 | Language::Crystal
                 | Language::Nim
                 | Language::D
+                | Language::Dockerfile
                 | Language::Other => {}
             }
         }
@@ -214,7 +219,8 @@ impl RepoGraph {
                 | Language::OCaml
                 | Language::Crystal
                 | Language::Nim
-                | Language::D => ("", &no_modules),
+                | Language::D
+                | Language::Dockerfile => ("", &no_modules),
                 Language::Other => continue,
             };
             for imp in &file.imports {

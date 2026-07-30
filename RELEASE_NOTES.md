@@ -6,6 +6,59 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #330 — Terraform support: `TerraformResource`/`TerraformModule` models
+**2026-07-30** · closes [#326](https://github.com/baileyrd/rusty_repo_wise/issues/326) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319)) — the last of #319's four schema/declarative-infra formats
+
+- **New `repowise-terraform` crate** and `TerraformResource`/`TerraformModule`
+  models in `repowise-core::terraform` — deliberately **two separate types**,
+  unlike the other three schema formats' single object type. A `resource`
+  block isn't a schema with fields the way a SQL table/OpenAPI schema/
+  protobuf message/GraphQL type is — it's a named *instance* whose shape
+  Terraform can't know statically (that requires loading the provider
+  plugin). A `module` block is different again: a reference to another
+  Terraform configuration by source path, not a type or an instance. Neither
+  fits the `name`/`kind`/`fields` shape the other three schema-format crates
+  share.
+- **New `Language::Terraform` variant** — like Protobuf/GraphQL, `.tf` has an
+  unambiguous extension, so these files get the same "Structural tier" bare
+  zero-symbol `FileRecord` treatment as Dockerfile/SQL/Protobuf/GraphQL,
+  visible in `repowise overview`'s per-language counts and git-history
+  views.
+- **[`hcl-rs`](https://crates.io/crates/hcl-rs)**, this issue's own original
+  suggestion. It parses generic HCL syntax — it has no idea `resource`/
+  `module` are Terraform-specific block types, they're just blocks with an
+  identifier and labels like any other (`variable`, `output`, `provider`,
+  `data`, `terraform`, `locals`, ...), so `resource`/`module` extraction is
+  a filter over the parsed body, not anything `hcl-rs` itself understands.
+  Those other block types aren't modeled — this issue's own scope is
+  resource/module extraction, not a full Terraform configuration model.
+  Like the other three schema-format crates, `hcl-rs`'s value-oriented parse
+  carries no line/span info, so line numbers fall back to the same
+  best-effort text search already used for SQL/OpenAPI/Protobuf.
+- **New `repowise terraform [PATH]` CLI command**, mirroring `repowise sql`/
+  `repowise openapi`/`repowise protobuf`/`repowise graphql`, with a
+  two-section per-file listing (resources, then modules) matching the
+  two-type model.
+- **Deliberately narrow, matching #326's own scope.** No dependency edges
+  between resources (`resource.other.id` interpolation references —
+  HCL interpolation parsing is a separate, larger piece of work than block
+  extraction), no variable/output resolution, no `terraform.tfvars`, no
+  wiki pages, and no graph integration.
+- 7 new tests in `repowise-terraform` (resource type/name extraction, a
+  module's `source` attribute present and absent, non-resource/module block
+  types correctly ignored, line-number verification, malformed-HCL skip,
+  non-`.tf`-file skip), plus 1 `build_index` integration test in
+  `repowise-parser` confirming the Structural-tier bare zero-symbol
+  treatment. Local gate (all six CI steps by exit status) passes.
+- Verified live against a fixture with two resources, a module with a
+  `source` attribute, and a `variable` block, alongside an unrelated
+  `README.md`: `repowise terraform` reported exactly 2 resources and 1
+  module with correct types/names/line numbers, the `variable` block was
+  correctly excluded, and `repowise overview` reported `Terraform 1`
+  alongside the repo's other languages.
+
+---
+
 ## PR #329 — GraphQL support: a parallel `GraphQlObject` model
 **2026-07-30** · closes [#325](https://github.com/baileyrd/rusty_repo_wise/issues/325) (design decided in [#319](https://github.com/baileyrd/rusty_repo_wise/issues/319))
 

@@ -10,6 +10,7 @@ pub mod openapi;
 pub mod org_signals;
 pub mod protobuf;
 pub mod sql;
+pub mod terraform;
 mod walk;
 
 pub use walk::{discover_files, DiscoveredFile};
@@ -111,6 +112,19 @@ pub enum Language {
     /// separately by `repowise_graphql::collect_graphql`, not part of
     /// `FileRecord` at all.
     GraphQl,
+    /// Terraform (issue #326, the buildable follow-up to #319's design
+    /// decision): same "Structural tier" treatment as Protobuf/GraphQL
+    /// above -- `.tf` also has an unambiguous extension. Its actual
+    /// content -- `resource`/`module` blocks -- is a parallel model
+    /// ([`terraform::TerraformResource`]/[`terraform::TerraformModule`])
+    /// computed separately by `repowise_terraform::collect_terraform`,
+    /// not part of `FileRecord` at all. Unlike the other three schema
+    /// formats' single object type, these are deliberately two separate
+    /// types: a `resource` block isn't a schema with fields the way a
+    /// SQL table/OpenAPI schema/protobuf message/GraphQL type is -- it's
+    /// a named instance whose shape Terraform can't know statically
+    /// (that requires the provider plugin).
+    Terraform,
     Other,
 }
 
@@ -163,6 +177,7 @@ impl Language {
             "sql" => Language::Sql,
             "proto" => Language::Proto,
             "graphql" | "gql" => Language::GraphQl,
+            "tf" => Language::Terraform,
             _ => Language::Other,
         }
     }
@@ -204,6 +219,7 @@ impl Language {
             Language::Sql => "SQL",
             Language::Proto => "Protobuf",
             Language::GraphQl => "GraphQL",
+            Language::Terraform => "Terraform",
             Language::Other => "Other",
         }
     }

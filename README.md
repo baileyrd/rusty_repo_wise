@@ -208,14 +208,17 @@ command — see "SQL/dbt support" below. OpenAPI (issue #323, the first
 of #319's four schema/declarative-infra formats) gets a parallel
 `OpenApiObject` model read by a separate `repowise openapi` command,
 with no `Language`/`repowise overview` visibility yet — see "OpenAPI
-support" below. Protobuf and GraphQL (issues #324/#325, the second and
-third of the four) get the same "recognized, git-history only"
-`FileRecord` treatment as SQL/Dockerfile — unlike OpenAPI, both have
-unambiguous extensions — plus their own parallel `ProtoObject`/
-`GraphQlObject` models read by separate `repowise protobuf`/`repowise
-graphql` commands — see "Protobuf support"/"GraphQL support" below.
-Every other repowise language, and every other config/data format in
-its lower-depth tier, is unimplemented. The health scorer now
+support" below. Protobuf, GraphQL, and Terraform (issues #324/#325/#326,
+the remaining three of the four) get the same "recognized, git-history
+only" `FileRecord` treatment as SQL/Dockerfile — unlike OpenAPI, all
+three have unambiguous extensions — plus their own parallel
+`ProtoObject`/`GraphQlObject`/`TerraformResource`+`TerraformModule`
+models read by separate `repowise protobuf`/`repowise graphql`/
+`repowise terraform` commands — see "Protobuf support"/"GraphQL
+support"/"Terraform support" below. #319's original four-way split is
+now fully built out. Every other repowise language, and every other
+config/data format in its lower-depth tier, is unimplemented. The
+health scorer now
 implements 31 distinct markers. That exceeds repowise's headline "~25
 markers" because that figure counts the Performance-signal work as a
 single item, while this port implements its pattern checks individually
@@ -1854,6 +1857,53 @@ named type/root-field declarations only.
 graph integration, and no resolver implementations — this is a
 schema-file-only extractor; actual resolver code lives in the host
 language and was never in scope.
+
+## Terraform support
+
+The last of #319's four schema/declarative-infra formats (issue #326).
+Like Protobuf/GraphQL, `.tf` has an unambiguous extension, so it gets a
+real `Language::Terraform` variant, alongside `TerraformResource`/
+`TerraformModule` — two separate types, unlike the other three
+formats' single object type, read by a separate `repowise terraform`
+command.
+
+```
+$ repowise terraform
+2 resource(s), 1 module(s) found under .
+  main.tf
+    [resource] aws_instance.web  line 1
+    [resource] aws_s3_bucket.data  line 6
+    [module] vpc  line 10  source: ./modules/vpc
+```
+
+**Two separate types, not one shared "declarative object."** A
+Terraform `resource` block isn't a schema with fields the way a SQL
+table/OpenAPI schema/protobuf message/GraphQL type is — it's a named
+*instance* whose shape Terraform can't know statically (that requires
+loading the provider plugin). A `module` block is different again: a
+reference to another Terraform configuration by source path, not a
+type or an instance. Neither fits the `name`/`kind`/`fields` shape the
+other three schema-format crates share, so this gets `TerraformResource`
+(`resource_type`, `name`) and `TerraformModule` (`name`, `source`) as
+two small, genuinely different parallel types instead.
+
+**[`hcl-rs`](https://crates.io/crates/hcl-rs)**, this issue's own
+original suggestion. It parses generic HCL syntax — it has no idea
+`resource`/`module` are Terraform-specific block types, they're just
+blocks with an identifier and labels like any other (`variable`,
+`output`, `provider`, `data`, `terraform`, `locals`, ...), so
+`resource`/`module` extraction is a filter over the parsed body, not
+anything `hcl-rs` itself understands. Those other block types aren't
+modeled. Like the other three schema-format crates, `hcl-rs`'s
+value-oriented parse carries no line/span info, so line numbers fall
+back to the same best-effort text search already used for SQL/OpenAPI/
+Protobuf.
+
+**Deliberately narrow, matching #326's own scope.** No dependency
+edges between resources (`resource.other.id` interpolation references
+— parsing HCL interpolation is a separate, larger piece of work than
+block extraction), no variable/output resolution, no `terraform.tfvars`,
+no wiki pages, and no graph integration.
 
 ## Git analytics
 

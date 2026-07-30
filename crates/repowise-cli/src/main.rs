@@ -372,6 +372,17 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List Terraform `resource`/`module` blocks (issue #326, the
+    /// buildable follow-up to #319's design decision). Parsed with
+    /// generic HCL (`hcl-rs`), which has no idea `resource`/`module`
+    /// are Terraform-specific -- other block types (`variable`,
+    /// `output`, `provider`, `data`, `terraform`, `locals`) aren't
+    /// modeled. No dependency edges between resources, no wiki pages or
+    /// graph integration yet.
+    Terraform {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -714,6 +725,7 @@ fn main() -> anyhow::Result<()> {
         Command::Openapi { path } => cmd_openapi(&path),
         Command::Protobuf { path } => cmd_protobuf(&path),
         Command::Graphql { path } => cmd_graphql(&path),
+        Command::Terraform { path } => cmd_terraform(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Dashboard { path } => cmd_dashboard(&path),
@@ -2867,6 +2879,48 @@ fn cmd_graphql(path: &Path) -> anyhow::Result<()> {
                 object.name,
                 object.start_line
             );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_terraform(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let (resources, modules) = repowise_terraform::collect_terraform(&root)?;
+
+    if resources.is_empty() && modules.is_empty() {
+        println!(
+            "No Terraform resource/module blocks found under {}",
+            root.display()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} resource(s), {} module(s) found under {}",
+        resources.len(),
+        modules.len(),
+        root.display()
+    );
+
+    let mut files: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
+    files.extend(resources.iter().map(|r| r.file.as_path()));
+    files.extend(modules.iter().map(|m| m.file.as_path()));
+
+    for file in files {
+        println!("  {}", display_path(file, &root));
+        for r in resources.iter().filter(|r| r.file == file) {
+            println!(
+                "    [resource] {}.{}  line {}",
+                r.resource_type, r.name, r.start_line
+            );
+        }
+        for m in modules.iter().filter(|m| m.file == file) {
+            let source = match &m.source {
+                Some(s) => format!("  source: {s}"),
+                None => String::new(),
+            };
+            println!("    [module] {}  line {}{source}", m.name, m.start_line);
         }
     }
     Ok(())

@@ -194,6 +194,7 @@ impl RepoGraph {
                 | Language::Sql
                 | Language::Proto
                 | Language::GraphQl
+                | Language::Terraform
                 | Language::Elixir
                 | Language::Clojure
                 | Language::Haskell
@@ -239,6 +240,7 @@ impl RepoGraph {
                 | Language::Sql
                 | Language::Proto
                 | Language::GraphQl
+                | Language::Terraform
                 | Language::Elixir
                 | Language::Clojure
                 | Language::Haskell

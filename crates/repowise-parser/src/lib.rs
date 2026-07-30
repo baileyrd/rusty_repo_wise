@@ -91,6 +91,10 @@ pub fn parse_file(
         // (types/queries/mutations/subscriptions) is the separate
         // model `repowise_graphql::collect_graphql` produces.
         Language::GraphQl => Ok(Some(structural_only(path, language, source))),
+        // Same treatment again -- a `.tf` file's real content
+        // (resource/module blocks) is the separate model
+        // `repowise_terraform::collect_terraform` produces.
+        Language::Terraform => Ok(Some(structural_only(path, language, source))),
         // The "Lightweight" tier (issue #69): unlike the Structural
         // tier above, these get a real (if unresolved) import list --
         // see `lightweight`'s own module doc for why symbols/calls stay
@@ -332,6 +336,25 @@ mod tests {
 
         assert_eq!(index.files.len(), 1);
         assert_eq!(index.files[0].language, Language::GraphQl);
+        assert!(index.files[0].symbols.is_empty());
+        assert!(index.files[0].imports.is_empty());
+        assert_eq!(index.other_files, 0);
+    }
+
+    #[test]
+    fn build_index_gives_a_terraform_file_a_bare_zero_symbol_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("main.tf"),
+            "resource \"aws_instance\" \"web\" {\n  ami = \"ami-123\"\n}\n",
+        )
+        .unwrap();
+
+        let index = build_index(&root).unwrap();
+
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].language, Language::Terraform);
         assert!(index.files[0].symbols.is_empty());
         assert!(index.files[0].imports.is_empty());
         assert_eq!(index.other_files, 0);

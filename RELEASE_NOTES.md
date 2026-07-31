@@ -6,7 +6,7 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
-## PR #351 — Round 2 parity audit: 10 new dashboard/capability gaps
+## PR #361 — Round 2 parity audit: 10 new dashboard/capability gaps
 **2026-07-31**
 
 - `ParityGaps.md`'s "the live dashboard is already at parity" claim was

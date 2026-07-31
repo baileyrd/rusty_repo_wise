@@ -6,6 +6,36 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #365 — External (third-party) dependency registry (closes #353)
+**2026-07-31**
+
+- New `repowise-external-deps` crate: reads five manifest formats,
+  matched by exact filename (`Cargo.toml`, `package.json`,
+  `composer.json`, `requirements.txt`, `pyproject.toml`, `go.mod`) --
+  no new dependency needed for any of them (`toml`/`serde_json` were
+  already workspace dependencies). **Declared, not resolved**: reports
+  the version constraint exactly as written, never walks a lockfile or
+  resolves transitive dependencies -- `cargo tree`/`npm ls`/`pip list`
+  already do that per ecosystem. Workspace-internal path dependencies,
+  npm's `file:`/`link:`/`workspace:` local references, and
+  Composer's/Poetry's platform pseudo-dependencies (`php`, `ext-*`,
+  `python`) are excluded as not third-party.
+- New `repowise_core::deps::ExternalDependency` model (the parallel-model
+  pattern every other schema-format crate already uses).
+- Wired into three surfaces: `repowise external-deps [PATH]`
+  (`repowise-cli`, distinct from the pre-existing `repowise deps <FILE>`
+  which shows one file's *internal* import dependencies), `GET
+  /api/external-deps` (`repowise-server`), and `get_external_deps`
+  (`repowise-mcp`).
+- `repowise-web`: a new `#/dependencies` dashboard section — every
+  declared dependency with an ecosystem filter, manifest files linking
+  into the existing file-detail drill-down panel.
+- Java/Kotlin/Scala's `pom.xml`/Gradle build scripts and C#'s `.csproj`
+  need a real XML or Gradle-DSL parser and are left for a follow-up.
+- `ParityGaps.md` row #13 updated; issue #353 closed.
+
+---
+
 ## PR #364 — Dashboard: Coupling sub-view (partially closes #352)
 **2026-07-31**
 

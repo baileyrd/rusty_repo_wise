@@ -373,7 +373,10 @@ repowise refactor [PATH]           # deterministic refactor candidates: import c
                                     #   classes, low-cohesion classes, duplicate functions --
                                     #   read-only, never generates a diff (see issue #304)
                                     #   --kind <...>, --limit <N> (default 20, 0 for unlimited)
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/get_coupling/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
+repowise external-deps [PATH]      # third-party deps declared in Cargo.toml/package.json/
+                                    #   composer.json/requirements.txt/pyproject.toml/go.mod
+                                    #   (declared, not lockfile-resolved; see issue #353)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/get_coupling/get_external_deps/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
                                     #   architectural decisions from code (opt-in, requires prior `docs`)
@@ -1945,6 +1948,57 @@ edges between resources (`resource.other.id` interpolation references
 block extraction), no variable/output resolution, no `terraform.tfvars`,
 no wiki pages, and no graph integration.
 
+## External dependency registry
+
+Upstream's Architecture section has a **Dependencies** sub-view: a
+registry of a repo's *external* (third-party/package-manager)
+dependencies — distinct from this port's own dependency graph, which is
+entirely internal file-to-file/symbol-to-symbol relationships (issue
+#353). `repowise-external-deps` reads five manifest formats, matched by
+exact filename the same "no content-sniffing, no `Language` variant"
+way `repowise-openapi` matches `.yaml`/`.json`: `Cargo.toml`,
+`package.json`, `composer.json`, `requirements.txt`, and
+`pyproject.toml`/`go.mod`.
+
+```
+$ repowise external-deps
+139 third-party dependencies found under .
+  Cargo.toml
+    [cargo/direct] anyhow 1
+    [cargo/direct] clap 4
+    ...
+```
+
+**Declared, not resolved.** This reports the version constraint exactly
+as written in the manifest (`^1.2.3`, `>=2.0,<3.0`, `*`, or
+"(unversioned)" for a workspace-inherited Cargo dependency) — it never
+walks a lockfile, resolves transitive dependencies, or detects version
+conflicts. `cargo tree`/`npm ls`/`pip list` already do full resolution
+per ecosystem; duplicating that isn't this port's job. A
+workspace-internal path dependency (this very repo's own
+`repowise-cli` depending on `repowise-server` via `{ path =
+"../repowise-server" }`) is excluded, since it isn't a third-party
+package; so are npm's `file:`/`link:`/`workspace:` local references and
+Composer's/Poetry's platform pseudo-dependencies (`php`, `ext-*`,
+`python`).
+
+**Five ecosystems, chosen for being cheap to parse correctly without a
+new dependency.** `Cargo.toml`/`pyproject.toml` are TOML (already a
+workspace dependency); `package.json`/`composer.json` are JSON;
+`requirements.txt`/`go.mod` are simple line-oriented formats. Also
+covers `pyproject.toml`'s two conventions (PEP 621's
+`[project.dependencies]` array and Poetry's
+`[tool.poetry.dependencies]` table) and `go.mod`'s `// indirect`
+markers (transitive dependencies Go recorded for reproducibility,
+excluded to keep this a "direct dependencies" view). Java/Kotlin/
+Scala's `pom.xml`/Gradle build scripts and C#'s `.csproj` need a real
+XML or Gradle-DSL parser and are left for a follow-up.
+
+Wired into the same three surfaces as `repowise refactor`/`repowise
+doc-coverage`: `repowise external-deps` (`repowise-cli`), `GET
+/api/external-deps` (`repowise-server`), and `get_external_deps`
+(`repowise-mcp`).
+
 ## Git analytics
 
 `repowise hotspots`/`ownership`/`coupled` shell out to `git log`/`git
@@ -2627,6 +2681,12 @@ below):
   `/api/workspace-co-changes`; this is its single-repo surface, which
   had no MCP/dashboard exposure at all before this tool (only a
   per-file CLI lookup, `repowise coupled <FILE>`).
+- **`get_external_deps()`** (issue #353) — third-party dependencies
+  declared across `Cargo.toml`/`package.json`/`composer.json`/
+  `requirements.txt`/`pyproject.toml`/`go.mod`, declared not resolved
+  (the manifest's own version constraint, never a lockfile-resolved
+  version). See "External dependency registry" above for the full
+  scope and exclusions.
 
 A call re-reads `.repowise/index.json` and rebuilds the dependency graph
 only when the index file's mtime has changed; otherwise it reuses the
@@ -2767,7 +2827,8 @@ to check for.
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
   `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`,
-  `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`, plus
+  `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`,
+  `/api/external-deps`, plus
   `POST /api/chat` — the same data `repowise
   overview`/`health`/`hotspots`/`decisions` already compute, plus the
   full symbol list, as JSON. File paths are always relative to `PATH`,
@@ -2808,7 +2869,10 @@ to check for.
   `/api/coupling` returns the repo-wide file pairs that most often
   change together in the same commit, ranked strongest first
   (`{"available": false}` for a non-git-repo, same degrade-gracefully
-  convention as `/api/hotspots`; issue #352). `POST
+  convention as `/api/hotspots`; issue #352); `/api/external-deps`
+  returns every declared third-party dependency across every manifest
+  this port recognizes, mirroring the `get_external_deps` MCP tool's
+  own shape (issue #353). `POST
   /api/chat` takes `{"history": [{"role",
   "content"}, ...]}` (the whole conversation so far) and returns
   `{"available": bool, "reply": string | null, "cited": [...],
@@ -2988,6 +3052,9 @@ to check for.
   section** (issue #352) lists `/api/coupling`'s repo-wide change-coupled
   file pairs, ranked strongest first, files linking into the same
   file-detail panel; a plain message when the repo has no git history. A
+  **Dependencies section** (issue #353) lists `/api/external-deps`'s
+  declared third-party dependencies with an ecosystem filter, each row's
+  manifest file linking into the same file-detail panel. A
   **chat section** talks to `POST /api/chat`, with full conversation
   history kept client-side and resent every turn; if the server reports
   the LLM isn't configured, it shows a plain explanatory message instead

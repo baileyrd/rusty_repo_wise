@@ -1319,6 +1319,7 @@ dependencies = [
  "repowise-core",
  "repowise-distill",
  "repowise-docs",
+ "repowise-external-deps",
  "repowise-git",
  "repowise-graph",
  "repowise-graphql",
@@ -1364,6 +1365,17 @@ dependencies = [
  "repowise-graph",
  "repowise-health",
  "tempfile",
+]
+
+[[package]]
+name = "repowise-external-deps"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "repowise-core",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -1437,6 +1449,7 @@ dependencies = [
  "repowise-core",
  "repowise-distill",
  "repowise-docs",
+ "repowise-external-deps",
  "repowise-git",
  "repowise-graph",
  "repowise-health",
@@ -1524,6 +1537,7 @@ dependencies = [
  "repowise-adr",
  "repowise-core",
  "repowise-docs",
+ "repowise-external-deps",
  "repowise-git",
  "repowise-graph",
  "repowise-health",

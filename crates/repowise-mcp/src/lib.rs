@@ -5,9 +5,9 @@
 //! Implements `get_overview`, `search_codebase`, `get_context`,
 //! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`, `get_answer`,
 //! `get_dead_code`, `get_health`, `get_refactor_candidates`,
-//! `get_doc_coverage`, `get_coupling`, plus
+//! `get_doc_coverage`, `get_coupling`, `get_external_deps`, plus
 //! `list_repos`, `get_architecture` and `get_blast_radius` (the last
-//! five have no counterpart in the reference) — the ones
+//! six have no counterpart in the reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
 //! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
@@ -900,6 +900,23 @@ struct CouplingPairOutput {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct CouplingOutput {
     pairs: Vec<CouplingPairOutput>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ExternalDependencyOutput {
+    name: String,
+    version: Option<String>,
+    /// `"direct"`, `"dev"`, or `"build"`.
+    kind: &'static str,
+    /// `"cargo"`, `"npm"`, `"pypi"`, `"go"`, or `"composer"`.
+    ecosystem: &'static str,
+    file: String,
+    line: usize,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ExternalDepsOutput {
+    dependencies: Vec<ExternalDependencyOutput>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -2235,6 +2252,31 @@ impl RepowiseServer {
     }
 
     #[tool(
+        name = "get_external_deps",
+        description = "Third-party (package-manager) dependencies declared across every manifest this port recognizes: Cargo.toml, package.json, composer.json, requirements.txt, pyproject.toml, and go.mod. Declared, not resolved -- the version constraint exactly as written in the manifest, not a lockfile-resolved version; this doesn't walk a lockfile or resolve transitive dependencies. Workspace-internal path dependencies (e.g. a monorepo's own sibling packages) are excluded. Java/Kotlin/Scala's pom.xml/Gradle build scripts and C#'s .csproj aren't recognized yet."
+    )]
+    fn get_external_deps(&self) -> Result<Json<Envelope<ExternalDepsOutput>>, ErrorData> {
+        let started = Instant::now();
+        let deps = repowise_external_deps::collect_dependencies(&self.root).map_err(|e| {
+            ErrorData::invalid_params(format!("failed to collect dependencies: {e}"), None)
+        })?;
+
+        let dependencies = deps
+            .into_iter()
+            .map(|d| ExternalDependencyOutput {
+                name: d.name,
+                version: d.version,
+                kind: d.kind.label(),
+                ecosystem: d.ecosystem,
+                file: display_rel(&d.file, &self.root),
+                line: d.line,
+            })
+            .collect();
+
+        Ok(self.untracked(ExternalDepsOutput { dependencies }, started))
+    }
+
+    #[tool(
         name = "list_repos",
         description = "List every repo configured in the workspace file this server was started with (`--workspace <path>`), each with its name, path, and indexed status (file counts if a prior `repowise init`/`update` has run there). Returns an empty list if no --workspace was given."
     )]
@@ -3048,6 +3090,37 @@ mod tests {
             panic!("expected an error when the root isn't a git repository");
         };
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn get_external_deps_reports_a_cargo_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server.get_external_deps().unwrap();
+
+        assert_eq!(data.dependencies.len(), 1);
+        assert_eq!(data.dependencies[0].name, "serde");
+        assert_eq!(data.dependencies[0].version.as_deref(), Some("1.0"));
+        assert_eq!(data.dependencies[0].kind, "direct");
+        assert_eq!(data.dependencies[0].ecosystem, "cargo");
+    }
+
+    #[test]
+    fn get_external_deps_is_an_empty_list_with_no_manifests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server.get_external_deps().unwrap();
+
+        assert!(data.dependencies.is_empty());
     }
 
     #[test]

@@ -104,7 +104,7 @@ list:
 | 12 | Dashboard: Architecture section restructure (Map/Explore/Coupling sub-views) | [#352](https://github.com/baileyrd/rusty_repo_wise/issues/352) | open |
 | 13 | External (third-party) dependency registry | [#353](https://github.com/baileyrd/rusty_repo_wise/issues/353) | open |
 | 14 | Dashboard: Knowledge Graph view | [#354](https://github.com/baileyrd/rusty_repo_wise/issues/354) | open |
-| 15 | Dashboard: Refactoring candidates view | [#355](https://github.com/baileyrd/rusty_repo_wise/issues/355) | open |
+| 15 | Dashboard: Refactoring candidates view | [#355](https://github.com/baileyrd/rusty_repo_wise/issues/355) | closed via PR #362 — `GET /api/refactor-candidates` (optional `?kind=` filter, `total_matching`/20-candidate cap mirroring the MCP tool), a new dashboard section (`#/refactor-candidates`) with a kind filter and file drill-down links |
 | 16 | Dashboard: Commits view (risk-scored commit browsing) | [#356](https://github.com/baileyrd/rusty_repo_wise/issues/356) | open |
 | 17 | Dashboard: semantic search in the main search box | [#357](https://github.com/baileyrd/rusty_repo_wise/issues/357) | open |
 | 18 | Dashboard: surface distill/MCP savings accounting (Costs view) | [#358](https://github.com/baileyrd/rusty_repo_wise/issues/358) | open |

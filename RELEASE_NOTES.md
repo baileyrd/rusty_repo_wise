@@ -6,6 +6,30 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #362 — Dashboard: Refactoring candidates view (closes #355)
+**2026-07-31**
+
+- `GET /api/refactor-candidates` (`repowise-server`): wires
+  `repowise-refactor::find_refactor_candidates` into the live dashboard,
+  the same "one implementation, three surfaces" pattern already used for
+  search/health/dead-code — the CLI (`repowise refactor`), the MCP tool
+  (`get_refactor_candidates`), and now the dashboard all call the same
+  shared function. Optional `?kind=break-import-cycle|split-god-class|
+  split-by-cohesion|extract-duplicate` filter; `total_matching` reports
+  the true count before the 20-candidate cap, mirroring the MCP tool's
+  own `limit`/`total_matching` shape.
+- `repowise-web`: a new `#/refactor-candidates` dashboard section
+  ("Refactoring") listing candidates with a kind filter, files linking
+  into the existing file-detail drill-down panel.
+- Folded into its own dashboard section rather than merged into the
+  existing dead-code section — the two are different signal shapes
+  (dead-code is one candidate per symbol; a refactor candidate can span
+  multiple files/symbols with a kind-specific rationale), and upstream
+  keeps them as separate views too.
+- `ParityGaps.md` row #15 updated; issue #355 closed.
+
+---
+
 ## PR #361 — Round 2 parity audit: 10 new dashboard/capability gaps
 **2026-07-31**
 

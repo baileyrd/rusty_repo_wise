@@ -2,15 +2,27 @@
 
 This is a snapshot audit of where `rusty_repo_wise` (this Rust port) still
 diverges from the original [repowise-dev/repowise](https://github.com/repowise-dev/repowise)
-(Python/TypeScript, AGPL-3.0), as of 2026-07-30. It supersedes any earlier
+(Python/TypeScript, AGPL-3.0), as of 2026-07-31. It supersedes any earlier
 in-conversation summary of the same comparison — an initial pass under-read
 this repo's own README (3,143 lines) and missed several already-shipped
 sections (`repowise-server`/`repowise-web`'s live dashboard, `repowise-distill`,
-the post-commit hook, `repowise-workspace`'s later slices). This version is
-cross-checked against the current README/ARCHITECTURE.md in full and against
-this repo's own closed-issue history (120 issues, 0 open at time of writing),
-so it doesn't re-flag anything already implemented or already declined by a
-human as a permanent non-goal.
+the post-commit hook, `repowise-workspace`'s later slices). That version was
+cross-checked against this repo's own README/ARCHITECTURE.md and closed-issue
+history, but not against upstream's own docs directly.
+
+**Round 2 (2026-07-31) corrects that gap.** A direct read of upstream's
+`docs/start/DASHBOARD.md` ("every view in the local web dashboard, and what
+each one answers" — 23 views, listed by name) found this repo's own earlier
+"the live dashboard is already at parity" claim below was true only relative
+to this port's own issue #59/#65 bundle, not relative to upstream's actual,
+current view list. Ten more gaps (issues #351–#360) came out of that direct
+comparison — nine dashboard views this port doesn't have (some needing only
+new wiring over data this port already computes; a few needing genuinely new
+capabilities this port has never had), plus one non-dashboard capability gap
+(security-finding scanning) surfaced by cross-referencing the view list
+against this port's own capability inventory. See the table below; the
+"already at parity" bullet immediately below is left as originally written,
+with a note, rather than rewritten, so the correction itself stays visible.
 
 Every open gap below has a matching GitHub issue labeled `parity-gap`
 (alongside `enhancement`/`needs-human`, matching this repo's existing
@@ -38,6 +50,14 @@ places exceeds upstream on raw count:
   view, chat backed by real embeddings retrieval, Present Mode, a live
   reindex job banner, a read-only Settings view, and in-process cost
   tracking — closing out issues #59 and #65's entire bundle.
+  **Correction (Round 2, 2026-07-31): this was parity with this repo's own
+  issue #59/#65 bundle, not with upstream's actual current dashboard.** A
+  direct read of upstream's `docs/start/DASHBOARD.md` found 23 named views;
+  this port has solid equivalents for roughly 15–16 of them and is missing
+  or has only a partial equivalent for the rest — see issues #351–#360.
+  The static-dashboard-vs-live-dashboard migration (this repo's own #59/#65
+  scope) is genuinely done; parity with upstream's actual, current dashboard
+  is not.
 - `repowise-distill`: reversible command-output compaction with an
   omission store, a hook that routes recognized commands through it
   automatically, savings accounting, and fumble-correction detection
@@ -80,6 +100,16 @@ list:
 | 8 | Contract breaking-change detection | [#339](https://github.com/baileyrd/rusty_repo_wise/issues/339) | closed via PR #344 — persisted `.repowise-workspace/contracts.json` snapshot, diffed every `workspace-contracts` run |
 | 9 | Git-worktree auto-seeding for incremental indexing | [#340](https://github.com/baileyrd/rusty_repo_wise/issues/340) | closed, not planned — this port has no incremental re-indexing at all yet, even for the common case; building it narrowly for worktrees first is the wrong order, see the issue |
 | 10 | Luau ("Partial" tier) language support | [#341](https://github.com/baileyrd/rusty_repo_wise/issues/341) | closed via PR #347 — Luau joins the Full tier directly (real `tree-sitter-luau` grammar available), no new "Partial" tier concept needed; see `repowise_parser::luau`'s module doc |
+| 11 | Dashboard: browsable Docs view + doc-freshness/coverage tracking | [#351](https://github.com/baileyrd/rusty_repo_wise/issues/351) | open |
+| 12 | Dashboard: Architecture section restructure (Map/Explore/Coupling sub-views) | [#352](https://github.com/baileyrd/rusty_repo_wise/issues/352) | open |
+| 13 | External (third-party) dependency registry | [#353](https://github.com/baileyrd/rusty_repo_wise/issues/353) | open |
+| 14 | Dashboard: Knowledge Graph view | [#354](https://github.com/baileyrd/rusty_repo_wise/issues/354) | open |
+| 15 | Dashboard: Refactoring candidates view | [#355](https://github.com/baileyrd/rusty_repo_wise/issues/355) | open |
+| 16 | Dashboard: Commits view (risk-scored commit browsing) | [#356](https://github.com/baileyrd/rusty_repo_wise/issues/356) | open |
+| 17 | Dashboard: semantic search in the main search box | [#357](https://github.com/baileyrd/rusty_repo_wise/issues/357) | open |
+| 18 | Dashboard: surface distill/MCP savings accounting (Costs view) | [#358](https://github.com/baileyrd/rusty_repo_wise/issues/358) | open |
+| 19 | Dashboard: configurable Settings view | [#359](https://github.com/baileyrd/rusty_repo_wise/issues/359) | open |
+| 20 | Security-finding scanning + dashboard view | [#360](https://github.com/baileyrd/rusty_repo_wise/issues/360) | open |
 
 See each linked issue for the gap/why/reference/open-questions detail —
 this table is kept in sync with issue numbers once filed.

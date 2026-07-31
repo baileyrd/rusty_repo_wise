@@ -6,6 +6,35 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #351 — Round 2 parity audit: 10 new dashboard/capability gaps
+**2026-07-31**
+
+- `ParityGaps.md`'s "the live dashboard is already at parity" claim was
+  checked against this repo's own issue #59/#65 bundle, never against
+  upstream's actual current dashboard. A direct read of upstream's
+  `docs/start/DASHBOARD.md` (23 named views) found this port has solid
+  equivalents for roughly 15–16 of them, and is missing or has only a
+  partial equivalent for the rest.
+- Filed 10 new issues (#351–#360, `parity-gap`/`enhancement`/`needs-human`,
+  matching the existing convention): browsable Docs view + doc-freshness
+  tracking, an Architecture section restructure (Map/Explore/Coupling
+  sub-views), an external third-party dependency registry (a genuine new
+  capability, not just a view), a Knowledge Graph view, a Refactoring
+  candidates view, a Commits view (risk-scored commit browsing, needing a
+  new "list recent commits" query this port doesn't have), semantic search
+  in the dashboard's main search box, surfacing `repowise saved`'s
+  distill/MCP savings accounting in the web UI, a configurable (not just
+  read-only) Settings view, and security-finding scanning — the last one
+  a wholly new analysis capability with no existing internal data to build
+  on, confirmed absent from this codebase entirely.
+- `ParityGaps.md`'s "already at parity" bullet for the dashboard is kept as
+  originally written, with a correction note appended, rather than rewritten
+  in place — so the correction itself stays visible in the document's own
+  history, not just in this changelog entry.
+- No code changes.
+
+---
+
 ## PR #350 — Migrate the dashboard off the static page, live-only now
 **2026-07-31**
 

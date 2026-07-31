@@ -1591,8 +1591,8 @@ impl RepowiseServer {
         let health = repowise_health::analyze(&index, &graph);
         // Not every indexed root is a git repository (or has git
         // available at all) — degrade to "no git data" rather than
-        // failing the whole call, same tradeoff `repowise-dashboard`
-        // already makes for its hotspots section.
+        // failing the whole call, same tradeoff `repowise-server`'s
+        // `/api/hotspots` endpoint already makes.
         let analytics = repowise_git::GitAnalytics::collect(&self.root).ok();
 
         if let Some(file) = file {

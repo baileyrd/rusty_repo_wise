@@ -235,8 +235,8 @@ original's decision sources are implemented, plus a 9th — decision-flavored
 README/ARCHITECTURE prose, issue #71 — that isn't in the original eight —
 see "Architectural decision mining" below). The MCP server covers all ten of
 the original's flagship tools, and adds three the original doesn't have — see "MCP server" below. The
-dashboard is one static page with no per-file drill-down or live search
-— see "Dashboard" below for what a richer version would need.
+dashboard is a live server with per-file drill-down and live search —
+see "Dashboard" below.
 
 ## Crates
 
@@ -303,19 +303,16 @@ dashboard is one static page with no per-file drill-down or live search
   the index/graph/health/git-analytics/mined-decisions data, plus a
   deterministic per-commit change-risk score and confidence-tiered
   dead-code candidates, as agent-facing tools over stdio.
-- `repowise-dashboard` — a static-site dashboard rendered from the
-  overview/health/hotspot/decision data the other layers compute.
 - `repowise-llm` — the one crate that talks to an LLM: an opt-in,
   OpenAI-compatible chat-completions client (works against a self-hosted
   [`rusty_provider`](https://github.com/baileyrd/rusty_provider) instance
   or any other OpenAI-compatible endpoint) that layers a written summary
   on top of each `repowise-docs` wiki page.
 - `repowise-server` — a live axum HTTP server (JSON API + static-asset
-  serving) for the dashboard's Phase 0 live-server pivot — see "Live
-  dashboard server" below. `repowise-web` (its Leptos/WASM frontend
-  companion) lives alongside it in `crates/` but is deliberately **not**
-  a member of this repo's Cargo workspace, since it only builds for
-  `wasm32-unknown-unknown`.
+  serving) for the dashboard — see "Dashboard" below. `repowise-web`
+  (its Leptos/WASM frontend companion) lives alongside it in `crates/`
+  but is deliberately **not** a member of this repo's Cargo workspace,
+  since it only builds for `wasm32-unknown-unknown`.
 - `repowise-workspace` — multi-repo workspace configuration (issue #64's
   first slice): parses a small standalone TOML file naming a set of
   repo roots, and reports each one's indexed status. See "Multi-repo
@@ -372,7 +369,6 @@ repowise refactor [PATH]           # deterministic refactor candidates: import c
                                     #   --kind <...>, --limit <N> (default 20, 0 for unlimited)
 repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
-repowise dashboard [PATH]           # generate a static HTML dashboard under .repowise/dashboard
 repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
                                     #   architectural decisions from code (opt-in, requires prior `docs`)
 repowise serve-dashboard [PATH]      # run a live dashboard server (JSON API + optional static frontend)
@@ -444,7 +440,7 @@ other markers still apply to shell the same as everywhere else.
 
 **Penalty weights are pluggable** (`repowise_health::HealthWeights`),
 not hardcoded — the table above is this type's `Default`, and every
-caller (`repowise health`/`repowise docs`/`repowise dashboard`/the MCP
+caller (`repowise health`/`repowise docs`/the dashboard/the MCP
 server) still gets exactly those values unless it opts into something
 else. `repowise health --weights <FILE>` loads a (possibly partial) TOML
 file of overrides — an omitted key keeps its documented default — e.g.:
@@ -496,8 +492,8 @@ are plain fixed-penalty thresholds over git history, computed by
 way `hot_path_sync_io`/`coverage_gap` already are —
 `analyze_with_context`'s `org_signals` parameter, `None` skipping all
 six rather than reporting false "no risk". Only `repowise health`,
-`get_health`, `repowise dashboard`, and the live dashboard's
-`/api/health` compute them; `get_context`/`get_risk` (which use health
+`get_health`, and the dashboard's `/api/health` compute them;
+`get_context`/`get_risk` (which use health
 scoring as one ingredient in a faster, per-file answer) deliberately
 don't, to avoid making a cheap lookup pay this cost.
 
@@ -2454,7 +2450,7 @@ below):
   given no `file`, returns the `top_n` riskiest files repo-wide, ranked
   by (recency-weighted) hotspot score. Degrades to zero/empty git data
   (rather than erroring) when the indexed root isn't a git repository —
-  same tradeoff `repowise-dashboard`'s hotspots section already makes.
+  same tradeoff the dashboard's `/api/hotspots` endpoint already makes.
 - **`get_answer(question)`** — a natural-language question about the
   codebase, answered from retrieved context, **with citations**. Shares
   its retrieval with the dashboard's `POST /api/chat` (one implementation
@@ -2725,59 +2721,37 @@ documented future work rather than shipped slow or half-right:
 
 ## Dashboard
 
-`repowise dashboard [PATH]` writes one self-contained static HTML page to
-`.repowise/dashboard/index.html` — open it directly in a browser, no
-server to run. Kept deliberately simple: a single page combining five
-sections, each degrading gracefully to an explicit "not available"
-placeholder (never a silently blank section) when its data doesn't exist:
-
-- **Overview** — same data as `repowise overview`.
-- **Code health** — average score, markers by kind, lowest-scoring files
-  (same data as `repowise health`).
-- **Hotspots** — top files by churn × complexity (same data as `repowise
-  hotspots`), or a placeholder if `PATH` isn't a git repo.
-- **Architectural decisions** — mined ADRs/decision-commits (same data as
-  `repowise decisions`), or a placeholder if none are found.
-- **Symbols** — every indexed symbol (name, kind, file, line), with a
-  small embedded-JS dropdown that filters the table by kind
-  (function/method/class/etc.) client-side. No external requests and no
-  build step: the whole table is embedded once in the page, and the
-  dropdown just toggles row visibility — the only JS in the dashboard.
-
-Every file path rendered in the overview/health/hotspots/symbols tables
-above is a **drill-down link** to that file's `repowise-docs` wiki page
-(`.repowise/wiki/<path>.md`) when one already exists on disk — `dashboard`
-checks for it directly rather than generating wiki pages itself (that
-would duplicate `repowise-docs`'s own freshness tracking and re-read every
-file from disk on every dashboard build, even when nothing changed). Run
-`repowise docs` before `repowise dashboard` to get working drill-down
-links; without it, file paths render as plain text rather than a broken
-link. The Architectural decisions table isn't linked this way since its
-rows are decisions, not files (its "Linked files" column is just a count).
-
-Regenerating means re-running the command — there's no auto-refresh, and
-this static page has no live search either. A genuinely live version is
-now underway (`repowise serve-dashboard`, see the next section); this
-static page isn't going away in the meantime, since it needs nothing
-beyond the CLI to generate and view.
-
-## Live dashboard server
-
-`repowise serve-dashboard [PATH]` starts a real, long-running server —
-`repowise-server` (axum) — rather than writing a static file: pivoting the
-dashboard to genuine parity with repowise's own Next.js-frontend/
+The dashboard is served live — `repowise serve-dashboard [PATH]` starts a
+real, long-running server (`repowise-server`, axum) — rather than a
+static file: genuine parity with repowise's own Next.js-frontend/
 FastAPI-backend architecture, minus the Node.js dependency.
+
+**Migrated off the static dashboard (`repowise dashboard`, `repowise-dashboard`).**
+That command/crate generated one self-contained HTML page
+(`.repowise/dashboard/index.html`) combining Overview/Code health/
+Hotspots/Architectural decisions/Symbols, regenerated by re-running the
+command — no auto-refresh, no live search, no drill-down beyond a
+static link to a `repowise-docs` wiki page if one already existed on
+disk. Once the live dashboard reached feature parity with it (and then
+exceeded it — the sections below are a strict superset), keeping both
+meant two dashboards to keep in sync on every future feature rather
+than one to build well. `repowise status`'s old "dashboard: generated/
+not generated" line is gone too — it checked for that static file
+specifically, and has nothing left to report now that there is no file
+to check for.
+
+`repowise serve-dashboard [PATH]`:
 
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
   `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`, plus
-  `POST /api/chat` — the same data the static dashboard's sections
-  already compute (`repowise overview`/`health`/`hotspots`/`decisions`,
-  plus the full symbol list), as JSON instead of baked into one static
-  HTML page. File paths are always relative to `PATH`, never absolute
-  host paths. `/api/hotspots` returns `{"available": false}` (not an
-  error) when `PATH` isn't a git repo, same "degrade gracefully"
-  behavior as the static dashboard. `/api/wiki-pages` lists which
+  `POST /api/chat` — the same data `repowise
+  overview`/`health`/`hotspots`/`decisions` already compute, plus the
+  full symbol list, as JSON. File paths are always relative to `PATH`,
+  never absolute host paths. `/api/hotspots` returns `{"available":
+  false}` (not an error) when `PATH` isn't a git repo, the same
+  "degrade gracefully, never a silently blank section" convention every
+  endpoint below follows. `/api/wiki-pages` lists which
   indexed files already have a `repowise-docs` wiki page on disk;
   `/api/wiki?path=<rel>` serves one page's raw markdown (matched
   against that exact set, so a crafted `path` can't escape
@@ -2948,11 +2922,10 @@ FastAPI-backend architecture, minus the Node.js dependency.
   ones — an unmeasured file is not a 0%-covered file, and the endpoint keeps
   the two apart rather than flattening them into one list. With nothing
   ingested the view says so and points at `repowise coverage add`.
-- **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate that
-  renders every section the static dashboard has — overview, code
-  health, hotspots, architectural decisions, and a symbols table with a
-  live (client-side-reactive, not just embedded-JS) kind filter — plus
-  things the static dashboard didn't have a live version of yet: every
+- **`repowise-web`** is a companion Leptos (Rust/WASM) frontend crate
+  rendering overview, code health, hotspots, architectural decisions,
+  and a symbols table with a live, client-side-reactive kind filter —
+  plus everything below: every
   rendered file path (including graph nodes) is a **drill-down link**
   that opens a **file-detail panel** — the file's wiki page (if
   `repowise docs` has generated one), its git-blame ownership

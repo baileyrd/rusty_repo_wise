@@ -353,8 +353,8 @@ pub struct SummaryResult {
 /// short summary of that page's already-deterministic content and
 /// insert it as a "## Summary" section right after the page's title —
 /// requires `repowise docs` to have been run at some point (same
-/// "augment, don't generate" relationship `repowise-dashboard`'s
-/// drill-down links have with wiki pages). One file's failure (missing
+/// "augment, don't generate" relationship `repowise-web`'s file-detail
+/// drill-down panels have with wiki pages). One file's failure (missing
 /// page, LLM error) doesn't stop the rest; each file gets its own
 /// `SummaryResult`. Re-running replaces a previous summary rather than
 /// stacking a second one.

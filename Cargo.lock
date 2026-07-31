@@ -1317,7 +1317,6 @@ dependencies = [
  "notify",
  "repowise-adr",
  "repowise-core",
- "repowise-dashboard",
  "repowise-distill",
  "repowise-docs",
  "repowise-git",
@@ -1346,20 +1345,6 @@ dependencies = [
  "ignore",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "repowise-dashboard"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "repowise-adr",
- "repowise-core",
- "repowise-git",
- "repowise-graph",
- "repowise-health",
- "repowise-parser",
- "tempfile",
 ]
 
 [[package]]

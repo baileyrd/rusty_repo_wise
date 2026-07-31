@@ -4,6 +4,7 @@
 //! structures produced by `repowise-parser` and consumed by `repowise-graph`.
 
 pub mod coverage;
+pub mod deps;
 pub mod docker;
 pub mod graphql;
 pub mod openapi;

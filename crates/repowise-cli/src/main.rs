@@ -417,6 +417,22 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List third-party (package-manager) dependencies declared in
+    /// `Cargo.toml`, `package.json`, `composer.json`,
+    /// `requirements.txt`, and `pyproject.toml`/`go.mod` (issue #353,
+    /// upstream's Architecture section's Dependencies sub-view).
+    /// Deliberately distinct from `deps`, which shows a single file's
+    /// *internal* import dependencies -- this is external,
+    /// package-manager dependencies, repo-wide. Declared, not resolved:
+    /// this reports the version constraint exactly as written in the
+    /// manifest, not a lockfile-resolved version -- `cargo tree`/`npm
+    /// ls`/`pip list` already do full resolution per ecosystem, and
+    /// duplicating that isn't this port's job. Workspace-internal path
+    /// dependencies are excluded.
+    ExternalDeps {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Deterministic refactor candidates: file-level import cycles, god
     /// classes, low-cohesion classes, and duplicate/near-duplicate
     /// functions -- read-only, and the only "refactoring" this port
@@ -783,6 +799,7 @@ fn main() -> anyhow::Result<()> {
         Command::Protobuf { path } => cmd_protobuf(&path),
         Command::Graphql { path } => cmd_graphql(&path),
         Command::Terraform { path } => cmd_terraform(&path),
+        Command::ExternalDeps { path } => cmd_external_deps(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Generate { path } => cmd_generate(&path),
@@ -3142,6 +3159,39 @@ fn cmd_terraform(path: &Path) -> anyhow::Result<()> {
                 None => String::new(),
             };
             println!("    [module] {}  line {}{source}", m.name, m.start_line);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_external_deps(path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let deps = repowise_external_deps::collect_dependencies(&root)?;
+
+    if deps.is_empty() {
+        println!("No third-party dependencies found under {}", root.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} third-party dependenc{} found under {}",
+        deps.len(),
+        if deps.len() == 1 { "y" } else { "ies" },
+        root.display()
+    );
+
+    let files: std::collections::BTreeSet<&Path> = deps.iter().map(|d| d.file.as_path()).collect();
+
+    for file in files {
+        println!("  {}", display_path(file, &root));
+        for d in deps.iter().filter(|d| d.file == file) {
+            let version = d.version.as_deref().unwrap_or("(unversioned)");
+            println!(
+                "    [{}/{}] {} {version}",
+                d.ecosystem,
+                d.kind.label(),
+                d.name
+            );
         }
     }
     Ok(())

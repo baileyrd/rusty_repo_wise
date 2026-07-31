@@ -491,6 +491,17 @@ struct Coupling {
     pairs: Vec<CouplingPair>,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+struct ExternalDependency {
+    name: String,
+    version: Option<String>,
+    /// `"direct"`, `"dev"`, or `"build"`.
+    kind: String,
+    /// `"cargo"`, `"npm"`, `"pypi"`, `"go"`, or `"composer"`.
+    ecosystem: String,
+    file: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ChatTurn {
     role: String,
@@ -1806,6 +1817,7 @@ enum Route {
     RefactorCandidates,
     Docs,
     Coupling,
+    ExternalDeps,
     Chat,
     Usage,
     Settings,
@@ -1844,6 +1856,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
     ),
     (Route::Docs, "docs", "Docs"),
     (Route::Coupling, "coupling", "Coupling"),
+    (Route::ExternalDeps, "dependencies", "Dependencies"),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
     (Route::Settings, "settings", "Settings"),
@@ -2623,6 +2636,83 @@ fn CouplingSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                             </table>
                         }
                         .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// External (third-party) dependency registry (`/api/external-deps`) --
+/// the Architecture section's Dependencies sub-view (issue #353).
+/// Declared, not resolved: the version constraint exactly as written in
+/// each manifest, not a lockfile-resolved version.
+#[component]
+fn ExternalDepsSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let filter = RwSignal::new(String::new());
+    let deps = LocalResource::new(|| fetch_json::<Vec<ExternalDependency>>("/api/external-deps"));
+
+    view! {
+        <h2>"Dependencies"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                deps
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(all) if all.is_empty() => {
+                            view! { <p class="empty">"No third-party dependencies found."</p> }
+                                .into_any()
+                        }
+                        Ok(all) => {
+                            let mut ecosystems: Vec<String> =
+                                all.iter().map(|d| d.ecosystem.clone()).collect();
+                            ecosystems.sort();
+                            ecosystems.dedup();
+                            let ecosystem_filter = filter.get();
+                            let rows: Vec<ExternalDependency> = all
+                                .into_iter()
+                                .filter(|d| ecosystem_filter.is_empty() || d.ecosystem == ecosystem_filter)
+                                .collect();
+                            view! {
+                                <label for="deps-ecosystem-filter">"Ecosystem: "</label>
+                                <select
+                                    id="deps-ecosystem-filter"
+                                    on:change=move |ev| filter.set(event_target_value(&ev))
+                                >
+                                    <option value="">"All"</option>
+                                    {ecosystems.into_iter().map(|e| {
+                                        view! { <option value=e.clone()>{e.clone()}</option> }
+                                    }).collect::<Vec<_>>()}
+                                </select>
+                                <p>{format!("{} dependenc{}.", rows.len(), if rows.len() == 1 { "y" } else { "ies" })}</p>
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>"Name"</th>
+                                            <th>"Version"</th>
+                                            <th>"Kind"</th>
+                                            <th>"Ecosystem"</th>
+                                            <th>"Manifest"</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rows.into_iter().map(|d| {
+                                            let version = d.version.unwrap_or_else(|| "-".to_string());
+                                            view! {
+                                                <tr>
+                                                    <td>{d.name}</td>
+                                                    <td>{version}</td>
+                                                    <td>{d.kind}</td>
+                                                    <td>{d.ecosystem}</td>
+                                                    <td>{file_cell(d.file, selected)}</td>
+                                                </tr>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </tbody>
+                                </table>
+                            }
+                            .into_any()
+                        }
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
                     })
             }}
@@ -3501,6 +3591,7 @@ fn App() -> impl IntoView {
             }
             Route::Docs => view! { <DocsSection selected=selected /> }.into_any(),
             Route::Coupling => view! { <CouplingSection selected=selected /> }.into_any(),
+            Route::ExternalDeps => view! { <ExternalDepsSection selected=selected /> }.into_any(),
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),

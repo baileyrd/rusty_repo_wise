@@ -340,6 +340,22 @@ struct CouplingPairDto {
     count: usize,
 }
 
+/// The Architecture section's Dependencies sub-view (issue #353):
+/// third-party dependencies declared across every manifest this port
+/// recognizes. Declared, not resolved -- see
+/// `repowise_core::deps::ExternalDependency`'s module doc.
+#[derive(Serialize)]
+struct ExternalDependencyDto {
+    name: String,
+    version: Option<String>,
+    /// `"direct"`, `"dev"`, or `"build"`.
+    kind: &'static str,
+    /// `"cargo"`, `"npm"`, `"pypi"`, `"go"`, or `"composer"`.
+    ecosystem: &'static str,
+    file: String,
+    line: usize,
+}
+
 /// A JSON-serializable `repowise_git::Hotspot`. `available: false` (with
 /// an empty list) means this root has no git history to analyze --
 /// distinct from "available, but no file has both history and
@@ -961,6 +977,25 @@ async fn get_coupling(State(state): State<AppState>) -> Result<Json<CouplingDto>
         },
     };
     Ok(Json(dto))
+}
+
+async fn get_external_deps(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ExternalDependencyDto>>, ApiError> {
+    let deps = repowise_external_deps::collect_dependencies(&state.root)?;
+    let mut deps: Vec<ExternalDependencyDto> = deps
+        .into_iter()
+        .map(|d| ExternalDependencyDto {
+            name: d.name,
+            version: d.version,
+            kind: d.kind.label(),
+            ecosystem: d.ecosystem,
+            file: relative(&state.root, &d.file),
+            line: d.line,
+        })
+        .collect();
+    deps.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
+    Ok(Json(deps))
 }
 
 #[derive(Deserialize)]
@@ -2298,6 +2333,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/health", get(get_health))
         .route("/api/hotspots", get(get_hotspots))
         .route("/api/coupling", get(get_coupling))
+        .route("/api/external-deps", get(get_external_deps))
         .route("/api/decisions", get(get_decisions))
         .route("/api/symbols", get(get_symbols))
         .route("/api/wiki-pages", get(get_wiki_pages))
@@ -3034,6 +3070,41 @@ mod tests {
         assert_eq!(pairs[0]["file_a"], "a.txt");
         assert_eq!(pairs[0]["file_b"], "b.txt");
         assert_eq!(pairs[0]["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn get_external_deps_reports_a_cargo_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/external-deps").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let deps = json.as_array().unwrap();
+        assert_eq!(deps.len(), 1, "{deps:?}");
+        assert_eq!(deps[0]["name"], "serde");
+        assert_eq!(deps[0]["version"], "1.0");
+        assert_eq!(deps[0]["kind"], "direct");
+        assert_eq!(deps[0]["ecosystem"], "cargo");
+        assert_eq!(deps[0]["file"], "Cargo.toml");
+    }
+
+    #[tokio::test]
+    async fn get_external_deps_is_an_empty_list_with_no_manifests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/external-deps").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!([]));
     }
 
     #[tokio::test]

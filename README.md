@@ -2744,7 +2744,8 @@ to check for.
 
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
-  `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`, plus
+  `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`,
+  `/api/refactor-candidates`, plus
   `POST /api/chat` — the same data `repowise
   overview`/`health`/`hotspots`/`decisions` already compute, plus the
   full symbol list, as JSON. File paths are always relative to `PATH`,
@@ -2773,7 +2774,13 @@ to check for.
   `/api/dead-code` returns confidence-tiered dead-code candidates with
   an optional `?min_confidence=low|medium|high` filter, mirroring the
   `get_dead_code` MCP tool's own shape (`total_matching` before the
-  50-candidate cap). `POST /api/chat` takes `{"history": [{"role",
+  50-candidate cap); `/api/refactor-candidates` returns deterministic
+  refactor candidates (import cycles, god classes, low-cohesion classes,
+  duplicate/near-duplicate functions) with an optional
+  `?kind=break-import-cycle|split-god-class|split-by-cohesion|extract-duplicate`
+  filter, mirroring the `get_refactor_candidates` MCP tool's own shape
+  (`total_matching` before the 20-candidate cap; issue #355). `POST
+  /api/chat` takes `{"history": [{"role",
   "content"}, ...]}` (the whole conversation so far) and returns
   `{"available": bool, "reply": string | null, "cited": [...],
   "retrieval_mode": string, "retrieval_caveat": string | null,
@@ -2941,6 +2948,11 @@ to check for.
   per-language colors, no D3 or other JS graph library involved. A
   **dead-code section** lists `/api/dead-code`'s candidates with a
   minimum-confidence filter, each risk factor available as a tooltip. A
+  **refactoring-candidates section** (issue #355) lists
+  `/api/refactor-candidates`'s deterministic candidates — import cycles,
+  god classes, low-cohesion classes, duplicate/near-duplicate functions —
+  with a kind filter, each row's files linking into the same
+  file-detail panel. A
   **chat section** talks to `POST /api/chat`, with full conversation
   history kept client-side and resent every turn; if the server reports
   the LLM isn't configured, it shows a plain explanatory message instead

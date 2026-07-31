@@ -527,6 +527,37 @@ struct DeadCodeDto {
 /// Matches the `get_dead_code` MCP tool's own default `limit`.
 const DEAD_CODE_LIMIT: usize = 50;
 
+#[derive(Deserialize)]
+struct RefactorCandidatesQuery {
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RefactorCandidateDto {
+    id: String,
+    /// `break-import-cycle`, `split-god-class`, `split-by-cohesion`, or
+    /// `extract-duplicate`.
+    kind: String,
+    title: String,
+    rationale: String,
+    files: Vec<String>,
+    symbols: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RefactorCandidatesDto {
+    candidates: Vec<RefactorCandidateDto>,
+    /// How many candidates matched `kind` before truncation to
+    /// `REFACTOR_CANDIDATES_LIMIT` -- mirrors the `get_refactor_candidates`
+    /// MCP tool's own `total_matching` field, for the same "don't
+    /// silently truncate" reason.
+    total_matching: usize,
+}
+
+/// Matches the `get_refactor_candidates` MCP tool's own default `limit`.
+const REFACTOR_CANDIDATES_LIMIT: usize = 20;
+
 /// Symbol detail, for `GET /api/symbol` (issue #263).
 #[derive(Serialize)]
 struct SymbolDetailDto {
@@ -1482,6 +1513,50 @@ async fn get_dead_code(
     }))
 }
 
+async fn get_refactor_candidates(
+    State(state): State<AppState>,
+    Query(query): Query<RefactorCandidatesQuery>,
+) -> Result<Json<RefactorCandidatesDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let graph = repowise_graph::RepoGraph::build(&index);
+    let mut candidates = repowise_refactor::find_refactor_candidates(&index, &graph);
+
+    if let Some(kind) = query.kind.as_deref() {
+        match kind {
+            "break-import-cycle" | "split-god-class" | "split-by-cohesion"
+            | "extract-duplicate" => {
+                candidates.retain(|c| c.kind.label() == kind);
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "kind must be break-import-cycle/split-god-class/split-by-cohesion/\
+                     extract-duplicate, got {other:?}"
+                )
+                .into());
+            }
+        }
+    }
+
+    let total_matching = candidates.len();
+    let candidates = candidates
+        .into_iter()
+        .take(REFACTOR_CANDIDATES_LIMIT)
+        .map(|c| RefactorCandidateDto {
+            id: c.id,
+            kind: c.kind.label().to_string(),
+            title: c.title,
+            rationale: c.rationale,
+            files: c.files,
+            symbols: c.symbols,
+        })
+        .collect();
+
+    Ok(Json(RefactorCandidatesDto {
+        candidates,
+        total_matching,
+    }))
+}
+
 async fn post_chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequestDto>,
@@ -2142,6 +2217,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/contributors", get(get_contributors))
         .route("/api/coverage", get(get_coverage))
         .route("/api/dead-code", get(get_dead_code))
+        .route("/api/refactor-candidates", get(get_refactor_candidates))
         .route("/api/chat", post(post_chat))
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
         .route("/api/webhook/github", post(post_webhook_github))
@@ -3039,6 +3115,90 @@ mod tests {
         index_with_one_busy_symbol(&root);
 
         let (status, _json) = get(root, "/api/dead-code?min_confidence=nonsense").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// Two files that import each other -- the same shape
+    /// `repowise-refactor`'s own `an_import_cycle_becomes_a_break_import_cycle_candidate`
+    /// test uses, re-expressed as pre-resolved `ImportRef`s so the
+    /// fixture doesn't depend on any language-specific import parsing.
+    fn index_with_an_import_cycle(root: &Path) -> RepoIndex {
+        let a = root.join("a.rs");
+        let b = root.join("b.rs");
+        std::fs::write(&a, "mod b;\n").unwrap();
+        std::fs::write(&b, "mod a;\n").unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![
+                repowise_core::FileRecord {
+                    path: a.clone(),
+                    language: repowise_core::Language::Rust,
+                    lines: 1,
+                    symbols: vec![],
+                    imports: vec![repowise_core::ImportRef {
+                        path: "b".to_string(),
+                        line: 1,
+                        resolved_file: Some(b.clone()),
+                    }],
+                    calls: vec![],
+                    field_accesses: vec![],
+                },
+                repowise_core::FileRecord {
+                    path: b,
+                    language: repowise_core::Language::Rust,
+                    lines: 1,
+                    symbols: vec![],
+                    imports: vec![repowise_core::ImportRef {
+                        path: "a".to_string(),
+                        line: 1,
+                        resolved_file: Some(a),
+                    }],
+                    calls: vec![],
+                    field_accesses: vec![],
+                },
+            ],
+            other_files: 0,
+            indexed_commit: None,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    #[tokio::test]
+    async fn get_refactor_candidates_returns_an_import_cycle_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_an_import_cycle(&root);
+
+        let (status, json) = get(root, "/api/refactor-candidates").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["total_matching"], 1);
+        assert_eq!(json["candidates"][0]["kind"], "break-import-cycle");
+        assert_eq!(json["candidates"][0]["files"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_refactor_candidates_filters_by_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_an_import_cycle(&root);
+
+        let (status, json) = get(root, "/api/refactor-candidates?kind=split-god-class").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["total_matching"], 0);
+        assert_eq!(json["candidates"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_refactor_candidates_errors_on_invalid_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_an_import_cycle(&root);
+
+        let (status, _json) = get(root, "/api/refactor-candidates?kind=nonsense").await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }

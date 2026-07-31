@@ -447,6 +447,22 @@ struct DeadCode {
     total_matching: usize,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+struct RefactorCandidate {
+    id: String,
+    kind: String,
+    title: String,
+    rationale: String,
+    files: Vec<String>,
+    symbols: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct RefactorCandidates {
+    candidates: Vec<RefactorCandidate>,
+    total_matching: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ChatTurn {
     role: String,
@@ -1759,6 +1775,7 @@ enum Route {
     Symbols,
     Graph,
     DeadCode,
+    RefactorCandidates,
     Chat,
     Usage,
     Settings,
@@ -1790,6 +1807,11 @@ const ROUTES: &[(Route, &str, &str)] = &[
     (Route::Symbols, "symbols", "Symbols"),
     (Route::Graph, "graph", "Graph"),
     (Route::DeadCode, "dead-code", "Dead code"),
+    (
+        Route::RefactorCandidates,
+        "refactor-candidates",
+        "Refactoring",
+    ),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
     (Route::Settings, "settings", "Settings"),
@@ -2350,6 +2372,92 @@ fn DeadCodeSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                                                 <td>{file_cell(c.file, selected)}</td>
                                                 <td>{c.line}</td>
                                                 <td title=confidence_title>{c.confidence}</td>
+                                            </tr>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Deterministic refactor candidates (`/api/refactor-candidates`), with a
+/// kind filter -- mirrors the `get_refactor_candidates` MCP tool's own
+/// `kind`/`total_matching` shape. Issue #355.
+#[component]
+fn RefactorCandidatesSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let filter = RwSignal::new(String::new());
+    let candidates = LocalResource::new(move || {
+        let kind = filter.get();
+        async move {
+            if kind.is_empty() {
+                fetch_json::<RefactorCandidates>("/api/refactor-candidates").await
+            } else {
+                fetch_json_with_query::<RefactorCandidates>(
+                    "/api/refactor-candidates",
+                    &[("kind", &kind)],
+                )
+                .await
+            }
+        }
+    });
+
+    view! {
+        <h2>"Refactoring candidates"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                candidates
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(rc) if rc.candidates.is_empty() => {
+                            view! { <p class="empty">"No refactor candidates found."</p> }.into_any()
+                        }
+                        Ok(rc) => view! {
+                            <label for="refactor-kind-filter">"Kind: "</label>
+                            <select
+                                id="refactor-kind-filter"
+                                on:change=move |ev| filter.set(event_target_value(&ev))
+                            >
+                                <option value="">"All"</option>
+                                <option value="break-import-cycle">"Break import cycle"</option>
+                                <option value="split-god-class">"Split god class"</option>
+                                <option value="split-by-cohesion">"Split by cohesion"</option>
+                                <option value="extract-duplicate">"Extract duplicate"</option>
+                            </select>
+                            <p>{format!("{} candidate(s).", rc.total_matching)}</p>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"Title"</th>
+                                        <th>"Kind"</th>
+                                        <th>"Files"</th>
+                                        <th>"Symbols"</th>
+                                        <th>"Rationale"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {rc.candidates.into_iter().map(|c| {
+                                        let last = c.files.len().saturating_sub(1);
+                                        let files = c.files.into_iter()
+                                            .enumerate()
+                                            .map(|(i, f)| {
+                                                let sep = if i < last { ", " } else { "" };
+                                                view! { {file_cell(f, selected)}{sep} }.into_any()
+                                            })
+                                            .collect::<Vec<_>>();
+                                        let symbols = c.symbols.join(", ");
+                                        view! {
+                                            <tr id=c.id>
+                                                <td>{c.title}</td>
+                                                <td>{c.kind}</td>
+                                                <td>{files}</td>
+                                                <td>{symbols}</td>
+                                                <td>{c.rationale}</td>
                                             </tr>
                                         }
                                     }).collect::<Vec<_>>()}
@@ -3230,6 +3338,9 @@ fn App() -> impl IntoView {
             Route::Symbols => view! { <SymbolsSection selected=selected /> }.into_any(),
             Route::Graph => view! { <GraphSection selected=selected /> }.into_any(),
             Route::DeadCode => view! { <DeadCodeSection selected=selected /> }.into_any(),
+            Route::RefactorCandidates => {
+                view! { <RefactorCandidatesSection selected=selected /> }.into_any()
+            }
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),

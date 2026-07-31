@@ -1528,6 +1528,7 @@ dependencies = [
  "repowise-health",
  "repowise-llm",
  "repowise-parser",
+ "repowise-refactor",
  "repowise-workspace",
  "ring",
  "serde",

@@ -558,6 +558,31 @@ struct RefactorCandidatesDto {
 /// Matches the `get_refactor_candidates` MCP tool's own default `limit`.
 const REFACTOR_CANDIDATES_LIMIT: usize = 20;
 
+#[derive(Serialize)]
+struct DocCoverageEntryDto {
+    file: String,
+    /// `"missing"` (no wiki page yet), `"fresh"` (page's embedded content
+    /// hash matches the file's current content), or `"stale"` (the file
+    /// changed since the page was last generated).
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct DocCoverageDto {
+    entries: Vec<DocCoverageEntryDto>,
+    missing: usize,
+    fresh: usize,
+    stale: usize,
+}
+
+fn freshness_status_label(status: repowise_docs::FreshnessStatus) -> &'static str {
+    match status {
+        repowise_docs::FreshnessStatus::Missing => "missing",
+        repowise_docs::FreshnessStatus::Fresh => "fresh",
+        repowise_docs::FreshnessStatus::Stale => "stale",
+    }
+}
+
 /// Symbol detail, for `GET /api/symbol` (issue #263).
 #[derive(Serialize)]
 struct SymbolDetailDto {
@@ -1557,6 +1582,28 @@ async fn get_refactor_candidates(
     }))
 }
 
+async fn get_doc_coverage(State(state): State<AppState>) -> Result<Json<DocCoverageDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let report = repowise_docs::check_freshness(&index);
+    let (missing, fresh, stale) = report.counts();
+
+    let entries = report
+        .entries
+        .into_iter()
+        .map(|e| DocCoverageEntryDto {
+            file: relative(&state.root, &e.file),
+            status: freshness_status_label(e.status),
+        })
+        .collect();
+
+    Ok(Json(DocCoverageDto {
+        entries,
+        missing,
+        fresh,
+        stale,
+    }))
+}
+
 async fn post_chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequestDto>,
@@ -2218,6 +2265,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/coverage", get(get_coverage))
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/refactor-candidates", get(get_refactor_candidates))
+        .route("/api/doc-coverage", get(get_doc_coverage))
         .route("/api/chat", post(post_chat))
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
         .route("/api/webhook/github", post(post_webhook_github))
@@ -3201,6 +3249,45 @@ mod tests {
         let (status, _json) = get(root, "/api/refactor-candidates?kind=nonsense").await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_doc_coverage_reports_missing_for_a_file_with_no_wiki_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/doc-coverage").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["missing"], 1);
+        assert_eq!(json["fresh"], 0);
+        assert_eq!(json["stale"], 0);
+        assert_eq!(json["entries"][0]["status"], "missing");
+    }
+
+    #[tokio::test]
+    async fn get_doc_coverage_reports_fresh_right_after_generation_and_stale_after_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_busy_symbol(&root);
+        let graph = repowise_graph::RepoGraph::build(&index);
+        let health = repowise_health::analyze(&index, &graph);
+        repowise_docs::generate(&index, &graph, &health).unwrap();
+
+        let (status, json) = get(root.clone(), "/api/doc-coverage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["fresh"], 1);
+        assert_eq!(json["entries"][0]["status"], "fresh");
+
+        // Edit the source without regenerating -- the page now describes
+        // stale content.
+        std::fs::write(&index.files[0].path, "pub fn busy() { /* changed */ }\n").unwrap();
+
+        let (status, json) = get(root, "/api/doc-coverage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["stale"], 1);
+        assert_eq!(json["entries"][0]["status"], "stale");
     }
 
     /// Same hand-rolled fixture-server approach `repowise-llm`'s own

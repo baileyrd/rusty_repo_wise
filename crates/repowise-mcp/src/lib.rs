@@ -4,9 +4,10 @@
 //!
 //! Implements `get_overview`, `search_codebase`, `get_context`,
 //! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`, `get_answer`,
-//! `get_dead_code`, `get_health`, `get_refactor_candidates`, plus
+//! `get_dead_code`, `get_health`, `get_refactor_candidates`,
+//! `get_doc_coverage`, plus
 //! `list_repos`, `get_architecture` and `get_blast_radius` (the last
-//! three have no counterpart in the reference) — the ones
+//! four have no counterpart in the reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
 //! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
@@ -847,6 +848,23 @@ struct RefactorOutput {
     /// truncated the list -- lets a caller tell "there were only 3"
     /// from "there were 3000 and you're seeing the strongest 20".
     total_matching: usize,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DocCoverageEntryOutput {
+    file: String,
+    /// `"missing"` (no wiki page yet), `"fresh"` (the page's embedded
+    /// content hash matches the file's current content), or `"stale"`
+    /// (the file changed since the page was last generated).
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DocCoverageOutput {
+    entries: Vec<DocCoverageEntryOutput>,
+    missing: usize,
+    fresh: usize,
+    stale: usize,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -2120,6 +2138,42 @@ impl RepowiseServer {
     }
 
     #[tool(
+        name = "get_doc_coverage",
+        description = "Every indexed file's wiki-page freshness, without generating anything: `missing` (no wiki page yet), `fresh` (the page's embedded content hash matches the file's current content), or `stale` (the file changed since `repowise docs` last generated its page). Read-only -- never writes a page; run `repowise docs`/`repowise generate` to update one."
+    )]
+    fn get_doc_coverage(&self) -> Result<Json<Envelope<DocCoverageOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, _graph, cached) = self.load()?;
+
+        let report = repowise_docs::check_freshness(&index);
+        let (missing, fresh, stale) = report.counts();
+        let entries = report
+            .entries
+            .into_iter()
+            .map(|e| DocCoverageEntryOutput {
+                file: display_rel(&e.file, &index.root),
+                status: match e.status {
+                    repowise_docs::FreshnessStatus::Missing => "missing",
+                    repowise_docs::FreshnessStatus::Fresh => "fresh",
+                    repowise_docs::FreshnessStatus::Stale => "stale",
+                },
+            })
+            .collect();
+
+        Ok(self.indexed(
+            DocCoverageOutput {
+                entries,
+                missing,
+                fresh,
+                stale,
+            },
+            &index,
+            started,
+            cached,
+        ))
+    }
+
+    #[tool(
         name = "list_repos",
         description = "List every repo configured in the workspace file this server was started with (`--workspace <path>`), each with its name, path, and indexed status (file counts if a prior `repowise init`/`update` has run there). Returns an empty list if no --workspace was given."
     )]
@@ -3377,6 +3431,46 @@ mod tests {
             .candidates
             .iter()
             .all(|c| matches!(&c.kind[..], "extract-duplicate")),);
+    }
+
+    #[test]
+    fn get_doc_coverage_reports_missing_for_a_file_with_no_wiki_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("solo.py"), "def solo():\n    return 1\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server.get_doc_coverage().unwrap();
+
+        assert_eq!(data.missing, 1);
+        assert_eq!(data.fresh, 0);
+        assert_eq!(data.stale, 0);
+        assert_eq!(data.entries[0].status, "missing");
+    }
+
+    #[test]
+    fn get_doc_coverage_reports_fresh_right_after_generation_and_stale_after_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("solo.py"), "def solo():\n    return 1\n").unwrap();
+        build_and_save_index(&root);
+
+        let index = RepoIndex::load(&root).unwrap();
+        let graph = RepoGraph::build(&index);
+        let health = repowise_health::analyze(&index, &graph);
+        repowise_docs::generate(&index, &graph, &health).unwrap();
+
+        let server = RepowiseServer::new(root.clone(), None);
+        let Json(Envelope { data, .. }) = server.get_doc_coverage().unwrap();
+        assert_eq!(data.fresh, 1);
+        assert_eq!(data.entries[0].status, "fresh");
+
+        std::fs::write(root.join("solo.py"), "def solo():\n    return 2\n").unwrap();
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server.get_doc_coverage().unwrap();
+        assert_eq!(data.stale, 1);
+        assert_eq!(data.entries[0].status, "stale");
     }
 
     #[test]

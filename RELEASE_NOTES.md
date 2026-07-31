@@ -6,6 +6,32 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #363 — Dashboard: browsable Docs view + doc-freshness tracking (closes #351)
+**2026-07-31**
+
+- `repowise-docs::check_freshness(index)`: classifies every indexed file
+  as `Missing` (no wiki page yet), `Fresh` (the page's embedded content
+  hash matches the file's current content), or `Stale` (the file changed
+  since the page was last generated). Answers the issue's own open
+  question — `generate` always fully rewrites a page and embeds a hash of
+  the source it rewrote it from, so drift is derivable live by re-hashing
+  a file's current content and comparing it against the hash already
+  embedded in its existing page, with no new generation-time bookkeeping
+  and no `repowise docs` re-run required.
+- Wired into three surfaces, the same "one implementation" pattern used
+  for search/health/dead-code/refactor-candidates: `GET
+  /api/doc-coverage` (`repowise-server`), `repowise doc-coverage [PATH]
+  [--verbose]` (`repowise-cli`), and `get_doc_coverage` (`repowise-mcp`).
+- `repowise-web`: a new `#/docs` dashboard section — every indexed file
+  with its coverage status, a status filter, files linking into the
+  existing file-detail drill-down panel (which already renders a file's
+  wiki content via `/api/wiki`). Answers the issue's second open
+  question by adding this as its own top-level view rather than leaving
+  wiki access reachable only per-file.
+- `ParityGaps.md` row #11 updated; issue #351 closed.
+
+---
+
 ## PR #362 — Dashboard: Refactoring candidates view (closes #355)
 **2026-07-31**
 

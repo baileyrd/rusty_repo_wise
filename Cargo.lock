@@ -1436,6 +1436,7 @@ dependencies = [
  "repowise-adr",
  "repowise-core",
  "repowise-distill",
+ "repowise-docs",
  "repowise-git",
  "repowise-graph",
  "repowise-health",

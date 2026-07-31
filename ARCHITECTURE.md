@@ -59,16 +59,13 @@ plus `rmcp` (the official
 Rust MCP SDK) and `tokio` — the only crates in this workspace with an
 async runtime dependency; `repowise-cli` builds a
 `tokio::runtime::Runtime` manually just for the `serve` subcommand rather
-than making the whole synchronous CLI async. `repowise-dashboard` sits at
-the top of the pipeline, depending on `repowise-core`/`repowise-graph`/
-`repowise-health`/`repowise-git`/`repowise-adr` — it's purely a rendering
-layer over everything else's already-computed output, with no logic of
-its own beyond HTML templating (plain `format!`, no templating-engine
-dependency) and HTML-escaping untrusted text. No crate has been split out
-as a separate service or process (`repowise-mcp`/`repowise-dashboard` are
-libraries invoked by the CLI, not standalone binaries/servers); there's no
+than making the whole synchronous CLI async. No crate has been split out
+as a separate service or process (`repowise-mcp`/`repowise-server` are
+libraries invoked by the CLI, not standalone binaries you'd deploy
+independently, even though `repowise-server` becomes a long-running HTTP
+server at runtime once `repowise serve-dashboard` starts it); there's no
 forcing function (scaling, team boundary, fault isolation) that would
-justify it yet. `repowise-workspace` (issue #64's multi-repo/workspace
+justify a separate deployable yet. `repowise-workspace` (issue #64's multi-repo/workspace
 support) depends on `repowise-core` (for `RepoIndex::load`),
 `repowise-git` (for per-repo `GitAnalytics`-derived co-change
 reporting), and now `repowise-graph` (for cross-repo import resolution,
@@ -194,14 +191,6 @@ segment matches the candidate's file stem. The second factor is why
 `build()` alongside the existing `unresolved_imports` counter) — the one
 piece of raw resolution data neither `RepoIndex` nor the existing
 `Overview` aggregate exposed.
-`dashboard` composes all of the above into one static page: `repowise-dashboard`
-calls the same `overview`/`analyze` functions, tries `repowise-git::GitAnalytics::collect`
-and `repowise-adr::mine` (both degrading to `None`/empty on failure rather
-than erroring the whole command — neither git history nor ADRs are
-required for a dashboard to be useful), and renders everything into one
-HTML file written once per invocation. No live queries, no incremental
-regeneration.
-
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their
 tradeoffs.

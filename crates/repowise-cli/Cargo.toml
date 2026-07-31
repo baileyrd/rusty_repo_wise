@@ -29,7 +29,6 @@ repowise-terraform = { path = "../repowise-terraform" }
 # kqueue on BSD/macOS, windows-sys elsewhere -- so only one set builds.
 notify = "8"
 repowise-mcp = { path = "../repowise-mcp" }
-repowise-dashboard = { path = "../repowise-dashboard" }
 repowise-llm = { path = "../repowise-llm" }
 repowise-server = { path = "../repowise-server" }
 repowise-workspace = { path = "../repowise-workspace" }

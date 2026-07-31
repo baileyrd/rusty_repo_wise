@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// deterministic code-health scoring, git-history analytics (churn,
 /// hotspots, ownership, co-change coupling), auto-generated per-file
 /// documentation, architectural-decision mining, an MCP server exposing
-/// a subset of these as agent-facing tools, and a static-site dashboard.
+/// a subset of these as agent-facing tools, and a live dashboard server.
 #[derive(Parser)]
 #[command(name = "repowise", version, about)]
 struct Cli {
@@ -433,12 +433,6 @@ enum Command {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
-    /// Generate a static HTML dashboard (overview, health, hotspots,
-    /// decisions) under `.repowise/dashboard/index.html`.
-    Dashboard {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
     /// Add an LLM-written summary to each existing wiki page under
     /// `.repowise/wiki/` (requires a prior `repowise docs`). Opt-in:
     /// needs `REPOWISE_LLM_BASE_URL` set to an OpenAI-compatible
@@ -447,10 +441,9 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Run a live dashboard server (JSON API + static frontend), the
-    /// long-running replacement for the static `repowise dashboard`
-    /// page. Phase 0: only `GET /api/overview` exists so far -- see
-    /// `repowise-server`'s module doc comment.
+    /// Run the live dashboard server (JSON API + optional static
+    /// frontend) -- see `repowise-server`'s module doc comment for the
+    /// full endpoint list.
     ServeDashboard {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -768,7 +761,6 @@ fn main() -> anyhow::Result<()> {
         Command::Terraform { path } => cmd_terraform(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
-        Command::Dashboard { path } => cmd_dashboard(&path),
         Command::Generate { path } => cmd_generate(&path),
         Command::ServeDashboard {
             path,
@@ -2044,7 +2036,6 @@ struct StatusReport {
     indexed: Option<IndexedStatus>,
     /// Count of generated wiki pages under `.repowise/wiki`, if any.
     wiki_pages: usize,
-    dashboard_present: bool,
 }
 
 #[derive(Debug)]
@@ -2067,11 +2058,6 @@ struct IndexedStatus {
 fn collect_status(root: &Path) -> StatusReport {
     let mut report = StatusReport {
         wiki_pages: count_wiki_pages(root),
-        dashboard_present: root
-            .join(RepoIndex::INDEX_DIR)
-            .join("dashboard")
-            .join("index.html")
-            .exists(),
         ..Default::default()
     };
 
@@ -2159,14 +2145,6 @@ fn render_status(report: &StatusReport, root: &Path, verbose: bool) -> String {
         match report.wiki_pages {
             0 => "no pages -- run `repowise docs`".to_string(),
             n => format!("{n} page(s) under .repowise/wiki"),
-        }
-    ));
-    out.push_str(&format!(
-        "  dashboard: {}\n",
-        if report.dashboard_present {
-            "generated"
-        } else {
-            "not generated -- run `repowise dashboard`"
         }
     ));
     out
@@ -3896,13 +3874,6 @@ fn cmd_workspace_contracts(workspace: &Path, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_dashboard(path: &Path) -> anyhow::Result<()> {
-    let root = path.canonicalize()?;
-    let written = repowise_dashboard::generate(&root)?;
-    println!("Dashboard written to {}", written.display());
-    Ok(())
-}
-
 fn cmd_generate(path: &Path) -> anyhow::Result<()> {
     let Some(config) = repowise_llm::LlmConfig::from_env() else {
         anyhow::bail!(
@@ -4158,13 +4129,11 @@ mod tests {
                 missing: vec![],
             }),
             wiki_pages: 3,
-            dashboard_present: true,
         };
         let out = render_status(&report, Path::new("/repo"), false);
         assert!(out.contains("7 file(s) indexed"), "{out}");
         assert!(out.contains("up to date"), "{out}");
         assert!(out.contains("3 page(s)"), "{out}");
-        assert!(out.contains("dashboard: generated"), "{out}");
     }
 
     #[test]

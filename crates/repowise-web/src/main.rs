@@ -463,6 +463,21 @@ struct RefactorCandidates {
     total_matching: usize,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+struct DocCoverageEntry {
+    file: String,
+    /// `"missing"`, `"fresh"`, or `"stale"`.
+    status: String,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct DocCoverage {
+    entries: Vec<DocCoverageEntry>,
+    missing: usize,
+    fresh: usize,
+    stale: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ChatTurn {
     role: String,
@@ -1776,6 +1791,7 @@ enum Route {
     Graph,
     DeadCode,
     RefactorCandidates,
+    Docs,
     Chat,
     Usage,
     Settings,
@@ -1812,6 +1828,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
         "refactor-candidates",
         "Refactoring",
     ),
+    (Route::Docs, "docs", "Docs"),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
     (Route::Settings, "settings", "Settings"),
@@ -2465,6 +2482,80 @@ fn RefactorCandidatesSection(selected: RwSignal<Option<String>>) -> impl IntoVie
                             </table>
                         }
                         .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Browsable, freshness-tracked doc index (`/api/doc-coverage`) — every
+/// indexed file, whether it has a wiki page yet, and whether that page
+/// still reflects the file's current source. Issue #351: replaces the
+/// only-reachable-via-a-file's-own-drill-down-panel wiki access with a
+/// top-level view, and answers "which docs have drifted" by comparing
+/// each page's embedded content hash against the file's current one --
+/// see `repowise_docs::check_freshness`'s own doc comment for why that
+/// comparison is meaningful without a new `repowise docs` run.
+#[component]
+fn DocsSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let filter = RwSignal::new(String::new());
+    let coverage = LocalResource::new(|| fetch_json::<DocCoverage>("/api/doc-coverage"));
+
+    view! {
+        <h2>"Docs"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                coverage
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(dc) if dc.entries.is_empty() => {
+                            view! { <p class="empty">"No indexed files."</p> }.into_any()
+                        }
+                        Ok(dc) => {
+                            let status_filter = filter.get();
+                            let rows: Vec<_> = dc
+                                .entries
+                                .iter()
+                                .filter(|e| status_filter.is_empty() || e.status == status_filter)
+                                .cloned()
+                                .collect();
+                            view! {
+                                <p>
+                                    {format!(
+                                        "{} fresh, {} stale, {} missing.",
+                                        dc.fresh, dc.stale, dc.missing,
+                                    )}
+                                </p>
+                                <label for="doc-coverage-status-filter">"Status: "</label>
+                                <select
+                                    id="doc-coverage-status-filter"
+                                    on:change=move |ev| filter.set(event_target_value(&ev))
+                                >
+                                    <option value="">"All"</option>
+                                    <option value="fresh">"Fresh"</option>
+                                    <option value="stale">"Stale"</option>
+                                    <option value="missing">"Missing"</option>
+                                </select>
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>"File"</th>
+                                            <th>"Status"</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rows.into_iter().map(|e| view! {
+                                            <tr>
+                                                <td>{file_cell(e.file, selected)}</td>
+                                                <td>{e.status}</td>
+                                            </tr>
+                                        }).collect::<Vec<_>>()}
+                                    </tbody>
+                                </table>
+                            }
+                            .into_any()
+                        }
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
                     })
             }}
@@ -3341,6 +3432,7 @@ fn App() -> impl IntoView {
             Route::RefactorCandidates => {
                 view! { <RefactorCandidatesSection selected=selected /> }.into_any()
             }
+            Route::Docs => view! { <DocsSection selected=selected /> }.into_any(),
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),

@@ -357,6 +357,9 @@ repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
+repowise doc-coverage [PATH]       # per-file wiki freshness: missing/fresh/stale, no
+                                    #   generation involved (see issue #351) -- --verbose
+                                    #   to list every file's status, not just the counts
 repowise decisions [PATH]          # mined ADRs + decision-like commits, with linked files
                                     #   --for-file <FILE> to filter to one file
 repowise decide <TITLE> <RATIONALE> [PATH]  # record a decision you already made, directly
@@ -367,7 +370,7 @@ repowise refactor [PATH]           # deterministic refactor candidates: import c
                                     #   classes, low-cohesion classes, duplicate functions --
                                     #   read-only, never generates a diff (see issue #304)
                                     #   --kind <...>, --limit <N> (default 20, 0 for unlimited)
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
                                     #   architectural decisions from code (opt-in, requires prior `docs`)
@@ -2605,6 +2608,13 @@ below):
     `limit` only truncates the *response* — the full computation still
     runs first. Measured at ~6-7 seconds on this port's own ~20-crate
     workspace, comparable to `repowise health` on the same repo.
+- **`get_doc_coverage()`** (issue #351) — every indexed file's wiki-page
+  freshness, without generating anything: `missing` (no page yet),
+  `fresh` (the page's embedded content hash matches the file's current
+  content), or `stale` (the file changed since `repowise docs` last
+  generated its page). Derived live from what `repowise docs`/`generate`
+  already wrote to disk — no new generation-time bookkeeping, and never
+  requires a `docs` re-run to answer.
 
 A call re-reads `.repowise/index.json` and rebuilds the dependency graph
 only when the index file's mtime has changed; otherwise it reuses the

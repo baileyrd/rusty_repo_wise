@@ -150,3 +150,163 @@ fn hash_str(s: &str) -> u64 {
     s.hash(&mut hasher);
     hasher.finish()
 }
+
+/// Whether an indexed file's wiki page still reflects its current
+/// source, without generating anything (issue #351).
+///
+/// `generate` always fully rewrites a page and embeds a hash of the
+/// source it rewrote it from -- so right after a `repowise docs` run,
+/// every page's embedded hash matches its file's hash at that moment.
+/// That means drift is derivable live, by re-hashing each file's
+/// *current* on-disk content and comparing it against the hash already
+/// embedded in that file's existing page, with no new generation-time
+/// bookkeeping and no `docs` re-run required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshnessStatus {
+    /// The file is indexed but has no wiki page at all yet.
+    Missing,
+    /// A wiki page exists and its embedded hash matches the file's
+    /// current content -- nothing has changed since the page was last
+    /// generated.
+    Fresh,
+    /// A wiki page exists, but the file's current content hash differs
+    /// from the one embedded in it -- the source changed since the last
+    /// `repowise docs` run touched this file.
+    Stale,
+}
+
+#[derive(Debug, Clone)]
+pub struct FreshnessEntry {
+    pub file: PathBuf,
+    pub status: FreshnessStatus,
+}
+
+pub struct FreshnessReport {
+    pub entries: Vec<FreshnessEntry>,
+}
+
+impl FreshnessReport {
+    /// (missing, fresh, stale) counts.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let missing = self
+            .entries
+            .iter()
+            .filter(|e| e.status == FreshnessStatus::Missing)
+            .count();
+        let fresh = self
+            .entries
+            .iter()
+            .filter(|e| e.status == FreshnessStatus::Fresh)
+            .count();
+        let stale = self
+            .entries
+            .iter()
+            .filter(|e| e.status == FreshnessStatus::Stale)
+            .count();
+        (missing, fresh, stale)
+    }
+}
+
+/// Classify every indexed file's wiki-page freshness. Read-only: never
+/// writes a page, never requires a prior `generate` call in the same
+/// process -- only whatever `generate` last wrote to disk, if anything.
+pub fn check_freshness(index: &RepoIndex) -> FreshnessReport {
+    let entries = index
+        .files
+        .iter()
+        .map(|file| {
+            let wiki_path = wiki_page_path(&index.root, &file.path);
+            let embedded_hash = std::fs::read_to_string(&wiki_path)
+                .ok()
+                .and_then(|s| parse_hash_marker(&s));
+            let status = match embedded_hash {
+                None => FreshnessStatus::Missing,
+                Some(embedded) => {
+                    let source = std::fs::read_to_string(&file.path).unwrap_or_default();
+                    if hash_str(&source) == embedded {
+                        FreshnessStatus::Fresh
+                    } else {
+                        FreshnessStatus::Stale
+                    }
+                }
+            };
+            FreshnessEntry {
+                file: file.path.clone(),
+                status,
+            }
+        })
+        .collect();
+    FreshnessReport { entries }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use repowise_core::{FileRecord, Language};
+
+    fn index_with_one_file(root: &Path, source: &str) -> RepoIndex {
+        let file = root.join("a.py");
+        std::fs::write(&file, source).unwrap();
+        RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![FileRecord {
+                path: file,
+                language: Language::Python,
+                lines: source.lines().count(),
+                symbols: vec![],
+                imports: vec![],
+                calls: vec![],
+                field_accesses: vec![],
+            }],
+            other_files: 0,
+            indexed_commit: None,
+        }
+    }
+
+    #[test]
+    fn a_file_with_no_wiki_page_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_file(&root, "def a():\n    return 1\n");
+
+        let report = check_freshness(&index);
+
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].status, FreshnessStatus::Missing);
+        assert_eq!(report.counts(), (1, 0, 0));
+    }
+
+    #[test]
+    fn a_freshly_generated_page_is_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_file(&root, "def a():\n    return 1\n");
+        let graph = RepoGraph::build(&index);
+        let health = repowise_health::analyze(&index, &graph);
+        generate(&index, &graph, &health).unwrap();
+
+        let report = check_freshness(&index);
+
+        assert_eq!(report.entries[0].status, FreshnessStatus::Fresh);
+        assert_eq!(report.counts(), (0, 1, 0));
+    }
+
+    #[test]
+    fn editing_the_source_after_generation_makes_the_page_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_file(&root, "def a():\n    return 1\n");
+        let graph = RepoGraph::build(&index);
+        let health = repowise_health::analyze(&index, &graph);
+        generate(&index, &graph, &health).unwrap();
+
+        // Edit the source on disk without regenerating the wiki page --
+        // the page's embedded hash now describes stale content.
+        std::fs::write(&index.files[0].path, "def a():\n    return 2\n").unwrap();
+
+        let report = check_freshness(&index);
+
+        assert_eq!(report.entries[0].status, FreshnessStatus::Stale);
+        assert_eq!(report.counts(), (0, 0, 1));
+    }
+}

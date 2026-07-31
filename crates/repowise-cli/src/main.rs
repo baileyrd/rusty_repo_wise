@@ -304,6 +304,16 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         top: usize,
     },
+    /// Rank the file pairs that most often change together in the same
+    /// commit, across the whole repo -- unlike `coupled`, which is
+    /// scoped to one file (issue #352).
+    Coupling {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many pairs to list.
+        #[arg(long, default_value_t = 30)]
+        top: usize,
+    },
     /// Generate deterministic per-file documentation pages under
     /// `.repowise/wiki/`.
     Docs {
@@ -758,6 +768,7 @@ fn main() -> anyhow::Result<()> {
         Command::Hotspots { path, top } => cmd_hotspots(&path, top),
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
+        Command::Coupling { path, top } => cmd_coupling(&path, top),
         Command::Docs { path } => cmd_docs(&path),
         Command::DocCoverage { path, verbose } => cmd_doc_coverage(&path, verbose),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
@@ -2683,6 +2694,27 @@ fn cmd_coupled(file: &Path, path: &Path, top: usize) -> anyhow::Result<()> {
     println!("  Most often changed alongside:");
     for (f, count) in &coupled {
         println!("    {:<4} {}", count, display_path(f, &root));
+    }
+    Ok(())
+}
+
+fn cmd_coupling(path: &Path, top: usize) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let analytics = repowise_git::GitAnalytics::collect(&root)?;
+    let pairs = analytics.top_co_changed_pairs(top);
+
+    if pairs.is_empty() {
+        println!("No co-change coupling found (or too little history).");
+        return Ok(());
+    }
+    println!("Most-coupled file pairs in {}:", root.display());
+    for (a, b, count) in &pairs {
+        println!(
+            "  {:<4} {} <-> {}",
+            count,
+            display_path(a, &root),
+            display_path(b, &root)
+        );
     }
     Ok(())
 }

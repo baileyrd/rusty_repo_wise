@@ -5,9 +5,9 @@
 //! Implements `get_overview`, `search_codebase`, `get_context`,
 //! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`, `get_answer`,
 //! `get_dead_code`, `get_health`, `get_refactor_candidates`,
-//! `get_doc_coverage`, plus
+//! `get_doc_coverage`, `get_coupling`, plus
 //! `list_repos`, `get_architecture` and `get_blast_radius` (the last
-//! four have no counterpart in the reference) — the ones
+//! five have no counterpart in the reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
 //! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
@@ -865,6 +865,41 @@ struct DocCoverageOutput {
     missing: usize,
     fresh: usize,
     stale: usize,
+}
+
+/// Default rows for `get_coupling`.
+const COUPLING_DEFAULT_LIMIT: usize = 30;
+
+fn default_coupling_limit() -> usize {
+    COUPLING_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CouplingParams {
+    /// Max pairs returned. Default 30.
+    #[serde(default = "default_coupling_limit")]
+    limit: usize,
+}
+
+impl Default for CouplingParams {
+    fn default() -> Self {
+        CouplingParams {
+            limit: default_coupling_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CouplingPairOutput {
+    file_a: String,
+    file_b: String,
+    /// Number of commits in the walked history that touched both files.
+    count: usize,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CouplingOutput {
+    pairs: Vec<CouplingPairOutput>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -2174,6 +2209,32 @@ impl RepowiseServer {
     }
 
     #[tool(
+        name = "get_coupling",
+        description = "Repo-wide change coupling: the file pairs that most often change together in the same commit, regardless of whether an import edge connects them -- catches architectural coupling static analysis alone can't see. Ranks every pair in the repo, strongest first (unlike `get_health`'s hidden-coupling/co-change-scatter markers, which fold this signal into a per-file score rather than exposing the raw pairs). `limit` (default 30) caps the list."
+    )]
+    fn get_coupling(
+        &self,
+        Parameters(CouplingParams { limit }): Parameters<CouplingParams>,
+    ) -> Result<Json<Envelope<CouplingOutput>>, ErrorData> {
+        let started = Instant::now();
+        let analytics = repowise_git::GitAnalytics::collect(&self.root).map_err(|e| {
+            ErrorData::invalid_params(format!("failed to compute change coupling: {e}"), None)
+        })?;
+
+        let pairs = analytics
+            .top_co_changed_pairs(limit)
+            .into_iter()
+            .map(|(a, b, count)| CouplingPairOutput {
+                file_a: display_rel(&a, &self.root),
+                file_b: display_rel(&b, &self.root),
+                count,
+            })
+            .collect();
+
+        Ok(self.untracked(CouplingOutput { pairs }, started))
+    }
+
+    #[tool(
         name = "list_repos",
         description = "List every repo configured in the workspace file this server was started with (`--workspace <path>`), each with its name, path, and indexed status (file counts if a prior `repowise init`/`update` has run there). Returns an empty list if no --workspace was given."
     )]
@@ -2935,6 +2996,54 @@ mod tests {
 
         let server = RepowiseServer::new(root, None);
         let result = server.get_change_risk(Parameters(ChangeRiskParams { revspec: None }));
+        let Err(err) = result else {
+            panic!("expected an error when the root isn't a git repository");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn get_coupling_ranks_the_most_co_changed_pair_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "add a and b together"]);
+        std::fs::write(root.join("a.txt"), "a2\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b2\n").unwrap();
+        git(
+            &root,
+            &["commit", "-q", "-am", "change a and b together again"],
+        );
+        std::fs::write(root.join("c.txt"), "c\n").unwrap();
+        std::fs::write(root.join("a.txt"), "a3\n").unwrap();
+        git(&root, &["add", "."]);
+        git(
+            &root,
+            &["commit", "-q", "-am", "change a and c together once"],
+        );
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_coupling(Parameters(CouplingParams::default()))
+            .unwrap();
+
+        assert!(!data.pairs.is_empty());
+        assert_eq!(data.pairs[0].file_a, "a.txt");
+        assert_eq!(data.pairs[0].file_b, "b.txt");
+        assert_eq!(data.pairs[0].count, 2);
+    }
+
+    #[test]
+    fn get_coupling_errors_when_not_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let server = RepowiseServer::new(root, None);
+        let result = server.get_coupling(Parameters(CouplingParams::default()));
         let Err(err) = result else {
             panic!("expected an error when the root isn't a git repository");
         };

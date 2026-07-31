@@ -6,6 +6,34 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #364 — Dashboard: Coupling sub-view (partially closes #352)
+**2026-07-31**
+
+- Read upstream's `docs/start/DASHBOARD.md`/`docs/architecture/graph-algorithms.md`
+  directly to resolve the issue's own open question: upstream's Map
+  sub-view is dependency-graph community detection laid out as a sized
+  module map (Louvain-style, not manually curated layers — a separate,
+  unrelated "curated layer" concept exists only for optional Structurizr
+  DSL export). This port has no community-detection algorithm at all, so
+  Map is split off as its own follow-up rather than rushed here.
+- Coupling sub-view: `repowise-git::GitAnalytics::top_co_changed_pairs`
+  already existed and already backed the cross-repo
+  `/api/workspace-co-changes`, but had zero single-repo surface (only a
+  per-file CLI lookup, `repowise coupled <FILE>`). Wired the existing
+  repo-wide ranking into three surfaces, the same pattern used for
+  search/health/dead-code/refactor-candidates/doc-coverage: `GET
+  /api/coupling` (`repowise-server`, `{"available": false}` for a
+  non-git-repo, same convention as `/api/hotspots`), `repowise coupling
+  [PATH] [--top N]` (`repowise-cli`), and `get_coupling` (`repowise-mcp`,
+  errors on a non-git-repo, same convention as `get_change_risk`).
+- `repowise-web`: a new `#/coupling` dashboard section listing ranked
+  file pairs, files linking into the existing file-detail drill-down
+  panel.
+- `ParityGaps.md` row #12 updated to partially closed; issue #352 kept
+  open, narrowed to the Map sub-view.
+
+---
+
 ## PR #363 — Dashboard: browsable Docs view + doc-freshness tracking (closes #351)
 **2026-07-31**
 

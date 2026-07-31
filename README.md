@@ -356,6 +356,9 @@ repowise risk [REVSPEC] [PATH]     # diff-shape risk score for a commit or `base
 repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
+repowise coupling [PATH]           # repo-wide: the file pairs that change together
+                                    #   most often, ranked (see issue #352) -- --top <N>
+                                    #   (default 30)
 repowise docs [PATH]               # generate per-file wiki pages under .repowise/wiki
 repowise doc-coverage [PATH]       # per-file wiki freshness: missing/fresh/stale, no
                                     #   generation involved (see issue #351) -- --verbose
@@ -370,7 +373,7 @@ repowise refactor [PATH]           # deterministic refactor candidates: import c
                                     #   classes, low-cohesion classes, duplicate functions --
                                     #   read-only, never generates a diff (see issue #304)
                                     #   --kind <...>, --limit <N> (default 20, 0 for unlimited)
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/get_coupling/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
                                     #   architectural decisions from code (opt-in, requires prior `docs`)
@@ -2615,6 +2618,15 @@ below):
   generated its page). Derived live from what `repowise docs`/`generate`
   already wrote to disk — no new generation-time bookkeeping, and never
   requires a `docs` re-run to answer.
+- **`get_coupling(limit?)`** (issue #352) — repo-wide change coupling:
+  the file pairs that most often change together in the same commit,
+  regardless of whether an import edge connects them, ranked strongest
+  first. `limit` (default 30) caps the list. Errors if `PATH` isn't a
+  git repository, same convention as `get_change_risk`. `repowise-git`'s
+  `top_co_changed_pairs` already backed the cross-repo
+  `/api/workspace-co-changes`; this is its single-repo surface, which
+  had no MCP/dashboard exposure at all before this tool (only a
+  per-file CLI lookup, `repowise coupled <FILE>`).
 
 A call re-reads `.repowise/index.json` and rebuilds the dependency graph
 only when the index file's mtime has changed; otherwise it reuses the
@@ -2755,7 +2767,7 @@ to check for.
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
   `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`,
-  `/api/refactor-candidates`, plus
+  `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`, plus
   `POST /api/chat` — the same data `repowise
   overview`/`health`/`hotspots`/`decisions` already compute, plus the
   full symbol list, as JSON. File paths are always relative to `PATH`,
@@ -2789,7 +2801,14 @@ to check for.
   duplicate/near-duplicate functions) with an optional
   `?kind=break-import-cycle|split-god-class|split-by-cohesion|extract-duplicate`
   filter, mirroring the `get_refactor_candidates` MCP tool's own shape
-  (`total_matching` before the 20-candidate cap; issue #355). `POST
+  (`total_matching` before the 20-candidate cap; issue #355);
+  `/api/doc-coverage` returns every indexed file's wiki-page freshness
+  (`missing`/`fresh`/`stale`, counts plus a per-file list), mirroring
+  the `get_doc_coverage` MCP tool's own shape (issue #351);
+  `/api/coupling` returns the repo-wide file pairs that most often
+  change together in the same commit, ranked strongest first
+  (`{"available": false}` for a non-git-repo, same degrade-gracefully
+  convention as `/api/hotspots`; issue #352). `POST
   /api/chat` takes `{"history": [{"role",
   "content"}, ...]}` (the whole conversation so far) and returns
   `{"available": bool, "reply": string | null, "cited": [...],
@@ -2962,7 +2981,13 @@ to check for.
   `/api/refactor-candidates`'s deterministic candidates — import cycles,
   god classes, low-cohesion classes, duplicate/near-duplicate functions —
   with a kind filter, each row's files linking into the same
-  file-detail panel. A
+  file-detail panel. A **Docs section** (issue #351) lists
+  `/api/doc-coverage`'s missing/fresh/stale status for every indexed
+  file, with a status filter, files linking into the same file-detail
+  panel (which already renders a file's wiki content). A **Coupling
+  section** (issue #352) lists `/api/coupling`'s repo-wide change-coupled
+  file pairs, ranked strongest first, files linking into the same
+  file-detail panel; a plain message when the repo has no git history. A
   **chat section** talks to `POST /api/chat`, with full conversation
   history kept client-side and resent every turn; if the server reports
   the LLM isn't configured, it shows a plain explanatory message instead

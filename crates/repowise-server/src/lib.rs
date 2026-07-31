@@ -320,6 +320,25 @@ struct FileHealthDto {
 /// dashboard's own `take(15)`.
 const WORST_FILES_LIMIT: usize = 15;
 const HOTSPOTS_LIMIT: usize = 15;
+const COUPLING_LIMIT: usize = 30;
+
+/// A JSON-serializable ranked list of `repowise_git::GitAnalytics::
+/// top_co_changed_pairs`. `available: false` (with an empty list) means
+/// this root has no git history to analyze -- same degrade-gracefully
+/// convention as `HotspotsDto`.
+#[derive(Serialize)]
+struct CouplingDto {
+    available: bool,
+    pairs: Vec<CouplingPairDto>,
+}
+
+#[derive(Serialize)]
+struct CouplingPairDto {
+    file_a: String,
+    file_b: String,
+    /// Number of commits in the walked history that touched both files.
+    count: usize,
+}
 
 /// A JSON-serializable `repowise_git::Hotspot`. `available: false` (with
 /// an empty list) means this root has no git history to analyze --
@@ -911,6 +930,34 @@ async fn get_hotspots(State(state): State<AppState>) -> Result<Json<HotspotsDto>
         Err(_) => HotspotsDto {
             available: false,
             hotspots: Vec::new(),
+        },
+    };
+    Ok(Json(dto))
+}
+
+/// Repo-wide change-coupling: the file pairs that most often change
+/// together in the same commit, regardless of any import edge between
+/// them -- the Architecture section's Coupling sub-view (issue #352).
+/// `GitAnalytics::top_co_changed_pairs` already backs the cross-repo
+/// `/api/workspace-co-changes`; this is its single-repo counterpart,
+/// which had no dashboard/CLI/MCP surface at all before this endpoint.
+async fn get_coupling(State(state): State<AppState>) -> Result<Json<CouplingDto>, ApiError> {
+    let dto = match repowise_git::GitAnalytics::collect(&state.root) {
+        Ok(analytics) => CouplingDto {
+            available: true,
+            pairs: analytics
+                .top_co_changed_pairs(COUPLING_LIMIT)
+                .into_iter()
+                .map(|(a, b, count)| CouplingPairDto {
+                    file_a: relative(&state.root, &a),
+                    file_b: relative(&state.root, &b),
+                    count,
+                })
+                .collect(),
+        },
+        Err(_) => CouplingDto {
+            available: false,
+            pairs: Vec::new(),
         },
     };
     Ok(Json(dto))
@@ -2250,6 +2297,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/overview", get(get_overview))
         .route("/api/health", get(get_health))
         .route("/api/hotspots", get(get_hotspots))
+        .route("/api/coupling", get(get_coupling))
         .route("/api/decisions", get(get_decisions))
         .route("/api/symbols", get(get_symbols))
         .route("/api/wiki-pages", get(get_wiki_pages))
@@ -2947,6 +2995,45 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["available"], false);
         assert_eq!(json["owners"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_coupling_reports_unavailable_without_git_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/coupling").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["pairs"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_coupling_ranks_the_most_co_changed_pair_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        git_commit_all(&root, "add a and b together");
+        std::fs::write(root.join("a.txt"), "a2\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b2\n").unwrap();
+        git_commit_all(&root, "change a and b together again");
+        std::fs::write(root.join("c.txt"), "c\n").unwrap();
+        std::fs::write(root.join("a.txt"), "a3\n").unwrap();
+        git_commit_all(&root, "change a and c together once");
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/coupling").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        let pairs = json["pairs"].as_array().unwrap();
+        assert!(!pairs.is_empty());
+        assert_eq!(pairs[0]["file_a"], "a.txt");
+        assert_eq!(pairs[0]["file_b"], "b.txt");
+        assert_eq!(pairs[0]["count"], 2);
     }
 
     #[tokio::test]

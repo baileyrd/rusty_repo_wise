@@ -478,6 +478,19 @@ struct DocCoverage {
     stale: usize,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+struct CouplingPair {
+    file_a: String,
+    file_b: String,
+    count: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Coupling {
+    available: bool,
+    pairs: Vec<CouplingPair>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ChatTurn {
     role: String,
@@ -1792,6 +1805,7 @@ enum Route {
     DeadCode,
     RefactorCandidates,
     Docs,
+    Coupling,
     Chat,
     Usage,
     Settings,
@@ -1829,6 +1843,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
         "Refactoring",
     ),
     (Route::Docs, "docs", "Docs"),
+    (Route::Coupling, "coupling", "Coupling"),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
     (Route::Settings, "settings", "Settings"),
@@ -2556,6 +2571,58 @@ fn DocsSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                             }
                             .into_any()
                         }
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Repo-wide change coupling (`/api/coupling`) — the Architecture
+/// section's Coupling sub-view (issue #352): file pairs that keep
+/// changing together in the same commit, regardless of whether an
+/// import edge connects them. `available: false` (no git history) shows
+/// a plain message rather than an empty table, same convention as the
+/// Hotspots/Ownership sections.
+#[component]
+fn CouplingSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let coupling = LocalResource::new(|| fetch_json::<Coupling>("/api/coupling"));
+
+    view! {
+        <h2>"Coupling"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                coupling
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(c) if !c.available => {
+                            view! { <p class="empty">"No git history found for this repo."</p> }
+                                .into_any()
+                        }
+                        Ok(c) if c.pairs.is_empty() => {
+                            view! { <p class="empty">"No coupled file pairs found."</p> }.into_any()
+                        }
+                        Ok(c) => view! {
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"File A"</th>
+                                        <th>"File B"</th>
+                                        <th>"Commits together"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {c.pairs.into_iter().map(|p| view! {
+                                        <tr>
+                                            <td>{file_cell(p.file_a, selected)}</td>
+                                            <td>{file_cell(p.file_b, selected)}</td>
+                                            <td>{p.count}</td>
+                                        </tr>
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
+                        }
+                        .into_any(),
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
                     })
             }}
@@ -3433,6 +3500,7 @@ fn App() -> impl IntoView {
                 view! { <RefactorCandidatesSection selected=selected /> }.into_any()
             }
             Route::Docs => view! { <DocsSection selected=selected /> }.into_any(),
+            Route::Coupling => view! { <CouplingSection selected=selected /> }.into_any(),
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),

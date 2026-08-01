@@ -2251,10 +2251,31 @@ fn short_label(path: &str) -> &str {
 /// every other section uses.
 #[component]
 fn GraphSection(selected: RwSignal<Option<String>>) -> impl IntoView {
-    let graph = LocalResource::new(|| fetch_json::<Graph>("/api/graph"));
+    // Module granularity (issue #354) is a bolted-on toggle over the
+    // same file-level import graph, not a separate view: `/api/graph`
+    // and `/api/graph-modules` return the identical DTO shape, so the
+    // rest of this component (layout, coloring, click-to-select) is
+    // reused unchanged regardless of which is fetched.
+    let by_module = RwSignal::new(false);
+    let graph = LocalResource::new(move || {
+        let url = if by_module.get() {
+            "/api/graph-modules"
+        } else {
+            "/api/graph"
+        };
+        async move { fetch_json::<Graph>(url).await }
+    });
 
     view! {
         <h2>"Dependency graph"</h2>
+        <label>
+            <input
+                type="checkbox"
+                prop:checked=move || by_module.get()
+                on:change=move |ev| by_module.set(event_target_checked(&ev))
+            />
+            " Group by module (directory)"
+        </label>
         <Suspense fallback=|| view! { <p>"Loading..."</p> }>
             {move || {
                 graph

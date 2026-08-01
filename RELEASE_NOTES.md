@@ -6,6 +6,35 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #366 — Dashboard: module-grouping toggle on the graph view (narrows #354)
+**2026-07-31**
+
+- Issue #354 shipped with an open question: is upstream's Knowledge
+  Graph a genuinely new capability, or a rebrand of data this port
+  already has? Read upstream's `docs/start/DASHBOARD.md` directly:
+  it's a full continuous-zoom canvas (repo → module → file → symbol)
+  with a custom camera/culling renderer for large-repo performance.
+  Its legacy `/c4`/`/zoom` URL aliases confirm it started as a
+  C4-model-style diagram. The underlying data is mostly not new (file
+  import edges and symbol caller/callee data already exist); the
+  missing piece is a "module" grouping layer, and the real cost is the
+  renderer, not backend analysis.
+- Rather than building the full zoomable canvas (a much larger
+  frontend investment for a thin marginal new fact), added the missing
+  layer cheaply: `GET /api/graph-modules` aggregates the same
+  file-level import graph to directory granularity (a file's parent
+  directory becomes its module node; edges dedupe to one per module
+  pair; a module's `language` is whichever's most common among its
+  files) and returns the identical shape as `/api/graph`, so
+  `repowise-web`'s existing layout/rendering code is reused unchanged.
+- `repowise-web`: a "Group by module (directory)" checkbox on the
+  existing Graph view toggles between `/api/graph` and
+  `/api/graph-modules` — no new nav route.
+- `ParityGaps.md` row #14 updated to partially closed. Issue #354 stays
+  open, narrowed to the full continuous-zoom canvas.
+
+---
+
 ## PR #365 — External (third-party) dependency registry (closes #353)
 **2026-07-31**
 

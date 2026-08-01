@@ -2826,7 +2826,7 @@ to check for.
 
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
-  `/api/search`, `/api/graph`, `/api/ownership`, `/api/dead-code`,
+  `/api/search`, `/api/graph`, `/api/graph-modules`, `/api/ownership`, `/api/dead-code`,
   `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`,
   `/api/external-deps`, plus
   `POST /api/chat` — the same data `repowise
@@ -2849,7 +2849,11 @@ to check for.
   search stays instant; `/api/graph` returns the file-level import
   graph (nodes + edges), truncated to the 150 most-connected files
   (`"truncated": true` when cut down) so a large repo's graph stays
-  renderable; `/api/ownership?path=<rel>` returns one file's git-blame
+  renderable; `/api/graph-modules` (issue #354) returns the identical
+  shape aggregated to directory granularity — a file's parent directory
+  becomes its "module" node, edges dedupe to one per module pair, and a
+  module's `language` is whichever language is most common among its
+  files; `/api/ownership?path=<rel>` returns one file's git-blame
   author breakdown (`{"available": false}` for a non-git-repo or
   unindexed path, same degrade-gracefully convention); `/api/decisions`
   takes an optional `?file=<rel>` to filter to decisions linked to one
@@ -3039,6 +3043,17 @@ to check for.
   simulation (nodes repel each other, edges act as springs, gently
   pulled back toward center) — colored by language using GitHub's own
   per-language colors, no D3 or other JS graph library involved. A
+  **"Group by module (directory)" checkbox** (issue #354) toggles the
+  same view onto `/api/graph-modules` instead — the identical
+  layout/rendering code reused unchanged, since both endpoints share
+  one response shape. Scoped narrowly on purpose: reading upstream's
+  own docs found its Knowledge Graph view is a full continuous-zoom
+  canvas (repo → module → file → symbol) with a custom camera/culling
+  renderer for large-repo performance — the marginal new *fact* it
+  exposes beyond this port's existing file-level graph is thin (mostly
+  a missing "module" grouping layer) relative to that renderer's cost,
+  so this covers the missing layer as a toggle instead of building the
+  full zoomable canvas. A
   **dead-code section** lists `/api/dead-code`'s candidates with a
   minimum-confidence filter, each risk factor available as a tooltip. A
   **refactoring-candidates section** (issue #355) lists

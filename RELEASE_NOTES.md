@@ -6,6 +6,25 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #374 — Retarget issue #332 from VS Code to a Zed extension
+**2026-08-01**
+
+- At the user's request, issue #332 (row #1 in `ParityGaps.md`) is
+  retargeted from a VS Code extension to a Zed extension. Zed
+  extensions are written in Rust and compiled to WebAssembly via the
+  `zed_extension_api` crate -- unlike VS Code (TypeScript + npm, a
+  second toolchain this repo doesn't otherwise have), a Zed extension
+  is a native fit for this workspace.
+- Issue #332's title/body rewritten: MCP context-server registration
+  maps closely to reusing `repowise-mcp` as-is; upstream's gutter/
+  hover/CodeLens items may not have a direct Zed equivalent (Zed's
+  extension API is narrower -- language servers, slash commands,
+  context servers, themes), noted as needing a closer read of Zed's
+  current docs before implementation.
+- `ParityGaps.md` row #1 updated to match. No code changes.
+
+---
+
 ## PR #373 — Security findings: signature-based secret detection (closes #360)
 **2026-08-01**
 

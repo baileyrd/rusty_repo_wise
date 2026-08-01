@@ -1,0 +1,33 @@
+name: PR risk comment
+
+# Dogfoods .github/actions/pr-risk-comment on this repo's own PRs: a
+# deterministic, zero-LLM change-risk score posted as a PR comment,
+# updated in place on every push to the PR (issue #334). Not a required
+# check -- informational only, same as `repowise risk` run by hand.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-risk-comment-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # change_risk needs enough history to diff base..head and to
+          # count the author's prior commits -- the default shallow
+          # checkout only has the merge commit.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/pr-risk-comment
+        with:
+          base-ref: ${{ github.event.pull_request.base.sha }}
+          head-ref: ${{ github.event.pull_request.head.sha }}

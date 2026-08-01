@@ -6,6 +6,42 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #375 — GitHub PR bot: a self-hosted change-risk comment Action (partial #334)
+**2026-08-01**
+
+- Partially closes #334. Upstream offers a hosted GitHub "PR Bot"
+  posting deterministic, zero-LLM PR comments (change-risk, health-
+  delta, decisions-touched). This port had no automated PR-commenting
+  surface at all.
+- Resolves the issue's own open question on hosting shape: **a
+  self-hosted composite GitHub Action, not a hosted GitHub App.** An
+  App needs a webhook-receiving server this project would have to run
+  and operate -- the same hosted-infrastructure line already declined
+  elsewhere in this repo. An Action runs entirely inside the *user's
+  own* CI, with no service of ours in the loop.
+- New `.github/actions/pr-risk-comment`: builds `repowise` from source
+  (no published binary release yet, so first runs are slow;
+  `actions/cache` keyed by OS speeds up repeats, letting cargo's own
+  incremental fingerprints decide what actually needs rebuilding), runs
+  `repowise risk <base>..<head>` exactly as it already exists -- "no
+  new product, just CI glue" -- and posts the result as a PR comment,
+  updating that same comment in place on every push rather than piling
+  up new ones (matched via an HTML marker).
+- Dogfooded on this repo's own PRs via
+  `.github/workflows/pr-risk-comment.yml`, which is also the reference
+  example for using the Action from another repo.
+- Deliberately left out of this first slice: **health-delta** (needs
+  running `repowise health` against both base and head and diffing)
+  and **decisions-touched** (needs filtering mined decisions by which
+  changed files they reference) -- change-risk was the one signal with
+  a single existing command to wrap as-is; the other two need new
+  computation, left as follow-ups.
+- `README.md`: new "GitHub PR bot" section; `ParityGaps.md` row #3
+  updated to partially closed; issue #334 left open, narrowed to the
+  remaining two signals.
+
+---
+
 ## PR #374 — Retarget issue #332 from VS Code to a Zed extension
 **2026-08-01**
 

@@ -1,0 +1,126 @@
+name: 'Repowise PR risk comment'
+description: >-
+  Deterministic, zero-LLM change-risk score for a pull request's diff,
+  posted (or updated in place) as a single PR comment. Reuses
+  `repowise risk` as-is -- no new analysis, just CI glue over an
+  existing command (issue #334). Builds `repowise` from source (this
+  repo has no published binary release yet), so first runs on a repo
+  are slow; `actions/cache` keyed on Cargo.lock keeps repeat runs fast.
+author: 'baileyrd/rusty_repo_wise'
+
+inputs:
+  github-token:
+    description: >-
+      Token used to read and post/update the PR comment. Needs
+      `pull-requests: write` (and `issues: write`, since PR comments are
+      issue comments under the hood).
+    required: false
+    default: ${{ github.token }}
+  path:
+    description: >-
+      Path to the checked-out repo being scanned. Defaults to the
+      calling workflow's own checkout (`github.workspace`). That
+      checkout needs enough history to diff base..head -- a shallow
+      `actions/checkout` (the default) will fail; use `fetch-depth: 0`.
+    required: false
+    default: '.'
+  base-ref:
+    description: >-
+      Base commit for the risk diff -- pass
+      `${{ github.event.pull_request.base.sha }}` from the calling
+      workflow. Required, not defaulted here: a composite action's own
+      metadata shouldn't assume it can see the calling workflow's event
+      payload.
+    required: true
+  head-ref:
+    description: >-
+      Head commit for the risk diff -- pass
+      `${{ github.event.pull_request.head.sha }}` from the calling
+      workflow.
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Cache cargo (repowise build)
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ github.action_path }}/../../../target
+        # A static key, not one hashed from repowise's own Cargo.lock:
+        # `hashFiles` resolves relative to the *calling* workflow's
+        # workspace, not `github.action_path`, so it can't reliably see
+        # this action's own lockfile when used from another repo. Safe
+        # either way -- cargo's own incremental-compilation fingerprints
+        # (not this key) decide what actually needs rebuilding from a
+        # restored `target/`, so a coarser key only costs cache
+        # freshness, never correctness.
+        key: ${{ runner.os }}-repowise-pr-bot
+
+    - name: Build repowise
+      shell: bash
+      run: |
+        cargo build --release \
+          --manifest-path "${{ github.action_path }}/../../../Cargo.toml" \
+          -p repowise-cli
+        # Resolved to an absolute path before it leaves this step: a
+        # later step sets `working-directory` to `inputs.path`, and a
+        # relative `../../../...` string would resolve against *that*
+        # cwd instead of the one it was written from.
+        echo "REPOWISE_BIN=$(realpath "${{ github.action_path }}/../../../target/release/repowise")" >> "$GITHUB_ENV"
+
+    - name: Compute change risk
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        "$REPOWISE_BIN" risk "${{ inputs.base-ref }}..${{ inputs.head-ref }}" . \
+          > "$RUNNER_TEMP/repowise-risk.txt" 2>&1
+        cat "$RUNNER_TEMP/repowise-risk.txt"
+
+    - name: Post or update PR comment
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const body = fs.readFileSync(`${process.env.RUNNER_TEMP}/repowise-risk.txt`, 'utf8').trim();
+          // Identifies this bot's own comment across runs, so a second
+          // push to the same PR updates one comment in place rather than
+          // piling up a new one every time -- the same "one comment,
+          // kept current" shape a status check has, not a growing thread.
+          const marker = '<!-- repowise-pr-risk-comment -->';
+          const commentBody = [
+            marker,
+            '### Repowise change-risk',
+            '',
+            'Deterministic, zero-LLM diff-shape risk score -- see [`repowise risk`](https://github.com/baileyrd/rusty_repo_wise#readme) for the formula.',
+            '',
+            '```',
+            body,
+            '```',
+          ].join('\n');
+
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          const existing = comments.find((c) => c.body && c.body.includes(marker));
+
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existing.id,
+              body: commentBody,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody,
+            });
+          }

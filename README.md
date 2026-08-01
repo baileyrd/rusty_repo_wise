@@ -1494,6 +1494,53 @@ workspace with no forge to send it webhooks in the first place already has
 mechanisms, polling would be new state, not new use of state this port
 already tracks.
 
+## GitHub PR bot
+
+The reference repowise offers a hosted GitHub "PR Bot": deterministic,
+zero-LLM PR comments (change-risk, health-delta, decisions-touched).
+Issue #334's own open questions asked whether this port should build a
+full GitHub App (hosted infrastructure this project has otherwise
+stayed out of — see "Deliberately declined" in `ParityGaps.md`) or a
+GitHub Action wrapping an existing command as CI glue, and whether it
+should run in a hosted service or the user's own CI.
+
+**Resolved as a self-hosted GitHub Action, not a hosted App.** A GitHub
+App needs a webhook-receiving server this project would have to run and
+operate — the same hosted-infrastructure line this port has already
+declined to cross for the dashboard, the LLM integration, and licensing
+itself. A composite Action runs entirely inside *the user's own* CI (no
+service of ours in the loop) and reuses `repowise risk` exactly as it
+already exists — "no new product, just CI glue," per the issue's own
+framing.
+
+`.github/actions/pr-risk-comment` is the Action: it builds `repowise`
+from source (`cargo build --release -p repowise-cli`, this port has no
+published binary release yet, so first runs on a repo are slow —
+`actions/cache` keyed by OS keeps repeat runs fast, letting cargo's own
+incremental-compilation fingerprints decide what actually needs
+rebuilding), runs `repowise risk <base>..<head>` against the checked-out
+repo, and posts the result as a PR comment — updating that same
+comment in place on every push to the PR (matched by an HTML marker
+comment) rather than piling up a new one each time. `path`,
+`base-ref`/`head-ref`, and `github-token` are all explicit inputs; the
+Action's own metadata deliberately doesn't try to read the calling
+workflow's `pull_request` event context itself; see
+`.github/workflows/pr-risk-comment.yml` for this repo's own use of it
+(dogfooding it on every PR to this repo, including the one that
+introduced it) — that workflow is the reference example for using it
+from another repo, just with `./.github/actions/pr-risk-comment`
+swapped for `baileyrd/rusty_repo_wise/.github/actions/pr-risk-comment@main`.
+
+**Health-delta and decisions-touched are deliberately left out of this
+first slice.** Change-risk was the one upstream PR-bot signal with a
+single existing command to wrap as-is (`repowise risk`); the other two
+need new computation this Action doesn't do yet — health-delta needs
+running `repowise health` against both the base and head commits and
+diffing the results, and decisions-touched needs filtering mined
+decisions by which of a PR's changed files they reference. Both are
+natural follow-ups once this first slice proves the shape works, not
+attempted here.
+
 ## Index status
 
 `repowise status [PATH]` reports whether the index still describes the tree

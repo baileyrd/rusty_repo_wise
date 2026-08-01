@@ -26,17 +26,17 @@ inputs:
     default: '.'
   base-ref:
     description: >-
-      Base commit for the risk diff -- pass
-      `${{ github.event.pull_request.base.sha }}` from the calling
-      workflow. Required, not defaulted here: a composite action's own
-      metadata shouldn't assume it can see the calling workflow's event
-      payload.
+      Base commit for the risk diff -- pass the PR's base SHA from the
+      calling workflow (its own event context, e.g.
+      github dot event dot pull_request dot base dot sha). Required,
+      not defaulted here: action metadata files can't read the `github`
+      context themselves, only the calling workflow can.
     required: true
   head-ref:
     description: >-
-      Head commit for the risk diff -- pass
-      `${{ github.event.pull_request.head.sha }}` from the calling
-      workflow.
+      Head commit for the risk diff -- pass the PR's head SHA from the
+      calling workflow (its own event context, e.g.
+      github dot event dot pull_request dot head dot sha).
     required: true
 
 runs:

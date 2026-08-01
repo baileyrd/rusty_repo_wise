@@ -732,6 +732,86 @@ fn freshness_status_label(status: repowise_docs::FreshnessStatus) -> &'static st
     }
 }
 
+/// `GET /api/saved` (issue #358): the web-dashboard equivalent of
+/// `repowise saved`. `by` mirrors the CLI's own `--by program|day` flag;
+/// unlike the CLI there's no separate `--missed` mode -- the skipped-
+/// command breakdown is always included as its own `missed` field, since
+/// a dashboard view doesn't have the CLI's "one report or the other" flag
+/// constraint.
+#[derive(Deserialize)]
+struct SavedQuery {
+    #[serde(default)]
+    by: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SavedGroupDto {
+    /// The program name (`by=program`, the default) or `"day N"` --
+    /// whole days since the epoch, matching the CLI's own bucketing --
+    /// for `by=day`.
+    key: String,
+    runs: usize,
+    saved_bytes: usize,
+    approx_tokens_saved: usize,
+}
+
+#[derive(Serialize)]
+struct McpToolSavingsDto {
+    tool: String,
+    calls: usize,
+    saved_bytes: usize,
+    approx_tokens_saved: usize,
+}
+
+#[derive(Serialize)]
+struct MissedCommandDto {
+    program: String,
+    reason: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
+struct SavedDto {
+    by: String,
+    /// Every field from here down is **measured**: bytes that went into
+    /// a distillation and bytes that came out, for commands that
+    /// actually ran (`repowise_distill::ledger::Record::is_measured`).
+    distilled_runs: usize,
+    raw_bytes: usize,
+    kept_bytes: usize,
+    saved_bytes: usize,
+    approx_tokens_saved: usize,
+    groups: Vec<SavedGroupDto>,
+    /// From here down, **modelled**, not measured: `baseline_bytes` is
+    /// the on-disk size of the files each MCP answer covered, i.e. what
+    /// reading them instead would have cost -- a counterfactual, grounded
+    /// in real file sizes but never summed with the measured totals
+    /// above. See `repowise_distill::ledger::Record::McpResponse`.
+    mcp_baseline_bytes: usize,
+    mcp_response_bytes: usize,
+    mcp_avoided_bytes: usize,
+    mcp_approx_tokens_avoided: usize,
+    mcp_tools: Vec<McpToolSavingsDto>,
+    /// Calls where the actual response was bigger than the files it
+    /// covered -- counted as zero avoided rather than a negative, but a
+    /// real cost worth surfacing rather than silently flattering the
+    /// total.
+    mcp_costlier_calls: usize,
+    mcp_overhead_bytes: usize,
+    /// Commands the rewrite hook declined to wrap, grouped by
+    /// (program, reason) -- the CLI's `--missed` report, always present
+    /// here rather than gated behind a separate mode.
+    missed: Vec<MissedCommandDto>,
+}
+
+fn saved_group_key(record: &repowise_distill::ledger::Record, by: &str) -> String {
+    if by == "day" {
+        format!("day {}", record.at / 86_400)
+    } else {
+        record.program.clone()
+    }
+}
+
 /// Symbol detail, for `GET /api/symbol` (issue #263).
 #[derive(Serialize)]
 struct SymbolDetailDto {
@@ -2066,6 +2146,111 @@ async fn get_doc_coverage(State(state): State<AppState>) -> Result<Json<DocCover
     }))
 }
 
+async fn get_saved(
+    State(state): State<AppState>,
+    Query(query): Query<SavedQuery>,
+) -> Result<Json<SavedDto>, ApiError> {
+    use repowise_distill::ledger::{approx_tokens, Kind};
+    use std::collections::BTreeMap;
+
+    let by = query.by.as_deref().unwrap_or("program");
+    if by != "program" && by != "day" {
+        return Err(anyhow::anyhow!("by must be `program` or `day`, got {by:?}").into());
+    }
+
+    let store_dir = repowise_distill::store::store_dir(&state.root, None);
+    let records = repowise_distill::ledger::read(&store_dir);
+
+    let distilled: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == Kind::Distilled)
+        .collect();
+    let raw_bytes: usize = distilled.iter().map(|r| r.raw_bytes).sum();
+    let kept_bytes: usize = distilled.iter().map(|r| r.kept_bytes).sum();
+    let saved_bytes: usize = distilled.iter().map(|r| r.saved_bytes()).sum();
+
+    let mut group_totals: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for r in &distilled {
+        let entry = group_totals.entry(saved_group_key(r, by)).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += r.saved_bytes();
+    }
+    let groups = group_totals
+        .into_iter()
+        .map(|(key, (runs, bytes))| SavedGroupDto {
+            key,
+            runs,
+            saved_bytes: bytes,
+            approx_tokens_saved: approx_tokens(bytes),
+        })
+        .collect();
+
+    let mcp: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == Kind::McpResponse)
+        .collect();
+    let mcp_baseline_bytes: usize = mcp.iter().map(|r| r.raw_bytes).sum();
+    let mcp_response_bytes: usize = mcp.iter().map(|r| r.kept_bytes).sum();
+    let mcp_avoided_bytes: usize = mcp.iter().map(|r| r.saved_bytes()).sum();
+
+    let mut mcp_totals: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for r in &mcp {
+        let entry = mcp_totals.entry(r.program.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += r.saved_bytes();
+    }
+    let mcp_tools = mcp_totals
+        .into_iter()
+        .map(|(tool, (calls, bytes))| McpToolSavingsDto {
+            tool,
+            calls,
+            saved_bytes: bytes,
+            approx_tokens_saved: approx_tokens(bytes),
+        })
+        .collect();
+
+    let costlier: Vec<_> = mcp.iter().filter(|r| r.kept_bytes > r.raw_bytes).collect();
+    let mcp_costlier_calls = costlier.len();
+    let mcp_overhead_bytes: usize = costlier
+        .iter()
+        .map(|r| r.kept_bytes.saturating_sub(r.raw_bytes))
+        .sum();
+
+    let mut missed_totals: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for r in records.iter().filter(|r| r.kind == Kind::Skipped) {
+        *missed_totals
+            .entry((r.program.clone(), r.detail.clone()))
+            .or_insert(0) += 1;
+    }
+    let mut missed: Vec<_> = missed_totals
+        .into_iter()
+        .map(|((program, reason), count)| MissedCommandDto {
+            program,
+            reason,
+            count,
+        })
+        .collect();
+    missed.sort_by_key(|m| std::cmp::Reverse(m.count));
+
+    Ok(Json(SavedDto {
+        by: by.to_string(),
+        distilled_runs: distilled.len(),
+        raw_bytes,
+        kept_bytes,
+        saved_bytes,
+        approx_tokens_saved: approx_tokens(saved_bytes),
+        groups,
+        mcp_baseline_bytes,
+        mcp_response_bytes,
+        mcp_avoided_bytes,
+        mcp_approx_tokens_avoided: approx_tokens(mcp_avoided_bytes),
+        mcp_tools,
+        mcp_costlier_calls,
+        mcp_overhead_bytes,
+        missed,
+    }))
+}
+
 async fn post_chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequestDto>,
@@ -2735,6 +2920,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/refactor-candidates", get(get_refactor_candidates))
         .route("/api/doc-coverage", get(get_doc_coverage))
+        .route("/api/saved", get(get_saved))
         .route("/api/chat", post(post_chat))
         .route("/api/reindex", get(get_reindex_status).post(post_reindex))
         .route("/api/webhook/github", post(post_webhook_github))
@@ -4078,6 +4264,113 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["stale"], 1);
         assert_eq!(json["entries"][0]["status"], "stale");
+    }
+
+    #[tokio::test]
+    async fn get_saved_reports_zero_totals_with_no_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/saved").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["by"], "program");
+        assert_eq!(json["distilled_runs"], 0);
+        assert_eq!(json["saved_bytes"], 0);
+        assert_eq!(json["groups"].as_array().unwrap().len(), 0);
+        assert_eq!(json["mcp_tools"].as_array().unwrap().len(), 0);
+        assert_eq!(json["missed"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_saved_groups_measured_savings_by_program_and_keeps_mcp_modelled_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        let store_dir = repowise_distill::store::store_dir(&root, None);
+
+        repowise_distill::ledger::record_distilled(&store_dir, "cargo", 4000, 400, 0);
+        repowise_distill::ledger::record_distilled(&store_dir, "cargo", 2000, 200, 0);
+        repowise_distill::ledger::record_distilled(&store_dir, "pytest", 1000, 100, 0);
+        repowise_distill::ledger::record_mcp_response(&store_dir, "get_context", 9000, 900);
+        repowise_distill::ledger::record_skipped(&store_dir, "git", "not-rewritable");
+
+        let (status, json) = get(root, "/api/saved").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["distilled_runs"], 3);
+        // Measured total must not include the modelled MCP saving (8100).
+        assert_eq!(json["raw_bytes"], 7000);
+        assert_eq!(json["kept_bytes"], 700);
+        assert_eq!(json["saved_bytes"], 6300);
+
+        let groups = json["groups"].as_array().unwrap();
+        let cargo_group = groups.iter().find(|g| g["key"] == "cargo").unwrap();
+        assert_eq!(cargo_group["runs"], 2);
+        assert_eq!(cargo_group["saved_bytes"], 5400);
+        let pytest_group = groups.iter().find(|g| g["key"] == "pytest").unwrap();
+        assert_eq!(pytest_group["runs"], 1);
+        assert_eq!(pytest_group["saved_bytes"], 900);
+
+        assert_eq!(json["mcp_baseline_bytes"], 9000);
+        assert_eq!(json["mcp_avoided_bytes"], 8100);
+        let mcp_tools = json["mcp_tools"].as_array().unwrap();
+        assert_eq!(mcp_tools.len(), 1);
+        assert_eq!(mcp_tools[0]["tool"], "get_context");
+        assert_eq!(mcp_tools[0]["calls"], 1);
+
+        let missed = json["missed"].as_array().unwrap();
+        assert_eq!(missed.len(), 1);
+        assert_eq!(missed[0]["program"], "git");
+        assert_eq!(missed[0]["reason"], "not-rewritable");
+        assert_eq!(missed[0]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_saved_can_group_by_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        let store_dir = repowise_distill::store::store_dir(&root, None);
+        repowise_distill::ledger::record_distilled(&store_dir, "cargo", 100, 10, 0);
+
+        let (status, json) = get(root, "/api/saved?by=day").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["by"], "day");
+        let groups = json["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0]["key"].as_str().unwrap().starts_with("day "));
+    }
+
+    #[tokio::test]
+    async fn get_saved_errors_on_an_invalid_by_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, _json) = get(root, "/api/saved?by=hour").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_saved_flags_mcp_calls_that_returned_more_than_they_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        let store_dir = repowise_distill::store::store_dir(&root, None);
+        // The curated answer (500 bytes) is bigger than the baseline it
+        // covered (200 bytes) -- a real cost, not a saving.
+        repowise_distill::ledger::record_mcp_response(&store_dir, "get_symbol", 200, 500);
+
+        let (status, json) = get(root, "/api/saved").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["mcp_costlier_calls"], 1);
+        assert_eq!(json["mcp_overhead_bytes"], 300);
+        assert_eq!(json["mcp_avoided_bytes"], 0);
     }
 
     /// Same hand-rolled fixture-server approach `repowise-llm`'s own

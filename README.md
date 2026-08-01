@@ -2912,7 +2912,7 @@ to check for.
   `/api/search`, `/api/search-semantic`, `/api/graph`, `/api/graph-modules`, `/api/ownership`, `/api/dead-code`,
   `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`,
   `/api/external-deps`, `/api/commits`, `/api/commit-risk`,
-  `/api/communities`, plus
+  `/api/communities`, `/api/saved`, plus
   `POST /api/chat` — the same data `repowise
   overview`/`health`/`hotspots`/`decisions` already compute, plus the
   full symbol list, as JSON. File paths are always relative to `PATH`,
@@ -3025,6 +3025,17 @@ to check for.
   token counts, not a dollar figure: `repowise-llm` has no per-model
   pricing table, since an OpenAI-compatible endpoint (`rusty_provider`
   or otherwise) can route to whichever provider it's configured for.
+  `GET /api/saved?by=program|day` (issue #358's Costs view) is the
+  dashboard counterpart to `repowise saved`, reusing the same
+  `repowise-distill` savings ledger rather than any new accounting:
+  measured distillation totals (`repowise distill`'s bytes-in/bytes-out,
+  grouped by `by`), a separately-reported *modelled* MCP-response
+  estimate (`get_context`/`get_symbol`'s curated-answer-vs-covered-files
+  baseline — never summed with the measured totals, mirroring
+  `repowise_distill::ledger::Record::is_measured`'s own split), and the
+  rewrite hook's skipped-command breakdown (the CLI's `--missed` report,
+  always included rather than gated behind a separate mode, since a
+  dashboard view has no flag to gate it behind).
 - **Detail views** (issue #263) for symbols and decisions, deep-linkable at
   `#/symbols?id=<file>@<line>` and `#/decisions?id=<id>`, reached by clicking a
   row in either index.
@@ -3229,7 +3240,15 @@ to check for.
   prompt/completion/total token counts, so it keeps reflecting the chat
   section's activity elsewhere on the page without the two components
   sharing state directly — token counts only, current server process
-  only, not a persisted dollar-cost history.
+  only, not a persisted dollar-cost history. A **Costs section** (issue
+  #358) fetches `/api/saved`, with the same `by=program|day` grouping
+  toggle the CLI's own `--by` flag offers: measured distillation
+  savings (raw/kept/saved bytes and approximate tokens, grouped), a
+  separately-headed *modelled* MCP-response estimate (never combined
+  with the measured total above it, same "measured and modelled, kept
+  apart" split `repowise saved` itself keeps), and the rewrite hook's
+  missed-command breakdown, always shown rather than gated behind a
+  toggle.
   It is **the single frontend for this port** — there is deliberately no
   second one. A React/Vite app briefly existed under `web/` and was
   removed: it duplicated this crate against the same `/api/*` surface

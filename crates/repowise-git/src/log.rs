@@ -4,6 +4,7 @@ use std::process::Command;
 /// A single commit: its hash, author name, subject line, author-date
 /// (Unix seconds), and the files it touched (paths absolute, resolved
 /// against the repo's real top-level directory — see `collect_history`).
+#[derive(Debug, Clone)]
 pub struct CommitInfo {
     pub hash: String,
     pub author: String,
@@ -44,16 +45,28 @@ fn git_toplevel(root: &Path) -> anyhow::Result<PathBuf> {
 /// Merge commits are included but (per git's default `--name-only`
 /// behavior) have no file list, so they don't contribute to churn.
 pub fn collect_history(root: &Path) -> anyhow::Result<Vec<CommitInfo>> {
+    collect(root, None)
+}
+
+/// As [`collect_history`], but bounded to the `limit` most recent
+/// commits via git's own `-n`, rather than walking the whole history
+/// and truncating in Rust -- the point of a "recent commits" query is
+/// to stay cheap on a long history, which a full walk defeats (issue
+/// #356's dashboard Commits view).
+pub fn collect_recent(root: &Path, limit: usize) -> anyhow::Result<Vec<CommitInfo>> {
+    collect(root, Some(limit))
+}
+
+fn collect(root: &Path, limit: Option<usize>) -> anyhow::Result<Vec<CommitInfo>> {
     let toplevel = git_toplevel(root)?;
 
     let format = format!("--pretty=format:{RECORD_SEP}%H{FIELD_SEP}%an{FIELD_SEP}%at{FIELD_SEP}%s");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("log")
-        .arg(format)
-        .arg("--name-only")
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).arg("log").arg(format);
+    if let Some(limit) = limit {
+        cmd.arg(format!("-n{limit}"));
+    }
+    let output = cmd.arg("--name-only").output()?;
     if !output.status.success() {
         anyhow::bail!(
             "git log failed: {}",

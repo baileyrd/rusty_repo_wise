@@ -29,6 +29,14 @@ pub fn collect_commits(root: &Path) -> anyhow::Result<Vec<CommitInfo>> {
     log::collect_history(root)
 }
 
+/// The `limit` most recent commits, newest first -- cheap even on a
+/// long history, unlike [`collect_commits`] (issue #356's dashboard
+/// Commits view, and any other "what just happened here" consumer that
+/// doesn't need the whole history).
+pub fn collect_recent_commits(root: &Path, limit: usize) -> anyhow::Result<Vec<CommitInfo>> {
+    log::collect_recent(root, limit)
+}
+
 /// Commit messages containing one of these (case-insensitive) are
 /// treated as bug fixes. A heuristic, not ground truth: fixes described
 /// without any of these words won't be counted, and any commit that

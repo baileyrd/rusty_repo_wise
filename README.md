@@ -353,6 +353,9 @@ repowise status [PATH]             # index freshness: stale/missing files, wiki 
 repowise dead-code [PATH]          # confidence-tiered dead-code candidates
                                     #   --min-confidence <low|medium|high> (default low), --limit <N> (default 50)
 repowise risk [REVSPEC] [PATH]     # diff-shape risk score for a commit or `base..head` range (default HEAD)
+repowise commits [PATH]            # most recent commits, newest first, no risk score --
+                                    #   `repowise risk <HASH>` scores a specific one (see
+                                    #   issue #356) -- --limit <N> (default 30)
 repowise hotspots [PATH]           # files ranked by churn × complexity
 repowise ownership <FILE> [PATH]   # per-author line ownership (git blame)
 repowise coupled <FILE> [PATH]     # files that most often change alongside it
@@ -376,7 +379,7 @@ repowise refactor [PATH]           # deterministic refactor candidates: import c
 repowise external-deps [PATH]      # third-party deps declared in Cargo.toml/package.json/
                                     #   composer.json/requirements.txt/pyproject.toml/go.mod
                                     #   (declared, not lockfile-resolved; see issue #353)
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/get_coupling/get_external_deps/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/get_coupling/get_external_deps/get_commits/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
                                     #   architectural decisions from code (opt-in, requires prior `docs`)
@@ -2687,6 +2690,14 @@ below):
   (the manifest's own version constraint, never a lockfile-resolved
   version). See "External dependency registry" above for the full
   scope and exclusions.
+- **`get_commits(limit?)`** (issue #356) — the `limit` (default 30,
+  capped at 200) most recent commits, newest first: hash, author,
+  subject line, timestamp, files touched. Always queries git for
+  exactly that many commits rather than walking the whole history and
+  truncating, so it stays cheap on a long-lived repo. No risk score —
+  call `get_change_risk` with a specific commit hash for that; scoring
+  every listed commit eagerly would multiply its real per-commit diff
+  cost by however many are listed.
 
 A call re-reads `.repowise/index.json` and rebuilds the dependency graph
 only when the index file's mtime has changed; otherwise it reuses the
@@ -2828,7 +2839,7 @@ to check for.
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
   `/api/search`, `/api/graph`, `/api/graph-modules`, `/api/ownership`, `/api/dead-code`,
   `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`,
-  `/api/external-deps`, plus
+  `/api/external-deps`, `/api/commits`, `/api/commit-risk`, plus
   `POST /api/chat` — the same data `repowise
   overview`/`health`/`hotspots`/`decisions` already compute, plus the
   full symbol list, as JSON. File paths are always relative to `PATH`,
@@ -2876,7 +2887,11 @@ to check for.
   convention as `/api/hotspots`; issue #352); `/api/external-deps`
   returns every declared third-party dependency across every manifest
   this port recognizes, mirroring the `get_external_deps` MCP tool's
-  own shape (issue #353). `POST
+  own shape (issue #353); `/api/commits?limit=<N>` returns the `limit`
+  (default 30) most recent commits, no risk score attached, mirroring
+  the `get_commits` MCP tool's own shape; `/api/commit-risk?revspec=<...>`
+  scores one commit on demand, the same `change_risk` computation
+  `get_change_risk`/`repowise risk` already use (issue #356). `POST
   /api/chat` takes `{"history": [{"role",
   "content"}, ...]}` (the whole conversation so far) and returns
   `{"available": bool, "reply": string | null, "cited": [...],
@@ -3070,6 +3085,10 @@ to check for.
   **Dependencies section** (issue #353) lists `/api/external-deps`'s
   declared third-party dependencies with an ecosystem filter, each row's
   manifest file linking into the same file-detail panel. A
+  **Commits section** (issue #356) lists `/api/commits`' recent
+  commits (hash/author/date/files-touched/message); clicking a row
+  fetches and expands that one commit's `/api/commit-risk` score
+  on demand, rather than scoring every listed commit up front. A
   **chat section** talks to `POST /api/chat`, with full conversation
   history kept client-side and resent every turn; if the server reports
   the LLM isn't configured, it shows a plain explanatory message instead

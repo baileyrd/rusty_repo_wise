@@ -314,6 +314,18 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         top: usize,
     },
+    /// List the most recent commits, newest first (issue #356's
+    /// dashboard Commits view). No risk score -- run `repowise risk
+    /// <HASH>` for a specific commit's diff-shape score; scoring every
+    /// listed commit eagerly would multiply that per-commit diff cost
+    /// by however many are listed.
+    Commits {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many commits to list.
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+    },
     /// Generate deterministic per-file documentation pages under
     /// `.repowise/wiki/`.
     Docs {
@@ -785,6 +797,7 @@ fn main() -> anyhow::Result<()> {
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Coupling { path, top } => cmd_coupling(&path, top),
+        Command::Commits { path, limit } => cmd_commits(&path, limit),
         Command::Docs { path } => cmd_docs(&path),
         Command::DocCoverage { path, verbose } => cmd_doc_coverage(&path, verbose),
         Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
@@ -2731,6 +2744,34 @@ fn cmd_coupling(path: &Path, top: usize) -> anyhow::Result<()> {
             count,
             display_path(a, &root),
             display_path(b, &root)
+        );
+    }
+    Ok(())
+}
+
+fn cmd_commits(path: &Path, limit: usize) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let commits = repowise_git::collect_recent_commits(&root, limit)?;
+
+    if commits.is_empty() {
+        println!("No commits found under {}", root.display());
+        return Ok(());
+    }
+    println!(
+        "{} most recent commit(s) under {}:",
+        commits.len(),
+        root.display()
+    );
+    for c in &commits {
+        let date = chrono::DateTime::from_timestamp(c.timestamp, 0)
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "unknown date".to_string());
+        let short_hash: String = c.hash.chars().take(7).collect();
+        println!(
+            "  {short_hash}  {date}  {:<20}  {} file(s) touched  {}",
+            c.author,
+            c.files.len(),
+            c.message
         );
     }
     Ok(())

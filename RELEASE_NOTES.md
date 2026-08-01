@@ -6,6 +6,37 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #371 — Dashboard: Costs view, surfacing distill/MCP savings (closes #358)
+**2026-08-01**
+
+- Closes #358: upstream's Costs view tracks "what has indexing cost, and
+  what has it saved". This port's `repowise-distill` savings ledger
+  (per-program/per-day distillation savings, a modelled MCP-response
+  estimate, a rewrite-hook `--missed` report) was CLI-only
+  (`repowise saved`), never reaching the web dashboard.
+- New `GET /api/saved?by=program|day`, reusing the ledger
+  `repowise saved` already reads (`repowise_distill::ledger::read`) --
+  no new accounting. Keeps the same "measured and modelled, kept apart"
+  split the ledger itself enforces
+  (`repowise_distill::ledger::Record::is_measured`): distillation
+  totals are observed bytes in/out, the MCP-response estimate is a
+  separately-reported counterfactual baseline, never summed together.
+- Resolves the issue's own open question: **its own dashboard section**
+  (`#/costs`), matching upstream's separate framing, rather than folding
+  into the existing Usage view -- Usage tracks LLM token spend, this is
+  savings, a different axis upstream itself keeps apart.
+- `repowise-web`: new Costs section with the same `by=program|day`
+  grouping toggle the CLI's own `--by` flag offers; the missed-commands
+  breakdown (the CLI's `--missed` report) is always shown rather than
+  gated behind a mode, since a dashboard view has no flag to gate it
+  behind.
+- `README.md`: `/api/saved` added to the JSON-endpoints list, a new
+  paragraph describing the endpoint, and a Costs-section paragraph in
+  the dashboard-sections prose; `ParityGaps.md` row #18 updated to
+  closed; issue #358 closed.
+
+---
+
 ## PR #370 — Dashboard: semantic search fallback in the search box (closes #357)
 **2026-08-01**
 

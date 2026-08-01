@@ -720,6 +720,52 @@ struct Usage {
     total_tokens: u64,
 }
 
+/// Mirrors `repowise-server`'s `SavedGroupDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct SavedGroup {
+    key: String,
+    runs: usize,
+    saved_bytes: usize,
+    approx_tokens_saved: usize,
+}
+
+/// Mirrors `repowise-server`'s `McpToolSavingsDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct McpToolSavings {
+    tool: String,
+    calls: usize,
+    saved_bytes: usize,
+    approx_tokens_saved: usize,
+}
+
+/// Mirrors `repowise-server`'s `MissedCommandDto` wire shape.
+#[derive(Deserialize, Clone, Debug)]
+struct MissedCommand {
+    program: String,
+    reason: String,
+    count: usize,
+}
+
+/// Mirrors `repowise-server`'s `SavedDto` wire shape (`GET /api/saved`,
+/// issue #358).
+#[derive(Deserialize, Clone, Debug)]
+struct Saved {
+    distilled_runs: usize,
+    raw_bytes: usize,
+    kept_bytes: usize,
+    saved_bytes: usize,
+    approx_tokens_saved: usize,
+    groups: Vec<SavedGroup>,
+    mcp_baseline_bytes: usize,
+    mcp_response_bytes: usize,
+    mcp_avoided_bytes: usize,
+    mcp_approx_tokens_avoided: usize,
+    mcp_tools: Vec<McpToolSavings>,
+    mcp_costlier_calls: usize,
+    mcp_overhead_bytes: usize,
+    missed: Vec<MissedCommand>,
+}
+
 /// Mirrors `repowise-server`'s `ReindexStatusDto` wire shape.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -1892,6 +1938,7 @@ enum Route {
     KnowledgeGraph,
     Chat,
     Usage,
+    Costs,
     Settings,
     Workspace,
     CoChanges,
@@ -1934,6 +1981,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
     (Route::KnowledgeGraph, "knowledge-graph", "Knowledge Graph"),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
+    (Route::Costs, "costs", "Costs"),
     (Route::Settings, "settings", "Settings"),
     (Route::Workspace, "workspace", "Workspace"),
     (Route::CoChanges, "co-changes", "Co-changes"),
@@ -3920,6 +3968,186 @@ fn UsageSection() -> impl IntoView {
     }
 }
 
+/// `GET /api/saved` (issue #358): the dashboard counterpart to
+/// `repowise saved`, and this port's Costs view -- upstream tracks "what
+/// has indexing cost, and what has it saved", and the savings half
+/// (`repowise-distill`'s compaction and MCP-response savings) was
+/// CLI-only before this. Grouped by program by default; the `by` select
+/// mirrors the CLI's own `--by program|day` flag. The measured
+/// (distillation) and modelled (MCP) totals get their own sections
+/// rather than one combined number, same separation `repowise saved`
+/// itself keeps -- see `repowise_distill::ledger::Record::is_measured`.
+#[component]
+fn CostsSection() -> impl IntoView {
+    let by = RwSignal::new("program".to_string());
+    let saved = LocalResource::new(move || {
+        let by = by.get();
+        async move { fetch_json_with_query::<Saved>("/api/saved", &[("by", &by)]).await }
+    });
+
+    view! {
+        <h2>"Costs"</h2>
+        <p class="empty">
+            "What indexing has cost, and what repowise-distill and the MCP server's \
+             curated answers have saved -- CLI-only via `repowise saved` until now."
+        </p>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                saved
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(s) => view! {
+                            <h3>"Distillation savings (measured)"</h3>
+                            {if s.distilled_runs == 0 {
+                                view! {
+                                    <p class="empty">
+                                        "No distillations recorded yet. This counts only what \
+                                         `repowise distill` actually ran."
+                                    </p>
+                                }
+                                .into_any()
+                            } else {
+                                view! {
+                                    <ul>
+                                        <li>{format!("{} distillation run(s)", s.distilled_runs)}</li>
+                                        <li>{format!(
+                                            "raw: {} bytes, kept: {} bytes, saved: {} bytes (~{} tokens)",
+                                            s.raw_bytes, s.kept_bytes, s.saved_bytes, s.approx_tokens_saved,
+                                        )}</li>
+                                    </ul>
+                                    <label for="saved-by">"Group by: "</label>
+                                    <select
+                                        id="saved-by"
+                                        on:change=move |ev| by.set(event_target_value(&ev))
+                                    >
+                                        <option value="program">"Program"</option>
+                                        <option value="day">"Day"</option>
+                                    </select>
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>"Group"</th>
+                                                <th>"Runs"</th>
+                                                <th>"Bytes saved"</th>
+                                                <th>"~Tokens saved"</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {s.groups.iter().map(|g| view! {
+                                                <tr>
+                                                    <td>{g.key.clone()}</td>
+                                                    <td>{g.runs}</td>
+                                                    <td>{g.saved_bytes}</td>
+                                                    <td>{g.approx_tokens_saved}</td>
+                                                </tr>
+                                            }).collect::<Vec<_>>()}
+                                        </tbody>
+                                    </table>
+                                }
+                                .into_any()
+                            }}
+
+                            <h3>"MCP tool responses (estimated, not measured)"</h3>
+                            {if s.mcp_tools.is_empty() {
+                                view! {
+                                    <p class="empty">
+                                        "No MCP tool responses recorded. Only tools whose \
+                                         covered-file set is unambiguous (get_context, \
+                                         get_symbol) contribute here."
+                                    </p>
+                                }
+                                .into_any()
+                            } else {
+                                view! {
+                                    <ul>
+                                        <li>{format!(
+                                            "modelled baseline: {} bytes, actual responses: {} bytes, \
+                                             estimated avoided: {} bytes (~{} tokens)",
+                                            s.mcp_baseline_bytes, s.mcp_response_bytes,
+                                            s.mcp_avoided_bytes, s.mcp_approx_tokens_avoided,
+                                        )}</li>
+                                    </ul>
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>"Tool"</th>
+                                                <th>"Calls"</th>
+                                                <th>"Bytes avoided"</th>
+                                                <th>"~Tokens avoided"</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {s.mcp_tools.iter().map(|t| view! {
+                                                <tr>
+                                                    <td>{t.tool.clone()}</td>
+                                                    <td>{t.calls}</td>
+                                                    <td>{t.saved_bytes}</td>
+                                                    <td>{t.approx_tokens_saved}</td>
+                                                </tr>
+                                            }).collect::<Vec<_>>()}
+                                        </tbody>
+                                    </table>
+                                    {(s.mcp_costlier_calls > 0).then(|| view! {
+                                        <p class="empty">
+                                            {format!(
+                                                "{} call(s) returned more than the files they \
+                                                 described, by {} bytes total -- counted as zero \
+                                                 avoided, not a negative, but a real cost.",
+                                                s.mcp_costlier_calls, s.mcp_overhead_bytes,
+                                            )}
+                                        </p>
+                                    })}
+                                    <p class="empty">
+                                        "Modelled, not measured: baseline is the on-disk size of \
+                                         the files each answer covered -- a counterfactual, never \
+                                         summed with the distillation totals above."
+                                    </p>
+                                }
+                                .into_any()
+                            }}
+
+                            <h3>"Missed (rewrite hook declined to wrap)"</h3>
+                            {if s.missed.is_empty() {
+                                view! {
+                                    <p class="empty">
+                                        "No skipped commands recorded. Populated by the rewrite \
+                                         hook -- if it isn't installed, nothing is being \
+                                         observed, which isn't the same as nothing being missed."
+                                    </p>
+                                }
+                                .into_any()
+                            } else {
+                                view! {
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>"Program"</th>
+                                                <th>"Reason"</th>
+                                                <th>"Times"</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {s.missed.iter().map(|m| view! {
+                                                <tr>
+                                                    <td>{m.program.clone()}</td>
+                                                    <td>{m.reason.clone()}</td>
+                                                    <td>{m.count}</td>
+                                                </tr>
+                                            }).collect::<Vec<_>>()}
+                                        </tbody>
+                                    </table>
+                                }
+                                .into_any()
+                            }}
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
 /// A chat interface over `/api/chat`. Renders a plain explanatory
 /// message instead of a chat box when the server reports the LLM
 /// feature isn't configured, rather than a confusing empty/broken UI.
@@ -4263,6 +4491,7 @@ fn App() -> impl IntoView {
             Route::KnowledgeGraph => view! { <KnowledgeGraphSection selected=selected /> }.into_any(),
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
+            Route::Costs => view! { <CostsSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),
             Route::Workspace => view! { <WorkspaceSection /> }.into_any(),
             Route::CoChanges => view! { <CoChangesSection /> }.into_any(),

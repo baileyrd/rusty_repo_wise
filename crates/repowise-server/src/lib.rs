@@ -1204,6 +1204,105 @@ async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiE
     }))
 }
 
+/// A coarser, module-level view of the same import graph `/api/graph`
+/// exposes at file granularity -- a bolted-on toggle over existing
+/// data, not upstream's full continuous-zoom Knowledge Graph canvas
+/// (issue #354: reading upstream's own docs found the marginal *fact*
+/// a full repo→module→file→symbol zoom would expose is thin relative
+/// to the custom camera/culling renderer it would take to build one;
+/// this covers the one genuinely missing layer -- module grouping --
+/// cheaply instead). A "module" is a file's parent directory,
+/// repo-relative -- generic across any repo layout, unlike guessing at
+/// language-specific package conventions.
+///
+/// Returns the exact same shape as `/api/graph` (`GraphDto`) so the
+/// frontend can reuse its layout/rendering code unchanged; a module
+/// node's `language` is whichever language is most common among its
+/// files (ties broken alphabetically for determinism).
+async fn get_graph_modules(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let graph = repowise_graph::RepoGraph::build(&index);
+
+    let module_of = |path: &Path| -> String {
+        let rel = relative(&state.root, path);
+        match rel.rfind('/') {
+            Some(i) => rel[..i].to_string(),
+            None => ".".to_string(),
+        }
+    };
+
+    let mut languages_by_module: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, usize>,
+    > = std::collections::HashMap::new();
+    for file in &index.files {
+        *languages_by_module
+            .entry(module_of(&file.path))
+            .or_default()
+            .entry(file.language.label().to_string())
+            .or_insert(0) += 1;
+    }
+
+    let mut module_edges: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for file in &index.files {
+        let from_module = module_of(&file.path);
+        for dep in graph.dependencies_of(&file.path) {
+            let to_module = module_of(&dep);
+            if to_module != from_module {
+                module_edges.insert((from_module.clone(), to_module));
+            }
+        }
+    }
+
+    let mut degree: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (from, to) in &module_edges {
+        *degree.entry(from.as_str()).or_insert(0) += 1;
+        *degree.entry(to.as_str()).or_insert(0) += 1;
+    }
+
+    let mut modules: Vec<&String> = languages_by_module.keys().collect();
+    modules.sort_by(|a, b| {
+        degree
+            .get(a.as_str())
+            .copied()
+            .unwrap_or(0)
+            .cmp(&degree.get(b.as_str()).copied().unwrap_or(0))
+            .reverse()
+            .then_with(|| a.cmp(b))
+    });
+    let truncated = modules.len() > GRAPH_NODE_LIMIT;
+    modules.truncate(GRAPH_NODE_LIMIT);
+    let included: std::collections::HashSet<&str> = modules.iter().map(|m| m.as_str()).collect();
+
+    let nodes = modules
+        .iter()
+        .map(|module| {
+            let language = languages_by_module[*module]
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                .map(|(lang, _)| lang.clone())
+                .unwrap_or_default();
+            GraphNodeDto {
+                id: (*module).clone(),
+                language,
+            }
+        })
+        .collect();
+
+    let edges = module_edges
+        .into_iter()
+        .filter(|(from, to)| included.contains(from.as_str()) && included.contains(to.as_str()))
+        .map(|(from, to)| GraphEdgeDto { from, to })
+        .collect();
+
+    Ok(Json(GraphDto {
+        nodes,
+        edges,
+        truncated,
+    }))
+}
+
 /// `path` is matched against the indexed-files set (not joined onto
 /// `root` directly) before ever reaching `git blame`, the same
 /// path-traversal-safe convention `/api/wiki` uses.
@@ -2340,6 +2439,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/wiki", get(get_wiki))
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
+        .route("/api/graph-modules", get(get_graph_modules))
         .route("/api/ownership", get(get_ownership))
         .route("/api/symbol", get(get_symbol_detail))
         .route("/api/decision", get(get_decision_detail))
@@ -2885,6 +2985,93 @@ mod tests {
         assert_eq!(json["edges"], serde_json::json!([]));
         assert_eq!(json["nodes"][0]["id"], "busy.rs");
         assert_eq!(json["nodes"][0]["language"], "Rust");
+    }
+
+    /// Two files in different directories, `mod_a/a.rs` importing
+    /// `mod_b/b.rs` -- enough to exercise `/api/graph-modules`'
+    /// directory-level aggregation across a module boundary.
+    fn index_with_a_cross_module_import(root: &Path) -> RepoIndex {
+        std::fs::create_dir_all(root.join("mod_a")).unwrap();
+        std::fs::create_dir_all(root.join("mod_b")).unwrap();
+        let a = root.join("mod_a/a.rs");
+        let b = root.join("mod_b/b.rs");
+        std::fs::write(&a, "mod b;\n").unwrap();
+        std::fs::write(&b, "pub fn helper() {}\n").unwrap();
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![
+                repowise_core::FileRecord {
+                    path: a,
+                    language: repowise_core::Language::Rust,
+                    lines: 1,
+                    symbols: vec![],
+                    imports: vec![repowise_core::ImportRef {
+                        path: "b".to_string(),
+                        line: 1,
+                        resolved_file: Some(b.clone()),
+                    }],
+                    calls: vec![],
+                    field_accesses: vec![],
+                },
+                repowise_core::FileRecord {
+                    path: b,
+                    language: repowise_core::Language::Rust,
+                    lines: 1,
+                    symbols: vec![],
+                    imports: vec![],
+                    calls: vec![],
+                    field_accesses: vec![],
+                },
+            ],
+            other_files: 0,
+            indexed_commit: None,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    #[tokio::test]
+    async fn get_graph_modules_aggregates_files_up_to_their_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_a_cross_module_import(&root);
+
+        let (status, json) = get(root, "/api/graph-modules").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["truncated"], false);
+        let nodes: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(nodes.len(), 2, "{nodes:?}");
+        assert!(nodes.contains(&"mod_a"));
+        assert!(nodes.contains(&"mod_b"));
+        assert_eq!(
+            json["edges"],
+            serde_json::json!([{"from": "mod_a", "to": "mod_b"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn get_graph_modules_has_no_edge_for_an_import_within_the_same_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_import_edge(&root);
+
+        let (status, json) = get(root, "/api/graph-modules").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let nodes: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(nodes, vec!["."], "both root-level files share module \".\"");
+        assert_eq!(json["edges"], serde_json::json!([]));
     }
 
     /// A repo with one file containing one commented, uncommented-name

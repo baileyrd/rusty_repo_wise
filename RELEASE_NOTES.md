@@ -6,6 +6,37 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #368 — Dashboard: Map sub-view, community detection (closes #352)
+**2026-08-01**
+
+- Closes out #352's remaining scope (Coupling shipped separately in PR
+  #364). Map, per a direct read of upstream's own
+  `docs/start/DASHBOARD.md`: "the detected communities within the
+  dependency graph laid out on a module map, with sizing proportional
+  to code volume in each component" -- a capability this port never
+  had at all, unlike Coupling's "just wire existing data" shape.
+- New `repowise_graph::detect_communities`: standard multi-level
+  Louvain modularity optimization (Blondel et al., 2008), generic over
+  node type, fully deterministic. 6 unit tests including the canonical
+  "two triangles joined by one bridge edge" toy case every
+  community-detection algorithm is expected to split correctly.
+- Wired into `GET /api/communities` (`repowise-server`) -- one entry
+  per detected community (files, total lines, dominant language),
+  ranked largest-first, capped at 150. No CLI or MCP surface: unlike
+  Coupling/external-deps/commits, this is a dashboard-visualization
+  concern (a treemap needs a canvas), not data independently useful to
+  an agent.
+- `repowise-web`: a new `#/map` section reuses the exact same
+  `squarify` treemap layout the Files view already uses -- one tile
+  per community, sized by lines of code, colored by dominant language.
+- Dogfooded against this port's own ~117-file workspace: 10
+  communities, each genuinely grouping files that import each other
+  (e.g. `repowise-external-deps`'s parsing files land with
+  `repowise-core/src/deps.rs`, the type they all depend on).
+- `ParityGaps.md` row #12 updated to closed; issue #352 closed.
+
+---
+
 ## PR #367 — Dashboard: Commits view, risk-scored on demand (closes #356)
 **2026-08-01**
 

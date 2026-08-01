@@ -401,6 +401,30 @@ struct SearchResults {
     symbols: Vec<Symbol>,
 }
 
+/// `/api/search-semantic`'s response -- the main search box's semantic
+/// fallback (issue #357), only ever fetched after `/api/search` has
+/// already come back empty for the settled query. See
+/// `CombinedSearchResults`'s doc comment for the fetch sequencing.
+#[derive(Deserialize, Clone, Debug)]
+struct SemanticSearch {
+    available: bool,
+    files: Vec<String>,
+}
+
+/// One search box round trip: the instant substring result, plus a
+/// semantic fallback attempt -- `None` when it was never tried (the
+/// substring search already found something, or the query was empty),
+/// `Some` with whatever `/api/search-semantic` reported otherwise.
+/// Fetched as one sequential `LocalResource` (substring, then
+/// conditionally semantic) rather than two independently-reactive
+/// resources, so there's exactly one place that decides whether the
+/// slower semantic call is worth making.
+#[derive(Clone, Debug)]
+struct CombinedSearchResults {
+    substring: SearchResults,
+    semantic: Option<SemanticSearch>,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 struct GraphNode {
     id: String,
@@ -2079,16 +2103,37 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
         let q = query.get();
         async move {
             if !should_query(&q) {
-                return Ok(SearchResults {
-                    files: Vec::new(),
-                    symbols: Vec::new(),
+                return Ok::<CombinedSearchResults, String>(CombinedSearchResults {
+                    substring: SearchResults {
+                        files: Vec::new(),
+                        symbols: Vec::new(),
+                    },
+                    semantic: None,
                 });
             }
             // Debounce. A further keystroke re-runs this resource and
             // drops the in-flight future before the delay elapses, so
             // only a pause in typing actually issues a request.
             gloo_timers::future::TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            fetch_json_with_query::<SearchResults>("/api/search", &[("q", &q)]).await
+            let substring =
+                fetch_json_with_query::<SearchResults>("/api/search", &[("q", &q)]).await?;
+            // Semantic fallback only once substring search has already
+            // come back empty -- issue #63's "an API call per keystroke
+            // would make instant search not instant" concern still
+            // applies to /api/search itself, but this is one extra call
+            // gated on "the fast path found nothing", not on every
+            // keystroke.
+            let semantic = if substring.files.is_empty() && substring.symbols.is_empty() {
+                fetch_json_with_query::<SemanticSearch>("/api/search-semantic", &[("q", &q)])
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            Ok(CombinedSearchResults {
+                substring,
+                semantic,
+            })
         }
     });
 
@@ -2116,10 +2161,33 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
                         );
                     }
                     results.get().map(|result| match result.take() {
-                        Ok(res) if res.files.is_empty() && res.symbols.is_empty() => {
-                            view! { <p class="empty">"No matches."</p> }.into_any()
+                        Ok(res) if res.substring.files.is_empty() && res.substring.symbols.is_empty() => {
+                            match res.semantic {
+                                Some(sem) if sem.available && !sem.files.is_empty() => view! {
+                                    <p class="empty">
+                                        "No exact name/path matches. Related by meaning:"
+                                    </p>
+                                    <ul class="search-results">
+                                        {sem.files.into_iter().map(|f| {
+                                            let target = f.clone();
+                                            view! {
+                                                <li>
+                                                    <a href="#" on:click=move |ev| {
+                                                        ev.prevent_default();
+                                                        selected.set(Some(target.clone()));
+                                                    }>{f}</a>
+                                                </li>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </ul>
+                                }
+                                .into_any(),
+                                _ => view! { <p class="empty">"No matches."</p> }.into_any(),
+                            }
                         }
-                        Ok(res) => view! {
+                        Ok(res) => {
+                            let res = res.substring;
+                            view! {
                             <p class="empty">
                                 {format!(
                                     "{} file(s), {} symbol(s).",
@@ -2156,8 +2224,9 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
                                     }
                                 }).collect::<Vec<_>>()}
                             </ul>
+                            }
+                            .into_any()
                         }
-                        .into_any(),
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
                     })
                 }}

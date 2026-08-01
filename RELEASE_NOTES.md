@@ -6,6 +6,39 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #370 — Dashboard: semantic search fallback in the search box (closes #357)
+**2026-08-01**
+
+- Closes #357: upstream's main dashboard search box falls back to
+  embeddings-based semantic search when a substring/name/path query
+  comes back empty, instead of just reporting no matches.
+- New `GET /api/search-semantic?q=`, reusing the same
+  `repowise_llm::retrieve` function already backing `POST /api/chat`
+  and the MCP `get_answer` tool -- no new retrieval logic. Reports
+  `available: false` (rather than an error) when no LLM is configured
+  or the query is empty, so the frontend can degrade quietly.
+- `repowise-web`'s `SearchBox` now fetches sequentially: the existing
+  fast substring path runs first and unconditionally; the semantic
+  call only fires once that path has settled *and* come back empty,
+  inside one `LocalResource` combining both into
+  `CombinedSearchResults`. Preserves issue #63's original "search
+  must stay instant" constraint -- the slower embeddings call never
+  runs on the hot per-keystroke path.
+- Resolves both open questions from #357 itself: **automatic
+  fallback, not an explicit mode toggle** (no new UI element, same
+  reasoning as the #63 constraint above), and **single-repo only**,
+  matching `/api/search`'s own scope (`/api/search` has no `repo=`
+  param either).
+- When triggered, the UI shows "No exact name/path matches. Related
+  by meaning:" above the semantically-matched files, replacing the
+  bare "No matches" message.
+- `README.md`: `/api/search-semantic` added to the JSON-endpoints
+  list, and a new "Semantic fallback (issue #357)" sub-paragraph
+  under the existing Search section; `ParityGaps.md` row #17 updated
+  to closed; issue #357 closed.
+
+---
+
 ## PR #369 — Dashboard: Knowledge Graph, a semantic zoom (closes #354)
 **2026-08-01**
 

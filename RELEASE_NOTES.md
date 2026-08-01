@@ -6,6 +6,49 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #376 — Zed extension: repowise as an MCP context server (partial #332)
+**2026-08-01**
+
+- Partially closes #332, retargeted from an originally-planned VS Code
+  extension to [Zed](https://zed.dev/) at the user's request. Zed
+  extensions are Rust compiled to WebAssembly (`zed_extension_api`), a
+  native fit for this workspace rather than a second TypeScript
+  toolchain.
+- Read Zed's actual current extension docs (and a real published
+  extension, `zed-extensions/postgres-context-server`) rather than
+  relying on prior familiarity, confirming: Zed extensions can provide
+  Languages, Debuggers, Themes/Icon Themes, Snippets, and MCP Servers --
+  no gutter-decoration/hover-provider/CodeLens surface, so most of
+  upstream's VS Code feature list (health gutter, hover, CodeLens,
+  embedded dashboards) has no direct Zed equivalent. MCP server
+  registration is the one capability that maps cleanly.
+- New `zed-extension/` at repo root (its own standalone Cargo
+  workspace, same reasoning as `crates/repowise-web`'s -- it only ever
+  targets `wasm32-wasip2`): `extension.toml` declares
+  `[context_servers.repowise]`; `src/lib.rs` implements
+  `context_server_command`, returning `repowise serve` as the spawned
+  command. Builds for real (`cargo build --release --target
+  wasm32-wasip2`, verified locally) using the genuine
+  `zed_extension_api = "0.7.0"` crate, not a stub.
+- Resolves all three of the issue's own open questions: confirmed Zed's
+  API surface against its own docs (above); **MCP registration only**
+  for this first slice, no slash command; **lives in this repo** at
+  `zed-extension/`, matching `claude-plugin/`'s own "companion
+  directory at root" precedent for Claude Code.
+- No project-path argument is passed to `repowise serve` -- Zed's
+  context-server API gives no way to resolve a worktree ID to a
+  filesystem path from `&Project` (only `language_server_command`
+  receives a `&Worktree` with its own `root_path()`); this relies on
+  the same "spawn with cwd = project root" convention language servers
+  already follow, documented as an assumption rather than silently
+  relied on.
+- `README.md`: new "Zed extension" section; `zed-extension/README.md`
+  covers install/testing; `ParityGaps.md` row #1 updated to partially
+  closed; issue #332 left open (not published to Zed's extension
+  registry yet).
+
+---
+
 ## PR #375 — GitHub PR bot: a self-hosted change-risk comment Action (partial #334)
 **2026-08-01**
 

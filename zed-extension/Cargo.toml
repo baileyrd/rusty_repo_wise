@@ -1,0 +1,24 @@
+# Deliberately its own standalone Cargo workspace (the empty [workspace]
+# table below), NOT a member of the root rusty_repo_wise workspace --
+# same reasoning as crates/repowise-web's own Cargo.toml: this crate only
+# ever builds for wasm32-wasip2 (Zed's extension target), and pulling a
+# WASM-only cdylib into the main workspace would break plain `cargo
+# build/test/clippy --workspace` for every other crate (which target the
+# host). Build/package this one the way Zed's own docs describe --
+# "Install Dev Extension" pointing at this directory -- not via a plain
+# `cargo build` invocation.
+[workspace]
+
+[package]
+name = "repowise-zed"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

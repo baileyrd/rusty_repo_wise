@@ -541,6 +541,30 @@ struct SearchDto {
     symbols: Vec<SymbolDto>,
 }
 
+#[derive(Deserialize)]
+struct SemanticSearchQuery {
+    q: String,
+}
+
+/// The main search box's semantic fallback (issue #357): `/api/search`
+/// stays instant/substring-only (issue #63's own reasoning still
+/// applies -- an embeddings call per keystroke would make instant
+/// search not instant), and the frontend calls this *separately*, only
+/// once `/api/search` has already come back empty for the settled
+/// query. Files only, not symbols: this port's embedding index is
+/// file-granularity, the same one `POST /api/chat` already reuses.
+#[derive(Serialize)]
+struct SemanticSearchDto {
+    /// `false` when no LLM is configured, or when embeddings retrieval
+    /// degraded to keyword matching internally (an unreachable/erroring
+    /// endpoint) -- either way there's nothing here `/api/search`
+    /// didn't already try, so it's reported as unavailable rather than
+    /// as an empty-but-successful semantic result.
+    available: bool,
+    /// Repo-relative paths, best match first.
+    files: Vec<String>,
+}
+
 /// How many matches `/api/search` returns per category -- an instant
 /// search box needs a short, glanceable list, not the whole index.
 const SEARCH_LIMIT: usize = 20;
@@ -1306,6 +1330,42 @@ async fn get_search(
     let symbols: Vec<SymbolDto> = symbols.into_iter().map(|(_, dto)| dto).collect();
 
     Ok(Json(SearchDto { files, symbols }))
+}
+
+async fn get_search_semantic(
+    State(state): State<AppState>,
+    Query(query): Query<SemanticSearchQuery>,
+) -> Result<Json<SemanticSearchDto>, ApiError> {
+    let needle = query.q.trim().to_string();
+    let Some(config) = (!needle.is_empty())
+        .then(|| state.llm_config.as_ref().clone())
+        .flatten()
+    else {
+        return Ok(Json(SemanticSearchDto {
+            available: false,
+            files: Vec::new(),
+        }));
+    };
+
+    let index = RepoIndex::load(&state.root)?;
+    let root = (*state.root).clone();
+    let retrieval = tokio::task::spawn_blocking(move || {
+        repowise_llm::retrieve(&root, &index, &needle, &config)
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    if retrieval.mode != repowise_llm::RetrievalMode::Semantic {
+        return Ok(Json(SemanticSearchDto {
+            available: false,
+            files: Vec::new(),
+        }));
+    }
+
+    Ok(Json(SemanticSearchDto {
+        available: true,
+        files: retrieval.cited,
+    }))
 }
 
 async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiError> {
@@ -2661,6 +2721,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/wiki-pages", get(get_wiki_pages))
         .route("/api/wiki", get(get_wiki))
         .route("/api/search", get(get_search))
+        .route("/api/search-semantic", get(get_search_semantic))
         .route("/api/graph", get(get_graph))
         .route("/api/graph-modules", get(get_graph_modules))
         .route("/api/communities", get(get_communities))
@@ -4142,6 +4203,28 @@ mod tests {
         build_router(state, None)
     }
 
+    async fn get_with_router(router: Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
+            })
+        };
+        (status, json)
+    }
+
     async fn post_json(
         router: Router,
         uri: &str,
@@ -4244,6 +4327,68 @@ mod tests {
         assert_eq!(json["available"], true);
         assert_eq!(json["reply"], "busy() lives in busy.rs.");
         assert!(server.requests()[1].contains("semantic (embedding) search"));
+    }
+
+    #[tokio::test]
+    async fn get_search_semantic_reports_unavailable_without_llm_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/search-semantic?q=busy").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["files"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_search_semantic_reports_unavailable_for_an_empty_query_without_calling_the_llm() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let server = ChatFixtureServer::start_sequence(vec![]);
+        let config = repowise_llm::LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
+            api_key: None,
+        };
+        let router = app_with_llm_config(root, Some(config));
+        let (status, json) = get_with_router(router, "/api/search-semantic?q=").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert!(
+            server.requests().is_empty(),
+            "an empty query must not call the LLM endpoint at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_search_semantic_returns_cited_files_when_llm_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let embeddings_response =
+            r#"{"data": [{"embedding": [1.0, 0.0]}, {"embedding": [1.0, 0.0]}]}"#;
+        let server = ChatFixtureServer::start_sequence(vec![embeddings_response]);
+        let config = repowise_llm::LlmConfig {
+            base_url: server.base_url(),
+            model: "smart".to_string(),
+            embedding_model: "embed".to_string(),
+            api_key: None,
+        };
+
+        let router = app_with_llm_config(root, Some(config));
+        let (status, json) =
+            get_with_router(router, "/api/search-semantic?q=what+handles+auth").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        assert_eq!(json["files"], serde_json::json!(["busy.rs"]));
     }
 
     #[tokio::test]

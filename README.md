@@ -2909,7 +2909,7 @@ to check for.
 
 - **JSON endpoints**: `GET /api/overview`, `/api/health`, `/api/hotspots`,
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
-  `/api/search`, `/api/graph`, `/api/graph-modules`, `/api/ownership`, `/api/dead-code`,
+  `/api/search`, `/api/search-semantic`, `/api/graph`, `/api/graph-modules`, `/api/ownership`, `/api/dead-code`,
   `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`,
   `/api/external-deps`, `/api/commits`, `/api/commit-risk`,
   `/api/communities`, plus
@@ -2930,7 +2930,15 @@ to check for.
   with more dependents (`repowise-graph`'s already-computed
   `dependents_of`) and symbols with more callers (`call_in_degree`)
   rank first, no new analysis or network call needed, so instant
-  search stays instant; `/api/graph` returns the file-level import
+  search stays instant; `/api/search-semantic?q=<term>` (issue #357) is
+  the search box's semantic fallback — embeddings-based retrieval
+  (reusing `POST /api/chat`'s own `repowise_llm::retrieve`), meant to
+  be called only once `/api/search` has already come back empty for
+  the settled query, not on every keystroke; returns `{"available":
+  bool, "files": [...]}`, `available: false` when no LLM is configured
+  or embeddings retrieval degraded to keyword matching internally
+  (nothing new to offer beyond what `/api/search` already tried);
+  `/api/graph` returns the file-level import
   graph (nodes + edges), truncated to the 150 most-connected files
   (`"truncated": true` when cut down) so a large repo's graph stays
   renderable; `/api/graph-modules` (issue #354) returns the identical
@@ -3079,6 +3087,21 @@ to check for.
   symbol results are links like file results, since a result you can't act on
   is half a result.
 
+  **Semantic fallback** (issue #357): when the substring search comes back
+  empty for the settled query, the same resource makes one further,
+  sequential call to `/api/search-semantic` — never on every keystroke,
+  only once the fast path has already found nothing. Two design questions
+  the issue itself left open, resolved here: **automatic fallback, not an
+  explicit mode toggle** — no new UI element to discover, and it can't
+  reintroduce issue #63's per-keystroke latency concern, since it's gated
+  behind "the fast path already ran and found nothing" rather than firing
+  alongside it; **single-repo only**, matching `/api/search`'s own scope —
+  federated semantic search across a workspace is issue #337's concern, not
+  this one. Semantic results are files only (this port's embedding index is
+  file-granularity, the same one chat's retrieval already reuses) and are
+  labeled "related by meaning" rather than mixed silently into the exact-match
+  list, so a result you'd never have typed doesn't read as if you had.
+
 - **Files view** (issue #261) renders `GET /api/files` as a treemap: area
   proportional to a file's line count, fill by health band. It answers what the
   ranked tables can't — where the mass of the codebase sits, and whether the
@@ -3132,7 +3155,11 @@ to check for.
   and failing independently so a file with no wiki page yet still shows
   whatever ownership/decision data exists instead of one shared error.
   A **Ctrl/Cmd+K instant search box** live-queries `/api/search` as you
-  type and opens the same panel for a matching file. A
+  type and opens the same panel for a matching file; if that comes back
+  empty for the settled query, it separately calls
+  `/api/search-semantic` (issue #357) and, when available, shows those
+  results labeled "related by meaning" rather than silently mixing them
+  in with exact matches. A
   **dependency-graph view** renders `/api/graph` as an SVG, laid out
   client-side with a small Fruchterman-Reingold-style force-directed
   simulation (nodes repel each other, edges act as springs, gently

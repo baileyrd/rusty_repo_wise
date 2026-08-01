@@ -531,6 +531,21 @@ struct CommitRisk {
     score: f64,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+struct Community {
+    id: usize,
+    files: Vec<String>,
+    file_count: usize,
+    total_lines: usize,
+    dominant_language: String,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Communities {
+    communities: Vec<Community>,
+    truncated: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ChatTurn {
     role: String,
@@ -1848,6 +1863,7 @@ enum Route {
     Coupling,
     ExternalDeps,
     Commits,
+    Communities,
     Chat,
     Usage,
     Settings,
@@ -1888,6 +1904,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
     (Route::Coupling, "coupling", "Coupling"),
     (Route::ExternalDeps, "dependencies", "Dependencies"),
     (Route::Commits, "commits", "Commits"),
+    (Route::Communities, "map", "Map"),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
     (Route::Settings, "settings", "Settings"),
@@ -2395,6 +2412,104 @@ fn GraphSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                                         {node_marks}
                                     </svg>
                                 </div>
+                            }
+                            .into_any()
+                        }
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// The Architecture section's Map sub-view (issue #352): Louvain-
+/// detected communities within the dependency graph (`/api/communities`),
+/// laid out as a treemap sized by code volume -- reusing the exact same
+/// `squarify` layout `FilesSection`'s treemap already uses, just with
+/// one tile per community instead of one tile per file.
+#[component]
+fn CommunitiesSection() -> impl IntoView {
+    let communities = LocalResource::new(|| fetch_json::<Communities>("/api/communities"));
+    const W: f64 = 900.0;
+    const H: f64 = 420.0;
+
+    view! {
+        <h2>"Map"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                communities
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(c) if c.communities.is_empty() => {
+                            view! { <p class="empty">"No files to map."</p> }.into_any()
+                        }
+                        Ok(c) => {
+                            let values: Vec<f64> =
+                                c.communities.iter().map(|e| e.total_lines as f64).collect();
+                            let tiles = squarify(&values, W, H);
+                            let entries = c.communities.clone();
+                            view! {
+                                <p>
+                                    {format!(
+                                        "{} detected communit{} across the dependency graph. \
+                                         Area is proportional to total lines of code.",
+                                        entries.len(),
+                                        if entries.len() == 1 { "y" } else { "ies" },
+                                    )}
+                                </p>
+                                {c.truncated.then(|| view! {
+                                    <p class="empty">
+                                        {format!(
+                                            "Showing the {} largest communities.",
+                                            entries.len(),
+                                        )}
+                                    </p>
+                                })}
+                                <svg
+                                    viewBox=format!("0 0 {W} {H}")
+                                    style="width: 100%; height: auto; border: 1px solid #8884;"
+                                    role="img"
+                                >
+                                    {tiles.into_iter().filter_map(|t| {
+                                        let e = entries.get(t.index)?.clone();
+                                        let fill = language_color(&e.dominant_language);
+                                        let sample: Vec<&str> = e.files.iter()
+                                            .take(5)
+                                            .map(String::as_str)
+                                            .collect();
+                                        let more = if e.file_count > sample.len() {
+                                            format!(", +{} more", e.file_count - sample.len())
+                                        } else {
+                                            String::new()
+                                        };
+                                        let label = format!(
+                                            "{} file(s), {} line(s), mostly {} -- {}{more}",
+                                            e.file_count, e.total_lines, e.dominant_language,
+                                            sample.join(", "),
+                                        );
+                                        let short_label = format!("#{}", e.id);
+                                        Some(view! {
+                                            <g>
+                                                <title>{label}</title>
+                                                <rect
+                                                    x=t.x y=t.y width=t.w height=t.h
+                                                    fill=fill
+                                                    stroke="#fff"
+                                                    stroke-width="1"
+                                                />
+                                                {(t.w > 24.0 && t.h > 14.0).then(|| view! {
+                                                    <text
+                                                        x=t.x + 4.0 y=t.y + 14.0
+                                                        font-size="10"
+                                                        fill="#fff"
+                                                    >
+                                                        {short_label}
+                                                    </text>
+                                                })}
+                                            </g>
+                                        })
+                                    }).collect::<Vec<_>>()}
+                                </svg>
                             }
                             .into_any()
                         }
@@ -3800,6 +3915,7 @@ fn App() -> impl IntoView {
             Route::Coupling => view! { <CouplingSection selected=selected /> }.into_any(),
             Route::ExternalDeps => view! { <ExternalDepsSection selected=selected /> }.into_any(),
             Route::Commits => view! { <CommitsSection /> }.into_any(),
+            Route::Communities => view! { <CommunitiesSection /> }.into_any(),
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),

@@ -2002,6 +2002,39 @@ doc-coverage`: `repowise external-deps` (`repowise-cli`), `GET
 /api/external-deps` (`repowise-server`), and `get_external_deps`
 (`repowise-mcp`).
 
+## Community detection (Map sub-view)
+
+Upstream's Architecture section has five sub-views: Map, Explore,
+Dependencies, Symbols, Coupling (issue #352). Explore, Dependencies,
+and Coupling are covered above; Map — "the detected communities within
+the dependency graph laid out on a module map, with sizing proportional
+to code volume in each component," per a direct read of upstream's own
+`docs/start/DASHBOARD.md` — needed a capability this port never had at
+all: community detection over a graph.
+
+`repowise_graph::detect_communities` implements standard multi-level
+Louvain modularity optimization (Blondel et al., 2008) — repeated
+local-moving passes (move each file into whichever neighboring
+community most increases modularity) followed by aggregation (collapse
+each community into a single super-node and repeat), until aggregation
+stops reducing the node count. It's generic over node type, not tied to
+files specifically, and fully deterministic (candidate communities are
+evaluated in sorted order, so ties resolve the same way every run).
+
+Dogfooded against this port's own ~117-file, ~20-crate workspace: 10
+communities, each one grouping files that genuinely import each other
+— e.g. `repowise-external-deps`'s five ecosystem-parsing files land in
+the same community as `repowise-core/src/deps.rs`, the model type they
+all depend on.
+
+Wired into `GET /api/communities` (`repowise-server`) and a `repowise-web`
+Map section that reuses the exact same `squarify` treemap layout the
+Files view already uses — one tile per community, sized by total lines
+of code, colored by dominant language. No CLI or MCP surface: this is
+a dashboard-visualization concern (a treemap needs a canvas), unlike
+the other Architecture sub-views' data, which is independently useful
+to an agent on its own.
+
 ## Git analytics
 
 `repowise hotspots`/`ownership`/`coupled` shell out to `git log`/`git
@@ -2839,7 +2872,8 @@ to check for.
   `/api/decisions`, `/api/symbols`, `/api/wiki-pages`, `/api/wiki`,
   `/api/search`, `/api/graph`, `/api/graph-modules`, `/api/ownership`, `/api/dead-code`,
   `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`,
-  `/api/external-deps`, `/api/commits`, `/api/commit-risk`, plus
+  `/api/external-deps`, `/api/commits`, `/api/commit-risk`,
+  `/api/communities`, plus
   `POST /api/chat` — the same data `repowise
   overview`/`health`/`hotspots`/`decisions` already compute, plus the
   full symbol list, as JSON. File paths are always relative to `PATH`,
@@ -2864,7 +2898,11 @@ to check for.
   shape aggregated to directory granularity — a file's parent directory
   becomes its "module" node, edges dedupe to one per module pair, and a
   module's `language` is whichever language is most common among its
-  files; `/api/ownership?path=<rel>` returns one file's git-blame
+  files; `/api/communities` (issue #352's Map sub-view) runs Louvain
+  modularity-based community detection over the same import graph and
+  returns one entry per detected community — its files, total lines of
+  code, and dominant language — ranked largest-first and capped at 150
+  (`"truncated": true` when cut down); `/api/ownership?path=<rel>` returns one file's git-blame
   author breakdown (`{"available": false}` for a non-git-repo or
   unindexed path, same degrade-gracefully convention); `/api/decisions`
   takes an optional `?file=<rel>` to filter to decisions linked to one
@@ -3068,7 +3106,13 @@ to check for.
   exposes beyond this port's existing file-level graph is thin (mostly
   a missing "module" grouping layer) relative to that renderer's cost,
   so this covers the missing layer as a toggle instead of building the
-  full zoomable canvas. A
+  full zoomable canvas. A **Map section** (issue #352) renders
+  `/api/communities` as a treemap — reusing the exact same `squarify`
+  layout the Files treemap already uses, one tile per detected
+  community, area proportional to total lines of code, colored by the
+  community's dominant language; each tile's tooltip names its file
+  count and a sample of member files. See "Community detection (Map
+  sub-view)" below for what this is actually computing. A
   **dead-code section** lists `/api/dead-code`'s candidates with a
   minimum-confidence filter, each risk factor available as a tooltip. A
   **refactoring-candidates section** (issue #355) lists

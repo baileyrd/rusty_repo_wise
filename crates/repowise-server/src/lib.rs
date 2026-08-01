@@ -570,6 +570,35 @@ struct GraphDto {
 /// which is also the most useful part of the graph to look at.
 const GRAPH_NODE_LIMIT: usize = 150;
 
+/// The Architecture section's Map sub-view (issue #352): detected
+/// communities within the dependency graph, sized by code volume.
+#[derive(Serialize)]
+struct CommunityDto {
+    /// Rank by size, largest first -- stable across a call since
+    /// `detect_communities` sorts deterministically.
+    id: usize,
+    /// Repo-relative file paths, sorted.
+    files: Vec<String>,
+    file_count: usize,
+    total_lines: usize,
+    /// Whichever language is most common among the community's files
+    /// (alphabetical tiebreak for determinism).
+    dominant_language: String,
+}
+
+#[derive(Serialize)]
+struct CommunitiesDto {
+    communities: Vec<CommunityDto>,
+    /// `true` when more communities were found than `COMMUNITIES_LIMIT`
+    /// and the list below was cut down to the largest ones.
+    truncated: bool,
+}
+
+/// However fragmented a repo's import graph is, a module map with more
+/// tiles than this stops being a map -- same reasoning as
+/// `GRAPH_NODE_LIMIT`, applied to communities instead of raw files.
+const COMMUNITIES_LIMIT: usize = 150;
+
 #[derive(Deserialize)]
 struct OwnershipQuery {
     path: String,
@@ -1414,6 +1443,77 @@ async fn get_graph_modules(State(state): State<AppState>) -> Result<Json<GraphDt
     Ok(Json(GraphDto {
         nodes,
         edges,
+        truncated,
+    }))
+}
+
+/// The Architecture section's Map sub-view (issue #352): Louvain
+/// modularity-based community detection over the file-level import
+/// graph, sized by code volume -- upstream's own words, per its
+/// `docs/start/DASHBOARD.md`: "the detected communities within the
+/// dependency graph laid out on a module map, with sizing proportional
+/// to code volume in each component." See
+/// `repowise_graph::community`'s module doc for the algorithm and why
+/// it's the right read of that description.
+async fn get_communities(State(state): State<AppState>) -> Result<Json<CommunitiesDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let graph = repowise_graph::RepoGraph::build(&index);
+
+    let nodes: Vec<PathBuf> = index.files.iter().map(|f| f.path.clone()).collect();
+    let mut edges: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for file in &index.files {
+        for dep in graph.dependencies_of(&file.path) {
+            edges.push((file.path.clone(), dep));
+        }
+    }
+
+    let communities = repowise_graph::detect_communities(&nodes, &edges);
+    let truncated = communities.len() > COMMUNITIES_LIMIT;
+
+    let lines_of: std::collections::HashMap<&Path, usize> = index
+        .files
+        .iter()
+        .map(|f| (f.path.as_path(), f.lines))
+        .collect();
+    let language_of: std::collections::HashMap<&Path, &str> = index
+        .files
+        .iter()
+        .map(|f| (f.path.as_path(), f.language.label()))
+        .collect();
+
+    let communities = communities
+        .into_iter()
+        .take(COMMUNITIES_LIMIT)
+        .enumerate()
+        .map(|(id, files)| {
+            let total_lines: usize = files
+                .iter()
+                .map(|f| lines_of.get(f.as_path()).copied().unwrap_or(0))
+                .sum();
+            let mut language_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for f in &files {
+                if let Some(&language) = language_of.get(f.as_path()) {
+                    *language_counts.entry(language).or_insert(0) += 1;
+                }
+            }
+            let dominant_language = language_counts
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
+                .map(|(language, _)| language.to_string())
+                .unwrap_or_default();
+            CommunityDto {
+                id,
+                file_count: files.len(),
+                total_lines,
+                dominant_language,
+                files: files.iter().map(|f| relative(&state.root, f)).collect(),
+            }
+        })
+        .collect();
+
+    Ok(Json(CommunitiesDto {
+        communities,
         truncated,
     }))
 }
@@ -2557,6 +2657,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph))
         .route("/api/graph-modules", get(get_graph_modules))
+        .route("/api/communities", get(get_communities))
         .route("/api/ownership", get(get_ownership))
         .route("/api/symbol", get(get_symbol_detail))
         .route("/api/decision", get(get_decision_detail))
@@ -3189,6 +3290,90 @@ mod tests {
             .collect();
         assert_eq!(nodes, vec!["."], "both root-level files share module \".\"");
         assert_eq!(json["edges"], serde_json::json!([]));
+    }
+
+    /// Two triangles of mutually-importing files joined by a single
+    /// bridge import -- the same canonical toy case
+    /// `repowise_graph::community`'s own tests use, built here as a
+    /// real `RepoIndex` to exercise `/api/communities`' server-side
+    /// wiring (line-count sizing, dominant-language labeling, relative
+    /// paths) rather than the algorithm itself.
+    fn index_with_two_triangle_clusters(root: &Path) -> RepoIndex {
+        let names = ["a1", "a2", "a3", "b1", "b2", "b3"];
+        for name in names {
+            std::fs::write(root.join(format!("{name}.rs")), "// f\n").unwrap();
+        }
+        let import = |to: &str| repowise_core::ImportRef {
+            path: to.to_string(),
+            line: 1,
+            resolved_file: Some(root.join(format!("{to}.rs"))),
+        };
+        let file = |name: &str, imports: Vec<repowise_core::ImportRef>, lines: usize| {
+            repowise_core::FileRecord {
+                path: root.join(format!("{name}.rs")),
+                language: repowise_core::Language::Rust,
+                lines,
+                symbols: vec![],
+                imports,
+                calls: vec![],
+                field_accesses: vec![],
+            }
+        };
+        let index = RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![
+                file("a1", vec![import("a2"), import("a3")], 10),
+                file("a2", vec![], 20),
+                file("a3", vec![], 30),
+                file("b1", vec![import("b2"), import("b3")], 40),
+                file("b2", vec![], 50),
+                file("b3", vec![import("a1")], 60),
+            ],
+            other_files: 0,
+            indexed_commit: None,
+        };
+        index.save(root).unwrap();
+        index
+    }
+
+    #[tokio::test]
+    async fn get_communities_splits_two_bridged_triangles_and_sizes_by_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_two_triangle_clusters(&root);
+
+        let (status, json) = get(root, "/api/communities").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["truncated"], false);
+        let communities = json["communities"].as_array().unwrap();
+        assert_eq!(communities.len(), 2, "{communities:?}");
+        for community in communities {
+            assert_eq!(community["file_count"], 3);
+            assert_eq!(community["dominant_language"], "Rust");
+            let files = community["files"].as_array().unwrap();
+            assert_eq!(files.len(), 3);
+        }
+        let total_lines: i64 = communities
+            .iter()
+            .map(|c| c["total_lines"].as_i64().unwrap())
+            .sum();
+        assert_eq!(total_lines, 10 + 20 + 30 + 40 + 50 + 60);
+    }
+
+    #[tokio::test]
+    async fn get_communities_with_no_imports_is_one_community_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/communities").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let communities = json["communities"].as_array().unwrap();
+        assert_eq!(communities.len(), 1, "{communities:?}");
+        assert_eq!(communities[0]["file_count"], 1);
+        assert_eq!(communities[0]["files"], serde_json::json!(["busy.rs"]));
     }
 
     /// A repo with one file containing one commented, uncommented-name

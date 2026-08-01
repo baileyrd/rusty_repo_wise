@@ -2035,6 +2035,45 @@ a dashboard-visualization concern (a treemap needs a canvas), unlike
 the other Architecture sub-views' data, which is independently useful
 to an agent on its own.
 
+## Knowledge Graph (semantic zoom)
+
+Upstream's dashboard has a distinct **Knowledge Graph** view (issue
+#354), separate from the Architecture section entirely: "a
+continuous-zoom canvas over the full graph: repo at the top, then
+modules, files, and symbols as you zoom, rendered by a custom camera
+and culling engine so it stays smooth on large repos," answering
+"where does this file or symbol sit in the whole system?" Its legacy
+`/c4`/`/zoom` URL redirects are a tell — it evolved from a C4-model-
+style architecture diagram, generalized to repo → module → file →
+symbol.
+
+**A literal continuous-zoom camera with frustum culling wasn't built.**
+That's a real rendering engine — smooth pan/zoom math, level-of-detail
+culling for performance — a different kind of project than anything
+else in this port, and disproportionate to the value over what's here
+instead: a **semantic zoom**. Click a community tile to drill into its
+files; click a file tile to drill into its symbols; a breadcrumb climbs
+back out. Same repo → community → file → symbol hierarchy, same
+question answered, no bespoke renderer.
+
+No new data was needed: each level filters data another view already
+fetches — `/api/communities` (communities, from the Map sub-view
+above), `/api/files` (per-file lines/language, from the Files
+treemap), `/api/symbols` (now carrying `end_line` alongside
+`start_line`, so a symbol's line span can size its tile) — client-side,
+rather than the server growing a community-scoped or file-scoped
+endpoint. Symbol-level tiles are colored by kind (function/method/
+struct/...) rather than language, since every tile at that level
+already shares one file's one language.
+
+**Left out, and why:** deep-linking (upstream's `?focus=<node>`) isn't
+implemented — jumping straight to a specific file or symbol's position
+in the hierarchy on page load is a real feature, just not this pass's.
+`repowise-web`'s hash-routing already supports arbitrary query params
+per route (see `parse_hash_full`), so adding it later is a matter of
+resolving a `?focus=<path>` into "which community contains this file"
+and pre-selecting that drill-down path, not a structural change.
+
 ## Git analytics
 
 `repowise hotspots`/`ownership`/`coupled` shell out to `git log`/`git
@@ -2902,7 +2941,10 @@ to check for.
   modularity-based community detection over the same import graph and
   returns one entry per detected community — its files, total lines of
   code, and dominant language — ranked largest-first and capped at 150
-  (`"truncated": true` when cut down); `/api/ownership?path=<rel>` returns one file's git-blame
+  (`"truncated": true` when cut down); `/api/symbols` gained `end_line`
+  alongside its existing `start_line` (issue #354, for the Knowledge
+  Graph view's symbol-level tile sizing — every other consumer just
+  ignores the new field); `/api/ownership?path=<rel>` returns one file's git-blame
   author breakdown (`{"available": false}` for a non-git-repo or
   unindexed path, same degrade-gracefully convention); `/api/decisions`
   takes an optional `?file=<rel>` to filter to decisions linked to one
@@ -3099,14 +3141,20 @@ to check for.
   **"Group by module (directory)" checkbox** (issue #354) toggles the
   same view onto `/api/graph-modules` instead — the identical
   layout/rendering code reused unchanged, since both endpoints share
-  one response shape. Scoped narrowly on purpose: reading upstream's
-  own docs found its Knowledge Graph view is a full continuous-zoom
-  canvas (repo → module → file → symbol) with a custom camera/culling
-  renderer for large-repo performance — the marginal new *fact* it
-  exposes beyond this port's existing file-level graph is thin (mostly
-  a missing "module" grouping layer) relative to that renderer's cost,
-  so this covers the missing layer as a toggle instead of building the
-  full zoomable canvas. A **Map section** (issue #352) renders
+  one response shape. Reading upstream's own docs found its Knowledge
+  Graph view is a full continuous-zoom canvas (repo → module → file →
+  symbol) with a custom camera/culling renderer for large-repo
+  performance — the graph toggle above covers the cheap missing-layer
+  part of that (module grouping); the **Knowledge Graph section**
+  itself (issue #354) covers the rest as a *semantic* zoom instead of a
+  literal camera: click a community tile to drill into its files, click
+  a file tile to drill into its symbols, a breadcrumb to climb back
+  out — same repo→community→file→symbol hierarchy, same "where does
+  this sit in the whole system" question, without a bespoke rendering
+  engine. Each level reuses data another view already fetches
+  (`/api/communities`, `/api/files`, `/api/symbols`) filtered
+  client-side, so no new community-scoped or file-scoped endpoint was
+  needed. A **Map section** (issue #352) renders
   `/api/communities` as a treemap — reusing the exact same `squarify`
   layout the Files treemap already uses, one tile per detected
   community, area proportional to total lines of code, colored by the

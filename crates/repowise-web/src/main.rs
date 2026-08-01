@@ -385,6 +385,7 @@ struct Symbol {
     kind: String,
     file: String,
     start_line: usize,
+    end_line: usize,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -1864,6 +1865,7 @@ enum Route {
     ExternalDeps,
     Commits,
     Communities,
+    KnowledgeGraph,
     Chat,
     Usage,
     Settings,
@@ -1905,6 +1907,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
     (Route::ExternalDeps, "dependencies", "Dependencies"),
     (Route::Commits, "commits", "Commits"),
     (Route::Communities, "map", "Map"),
+    (Route::KnowledgeGraph, "knowledge-graph", "Knowledge Graph"),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
     (Route::Settings, "settings", "Settings"),
@@ -2517,6 +2520,278 @@ fn CommunitiesSection() -> impl IntoView {
                     })
             }}
         </Suspense>
+    }
+}
+
+/// Color for a symbol-level treemap tile, by kind rather than by
+/// language -- every tile at that level already shares one file's one
+/// language, so language would be uninformative there. Values match
+/// `repowise_core::SymbolKind::label`.
+fn symbol_kind_color(kind: &str) -> &'static str {
+    match kind {
+        "function" => "#4c72b0",
+        "method" => "#55a868",
+        "struct" => "#c44e52",
+        "class" => "#8172b2",
+        "enum" => "#ccb974",
+        "trait" => "#64b5cd",
+        "module" => "#937860",
+        "mixin" => "#da8bc3",
+        _ => "#8884",
+    }
+}
+
+/// One level of the Knowledge Graph's zoom hierarchy (issue #354).
+/// Carries the state needed to render that level *and* to return to
+/// it from a deeper level without refetching -- `Files`/`Symbols` both
+/// keep the `community_id` (and `Symbols` additionally keeps the file
+/// list) they descended from.
+#[derive(Clone, Debug, PartialEq)]
+enum KnowledgeGraphLevel {
+    Communities,
+    Files {
+        community_id: usize,
+        files: Vec<String>,
+    },
+    Symbols {
+        community_id: usize,
+        files: Vec<String>,
+        file: String,
+    },
+}
+
+/// The Knowledge Graph view (issue #354): "where does this file or
+/// symbol sit in the whole system?" Upstream's own version is a full
+/// continuous-zoom canvas (repo → module → file → symbol) with a
+/// custom camera/culling engine for smooth panning on large repos --
+/// deliberately not what this is. This is a **semantic** zoom instead:
+/// click a tile to drill into it (swapping in a treemap of what's
+/// inside), a breadcrumb to climb back out. Same hierarchy, same
+/// question answered, without building a bespoke rendering engine for
+/// it -- see the README's "Community detection (Map sub-view)" section
+/// for the fuller reasoning behind that tradeoff (made there for the
+/// Map sub-view, and it applies here for the same reason).
+///
+/// No new data needed beyond what `/api/communities`/`/api/files`/
+/// `/api/symbols` (each already used by another view) already provide
+/// -- each level filters the previous level's already-fetched data
+/// client-side rather than the server needing a new
+/// community-scoped/file-scoped endpoint.
+#[component]
+fn KnowledgeGraphSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let level = RwSignal::new(KnowledgeGraphLevel::Communities);
+    let communities = LocalResource::new(|| fetch_json::<Communities>("/api/communities"));
+    let files = LocalResource::new(|| fetch_json::<Files>("/api/files"));
+    let symbols = LocalResource::new(|| fetch_json::<Vec<Symbol>>("/api/symbols"));
+
+    const W: f64 = 900.0;
+    const H: f64 = 420.0;
+
+    view! {
+        <h2>"Knowledge Graph"</h2>
+        <p class="empty">
+            "Where does this file or symbol sit in the whole system? Click a tile to \
+             zoom in; use the breadcrumb to zoom back out."
+        </p>
+        <p>
+            {move || {
+                let current = level.get();
+                view! {
+                    <a href="#" on:click=move |ev| {
+                        ev.prevent_default();
+                        level.set(KnowledgeGraphLevel::Communities);
+                    }>"Repo"</a>
+                    {match current {
+                        KnowledgeGraphLevel::Communities => ().into_any(),
+                        KnowledgeGraphLevel::Files { community_id, .. } => {
+                            view! { <span>{format!(" / Community #{community_id}")}</span> }.into_any()
+                        }
+                        KnowledgeGraphLevel::Symbols { community_id, files, file } => {
+                            let label = format!(" / Community #{community_id}");
+                            let file_label = format!(" / {file}");
+                            view! {
+                                <a href="#" on:click=move |ev| {
+                                    ev.prevent_default();
+                                    level.set(KnowledgeGraphLevel::Files {
+                                        community_id,
+                                        files: files.clone(),
+                                    });
+                                }>{label}</a>
+                                <span>{file_label}</span>
+                            }.into_any()
+                        }
+                    }}
+                }
+            }}
+        </p>
+        {move || match level.get() {
+            KnowledgeGraphLevel::Communities => view! {
+                <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+                    {move || {
+                        communities.get().map(|result| match result.take() {
+                            Ok(c) if c.communities.is_empty() => {
+                                view! { <p class="empty">"No files to show."</p> }.into_any()
+                            }
+                            Ok(c) => {
+                                let values: Vec<f64> =
+                                    c.communities.iter().map(|e| e.total_lines as f64).collect();
+                                let tiles = squarify(&values, W, H);
+                                let entries = c.communities.clone();
+                                view! {
+                                    <svg
+                                        viewBox=format!("0 0 {W} {H}")
+                                        style="width: 100%; height: auto; border: 1px solid #8884;"
+                                        role="img"
+                                    >
+                                        {tiles.into_iter().filter_map(|t| {
+                                            let e = entries.get(t.index)?.clone();
+                                            let fill = language_color(&e.dominant_language);
+                                            let label = format!(
+                                                "Community #{}: {} file(s), {} line(s), mostly {}",
+                                                e.id, e.file_count, e.total_lines, e.dominant_language,
+                                            );
+                                            let community_id = e.id;
+                                            let community_files = e.files.clone();
+                                            Some(view! {
+                                                <g
+                                                    style="cursor: pointer"
+                                                    on:click=move |_| level.set(KnowledgeGraphLevel::Files {
+                                                        community_id,
+                                                        files: community_files.clone(),
+                                                    })
+                                                >
+                                                    <title>{label}</title>
+                                                    <rect
+                                                        x=t.x y=t.y width=t.w height=t.h
+                                                        fill=fill stroke="#fff" stroke-width="1"
+                                                    />
+                                                </g>
+                                            })
+                                        }).collect::<Vec<_>>()}
+                                    </svg>
+                                }
+                                .into_any()
+                            }
+                            Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                        })
+                    }}
+                </Suspense>
+            }.into_any(),
+            KnowledgeGraphLevel::Files { community_id, files: file_list } => view! {
+                <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+                    {move || {
+                        let file_list = file_list.clone();
+                        files.get().map(move |result| match result.take() {
+                            Ok(all) => {
+                                let mut entries: Vec<FileEntry> = all.files.into_iter()
+                                    .filter(|f| file_list.contains(&f.path))
+                                    .collect();
+                                entries.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.path.cmp(&b.path)));
+                                if entries.is_empty() {
+                                    return view! { <p class="empty">"No files in this community."</p> }.into_any();
+                                }
+                                let values: Vec<f64> = entries.iter().map(|e| e.lines as f64).collect();
+                                let tiles = squarify(&values, W, H);
+                                view! {
+                                    <svg
+                                        viewBox=format!("0 0 {W} {H}")
+                                        style="width: 100%; height: auto; border: 1px solid #8884;"
+                                        role="img"
+                                    >
+                                        {tiles.into_iter().filter_map(|t| {
+                                            let e = entries.get(t.index)?.clone();
+                                            let fill = language_color(&e.language);
+                                            let label = format!("{} -- {} lines, {}", e.path, e.lines, e.language);
+                                            let file_list = file_list.clone();
+                                            let file_path = e.path.clone();
+                                            Some(view! {
+                                                <g
+                                                    style="cursor: pointer"
+                                                    on:click=move |_| level.set(KnowledgeGraphLevel::Symbols {
+                                                        community_id,
+                                                        files: file_list.clone(),
+                                                        file: file_path.clone(),
+                                                    })
+                                                >
+                                                    <title>{label}</title>
+                                                    <rect
+                                                        x=t.x y=t.y width=t.w height=t.h
+                                                        fill=fill stroke="#fff" stroke-width="1"
+                                                    />
+                                                </g>
+                                            })
+                                        }).collect::<Vec<_>>()}
+                                    </svg>
+                                }
+                                .into_any()
+                            }
+                            Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                        })
+                    }}
+                </Suspense>
+            }.into_any(),
+            KnowledgeGraphLevel::Symbols { file, .. } => view! {
+                <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+                    {move || {
+                        let file = file.clone();
+                        symbols.get().map(move |result| match result.take() {
+                            Ok(all) => {
+                                let mut entries: Vec<Symbol> = all.into_iter()
+                                    .filter(|s| s.file == file)
+                                    .collect();
+                                entries.sort_by(|a, b| {
+                                    let span_a = a.end_line.saturating_sub(a.start_line);
+                                    let span_b = b.end_line.saturating_sub(b.start_line);
+                                    span_b.cmp(&span_a).then_with(|| a.name.cmp(&b.name))
+                                });
+                                if entries.is_empty() {
+                                    return view! { <p class="empty">"No symbols in this file."</p> }.into_any();
+                                }
+                                let values: Vec<f64> = entries.iter()
+                                    .map(|s| (s.end_line.saturating_sub(s.start_line) + 1) as f64)
+                                    .collect();
+                                let tiles = squarify(&values, W, H);
+                                let file_for_link = file.clone();
+                                view! {
+                                    <p>
+                                        <a href="#" on:click=move |ev| {
+                                            ev.prevent_default();
+                                            selected.set(Some(file_for_link.clone()));
+                                        }>"Open this file's detail panel"</a>
+                                    </p>
+                                    <svg
+                                        viewBox=format!("0 0 {W} {H}")
+                                        style="width: 100%; height: auto; border: 1px solid #8884;"
+                                        role="img"
+                                    >
+                                        {tiles.into_iter().filter_map(|t| {
+                                            let s = entries.get(t.index)?.clone();
+                                            let fill = symbol_kind_color(&s.kind);
+                                            let lines = s.end_line.saturating_sub(s.start_line) + 1;
+                                            let label = format!(
+                                                "{} ({}) -- lines {}-{}, {lines} line(s)",
+                                                s.name, s.kind, s.start_line, s.end_line,
+                                            );
+                                            Some(view! {
+                                                <g>
+                                                    <title>{label}</title>
+                                                    <rect
+                                                        x=t.x y=t.y width=t.w height=t.h
+                                                        fill=fill stroke="#fff" stroke-width="1"
+                                                    />
+                                                </g>
+                                            })
+                                        }).collect::<Vec<_>>()}
+                                    </svg>
+                                }
+                                .into_any()
+                            }
+                            Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                        })
+                    }}
+                </Suspense>
+            }.into_any(),
+        }}
     }
 }
 
@@ -3916,6 +4191,7 @@ fn App() -> impl IntoView {
             Route::ExternalDeps => view! { <ExternalDepsSection selected=selected /> }.into_any(),
             Route::Commits => view! { <CommitsSection /> }.into_any(),
             Route::Communities => view! { <CommunitiesSection /> }.into_any(),
+            Route::KnowledgeGraph => view! { <KnowledgeGraphSection selected=selected /> }.into_any(),
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),

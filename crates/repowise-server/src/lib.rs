@@ -501,6 +501,10 @@ struct SymbolDto {
     kind: String,
     file: String,
     start_line: usize,
+    /// Added for the Knowledge Graph view's symbol-level treemap tier
+    /// (issue #354): `end_line - start_line + 1` is a symbol's line
+    /// span, the sizing value that level needs.
+    end_line: usize,
 }
 
 /// Every indexed file's path relative to `root`, restricted to those
@@ -1207,6 +1211,7 @@ async fn get_symbols(State(state): State<AppState>) -> Result<Json<Vec<SymbolDto
             kind: s.kind.label().to_string(),
             file: relative(&state.root, &s.file),
             start_line: s.start_line,
+            end_line: s.end_line,
         })
         .collect();
     symbols.sort_by(|a, b| a.file.cmp(&b.file).then(a.start_line.cmp(&b.start_line)));
@@ -1291,6 +1296,7 @@ async fn get_search(
                 kind: s.kind.label().to_string(),
                 file: relative(&state.root, &s.file),
                 start_line: s.start_line,
+                end_line: s.end_line,
             };
             (graph.call_in_degree(&s.id), dto)
         })

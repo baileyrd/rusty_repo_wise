@@ -6,6 +6,38 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #369 — Dashboard: Knowledge Graph, a semantic zoom (closes #354)
+**2026-08-01**
+
+- Closes out #354's remaining scope (the module-grouping toggle
+  shipped separately in PR #366). Upstream's Knowledge Graph is a full
+  continuous-zoom canvas (repo → module → file → symbol) with a custom
+  camera/culling engine for smooth panning on large repos -- legacy
+  `/c4`/`/zoom` URL redirects confirm it evolved from a C4-model-style
+  diagram.
+- **A literal camera/culling renderer wasn't built** -- real rendering-
+  engine work, disproportionate to the value here. Built a **semantic**
+  zoom instead: click a community tile to drill into its files, click a
+  file tile to drill into its symbols, a breadcrumb climbs back out.
+  Same repo → community → file → symbol hierarchy, same "where does
+  this sit in the whole system" question, no bespoke renderer.
+- No new server-side aggregation needed: each level filters data
+  another view already fetches (`/api/communities`, `/api/files`,
+  `/api/symbols`) client-side. `/api/symbols`/`get_symbols`/`SymbolDto`
+  gained `end_line` alongside the existing `start_line`, so a symbol's
+  line span can size its tile -- purely additive, every other consumer
+  ignores the new field.
+- `repowise-web`: new `#/knowledge-graph` section reusing the existing
+  `squarify` treemap layout at each level; symbol-level tiles are
+  colored by kind (function/method/struct/...) rather than language,
+  since every tile at that level already shares one file's language.
+- Deliberately left out: deep-linking (`?focus=<node>`). Noted as a
+  follow-up in the README rather than attempted here.
+- `README.md`: new "Knowledge Graph (semantic zoom)" section;
+  `ParityGaps.md` row #14 updated to closed; issue #354 closed.
+
+---
+
 ## PR #368 — Dashboard: Map sub-view, community detection (closes #352)
 **2026-08-01**
 

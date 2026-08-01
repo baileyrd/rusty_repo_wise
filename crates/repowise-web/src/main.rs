@@ -488,6 +488,24 @@ struct RefactorCandidates {
     total_matching: usize,
 }
 
+/// Mirrors `repowise-server`'s `SecurityFindingDto` wire shape
+/// (issue #360).
+#[derive(Deserialize, Clone, Debug)]
+struct SecurityFinding {
+    file: String,
+    line: usize,
+    kind: String,
+    /// `"high"`, `"medium"`, or `"low"`.
+    severity: String,
+    message: String,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Security {
+    findings: Vec<SecurityFinding>,
+    total_matching: usize,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 struct DocCoverageEntry {
     file: String,
@@ -1938,6 +1956,7 @@ enum Route {
     Graph,
     DeadCode,
     RefactorCandidates,
+    Security,
     Docs,
     Coupling,
     ExternalDeps,
@@ -1981,6 +2000,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
         "refactor-candidates",
         "Refactoring",
     ),
+    (Route::Security, "security", "Security"),
     (Route::Docs, "docs", "Docs"),
     (Route::Coupling, "coupling", "Coupling"),
     (Route::ExternalDeps, "dependencies", "Dependencies"),
@@ -3072,6 +3092,87 @@ fn RefactorCandidatesSection(selected: RwSignal<Option<String>>) -> impl IntoVie
                                                 <td>{c.rationale}</td>
                                             </tr>
                                         }
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Signature-based security findings (`/api/security`, issue #360) --
+/// upstream's dashboard describes its own equivalent as "the security
+/// findings table, by directory and by severity", so this mirrors that
+/// shape: a severity filter, findings sorted worst-first, files linking
+/// into the same file-detail panel every other findings view uses.
+/// Deliberately narrow (hardcoded-secret patterns only -- see
+/// `repowise-security`'s own module doc for why dependency-CVE checking
+/// and injection-shape detection aren't covered), so the empty state
+/// says so rather than reading as "this repo has no security issues".
+#[component]
+fn SecuritySection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let min_severity = RwSignal::new(String::new());
+    let security = LocalResource::new(move || {
+        let min = min_severity.get();
+        async move {
+            if min.is_empty() {
+                fetch_json::<Security>("/api/security").await
+            } else {
+                fetch_json_with_query::<Security>("/api/security", &[("min_severity", &min)]).await
+            }
+        }
+    });
+
+    view! {
+        <h2>"Security"</h2>
+        <p class="empty">
+            "Signature-based only: hardcoded AWS/GitHub/Slack credentials, PEM private-key \
+             blocks, and credential-shaped literal assignments. No dependency-CVE checking, \
+             no injection-shape detection -- a clean report here isn't a security clearance."
+        </p>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                security
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(s) if s.findings.is_empty() => {
+                            view! { <p class="empty">"No findings."</p> }.into_any()
+                        }
+                        Ok(s) => view! {
+                            <label for="security-min-severity">"Min severity: "</label>
+                            <select
+                                id="security-min-severity"
+                                on:change=move |ev| min_severity.set(event_target_value(&ev))
+                            >
+                                <option value="">"All"</option>
+                                <option value="high">"High"</option>
+                                <option value="medium">"Medium"</option>
+                                <option value="low">"Low"</option>
+                            </select>
+                            <p>{format!("{} finding(s).", s.total_matching)}</p>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"Severity"</th>
+                                        <th>"Kind"</th>
+                                        <th>"File"</th>
+                                        <th>"Line"</th>
+                                        <th>"What matched"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {s.findings.into_iter().map(|f| view! {
+                                        <tr>
+                                            <td>{f.severity}</td>
+                                            <td>{f.kind}</td>
+                                            <td>{file_cell(f.file, selected)}</td>
+                                            <td>{f.line}</td>
+                                            <td>{f.message}</td>
+                                        </tr>
                                     }).collect::<Vec<_>>()}
                                 </tbody>
                             </table>
@@ -4563,6 +4664,7 @@ fn App() -> impl IntoView {
             Route::RefactorCandidates => {
                 view! { <RefactorCandidatesSection selected=selected /> }.into_any()
             }
+            Route::Security => view! { <SecuritySection selected=selected /> }.into_any(),
             Route::Docs => view! { <DocsSection selected=selected /> }.into_any(),
             Route::Coupling => view! { <CouplingSection selected=selected /> }.into_any(),
             Route::ExternalDeps => view! { <ExternalDepsSection selected=selected /> }.into_any(),

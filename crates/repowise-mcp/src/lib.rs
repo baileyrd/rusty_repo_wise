@@ -6,7 +6,7 @@
 //! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`, `get_answer`,
 //! `get_dead_code`, `get_health`, `get_refactor_candidates`,
 //! `get_doc_coverage`, `get_coupling`, `get_external_deps`,
-//! `get_commits`, plus
+//! `get_commits`, `get_security_findings`, plus
 //! `list_repos`, `get_architecture` and `get_blast_radius` (the last
 //! seven have no counterpart in the reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
@@ -848,6 +848,39 @@ struct RefactorOutput {
     /// Total matching the requested `kind` filter, before `limit`
     /// truncated the list -- lets a caller tell "there were only 3"
     /// from "there were 3000 and you're seeing the strongest 20".
+    total_matching: usize,
+}
+
+/// Hard cap for `get_security_findings`, mirroring `/api/security`'s own
+/// `SECURITY_LIMIT`.
+const SECURITY_LIMIT: usize = 100;
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+struct SecurityParams {
+    /// Only return findings at or above this severity: `high`,
+    /// `medium`, or `low`. Omit for everything.
+    #[serde(default)]
+    min_severity: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct SecurityFindingOutput {
+    file: String,
+    line: usize,
+    /// `aws-access-key-id`, `private-key-block`, `github-token`,
+    /// `slack-token`, or `suspicious-assignment`.
+    kind: &'static str,
+    severity: &'static str,
+    /// Describes *what pattern matched* -- never the matched secret
+    /// text itself.
+    message: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct SecurityOutput {
+    findings: Vec<SecurityFindingOutput>,
+    /// Total matching `min_severity`, before truncation to
+    /// `SECURITY_LIMIT`.
     total_matching: usize,
 }
 
@@ -2224,6 +2257,59 @@ impl RepowiseServer {
         Ok(self.indexed(
             RefactorOutput {
                 candidates,
+                total_matching,
+            },
+            &index,
+            started,
+            cached,
+        ))
+    }
+
+    #[tool(
+        name = "get_security_findings",
+        description = "Signature-based security findings (issue #360): hardcoded/leaked-secret patterns -- AWS access key IDs, GitHub/Slack tokens, PEM private-key blocks, and credential-shaped literal assignments (filtered against a placeholder denylist). Deterministic, regex-only, no ML. Deliberately does NOT cover dependency-CVE checking (needs a live vulnerability feed this port has no infrastructure for) or injection-shape/insecure-pattern detection (needs real dataflow analysis this port doesn't have) -- see repowise-security's own module doc. Findings never include the matched secret text, only what pattern matched and where. `min_severity` (high/medium/low) filters; `total_matching` reports the count before the 100-finding cap."
+    )]
+    fn get_security_findings(
+        &self,
+        Parameters(SecurityParams { min_severity }): Parameters<SecurityParams>,
+    ) -> Result<Json<Envelope<SecurityOutput>>, ErrorData> {
+        let started = Instant::now();
+        let (index, _graph, cached) = self.load()?;
+
+        let min_rank = min_severity
+            .as_deref()
+            .map(|s| match s {
+                "high" => Ok(repowise_security::Severity::High),
+                "medium" => Ok(repowise_security::Severity::Medium),
+                "low" => Ok(repowise_security::Severity::Low),
+                other => Err(ErrorData::invalid_params(
+                    format!("min_severity must be high/medium/low, got {other:?}"),
+                    None,
+                )),
+            })
+            .transpose()?;
+
+        let mut findings = repowise_security::scan(&index);
+        if let Some(min_rank) = min_rank {
+            findings.retain(|f| f.severity >= min_rank);
+        }
+        let total_matching = findings.len();
+
+        let findings = findings
+            .into_iter()
+            .take(SECURITY_LIMIT)
+            .map(|f| SecurityFindingOutput {
+                file: display_rel(&f.file, &index.root),
+                line: f.line,
+                kind: f.kind.label(),
+                severity: f.severity.label(),
+                message: f.message,
+            })
+            .collect();
+
+        Ok(self.indexed(
+            SecurityOutput {
+                findings,
                 total_matching,
             },
             &index,
@@ -3740,6 +3826,68 @@ mod tests {
             .candidates
             .iter()
             .all(|c| matches!(&c.kind[..], "extract-duplicate")),);
+    }
+
+    #[test]
+    fn get_security_findings_finds_a_hardcoded_secret_and_never_echoes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("config.rs"),
+            "pub fn f() {}\nlet key = \"AKIAABCDEFGHIJKLMNOP\";\n",
+        )
+        .unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_security_findings(Parameters(SecurityParams::default()))
+            .unwrap();
+
+        assert_eq!(data.total_matching, 1);
+        assert_eq!(data.findings.len(), 1);
+        assert_eq!(data.findings[0].kind, "aws-access-key-id");
+        assert_eq!(data.findings[0].severity, "high");
+        assert_eq!(data.findings[0].file, "config.rs");
+        assert!(!data.findings[0].message.contains("AKIA"));
+    }
+
+    #[test]
+    fn get_security_findings_filters_by_min_severity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("config.rs"),
+            "let key = \"AKIAABCDEFGHIJKLMNOP\";\napi_key = \"sk_live_9f8a7b6c5d4e3f2a1b0c\"\n",
+        )
+        .unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_security_findings(Parameters(SecurityParams {
+                min_severity: Some("high".to_string()),
+            }))
+            .unwrap();
+
+        assert_eq!(data.total_matching, 1);
+        assert_eq!(data.findings[0].kind, "aws-access-key-id");
+    }
+
+    #[test]
+    fn get_security_findings_rejects_an_unknown_min_severity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, None);
+        let result = server.get_security_findings(Parameters(SecurityParams {
+            min_severity: Some("critical".to_string()),
+        }));
+        let Err(err) = result else {
+            panic!("expected an error for an unknown min_severity");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
 
     #[test]

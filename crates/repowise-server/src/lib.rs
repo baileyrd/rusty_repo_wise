@@ -707,6 +707,47 @@ struct RefactorCandidatesDto {
 /// Matches the `get_refactor_candidates` MCP tool's own default `limit`.
 const REFACTOR_CANDIDATES_LIMIT: usize = 20;
 
+#[derive(Deserialize)]
+struct SecurityQuery {
+    /// `high`, `medium`, or `low` -- everything at or above this
+    /// severity. Omit for everything.
+    #[serde(default)]
+    min_severity: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SecurityFindingDto {
+    file: String,
+    line: usize,
+    /// `aws-access-key-id`, `private-key-block`, `github-token`,
+    /// `slack-token`, or `suspicious-assignment` -- see
+    /// `repowise_security::SecurityFindingKind`.
+    kind: &'static str,
+    severity: &'static str,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct SecurityDto {
+    findings: Vec<SecurityFindingDto>,
+    /// How many findings matched `min_severity` before truncation to
+    /// `SECURITY_LIMIT` -- same "don't silently truncate" convention as
+    /// `RefactorCandidatesDto::total_matching`.
+    total_matching: usize,
+}
+
+/// Matches the `get_security_findings` MCP tool's own default `limit`.
+const SECURITY_LIMIT: usize = 100;
+
+fn security_severity_rank(s: &str) -> Option<repowise_security::Severity> {
+    match s {
+        "high" => Some(repowise_security::Severity::High),
+        "medium" => Some(repowise_security::Severity::Medium),
+        "low" => Some(repowise_security::Severity::Low),
+        _ => None,
+    }
+}
+
 #[derive(Serialize)]
 struct DocCoverageEntryDto {
     file: String,
@@ -2169,6 +2210,41 @@ async fn get_refactor_candidates(
     }))
 }
 
+async fn get_security(
+    State(state): State<AppState>,
+    Query(query): Query<SecurityQuery>,
+) -> Result<Json<SecurityDto>, ApiError> {
+    let index = RepoIndex::load(&state.root)?;
+    let mut findings = repowise_security::scan(&index);
+
+    if let Some(min) = query.min_severity.as_deref() {
+        let Some(min_rank) = security_severity_rank(min) else {
+            return Err(
+                anyhow::anyhow!("min_severity must be high/medium/low, got {min:?}").into(),
+            );
+        };
+        findings.retain(|f| f.severity >= min_rank);
+    }
+
+    let total_matching = findings.len();
+    let findings = findings
+        .into_iter()
+        .take(SECURITY_LIMIT)
+        .map(|f| SecurityFindingDto {
+            file: relative(&state.root, &f.file),
+            line: f.line,
+            kind: f.kind.label(),
+            severity: f.severity.label(),
+            message: f.message,
+        })
+        .collect();
+
+    Ok(Json(SecurityDto {
+        findings,
+        total_matching,
+    }))
+}
+
 async fn get_doc_coverage(State(state): State<AppState>) -> Result<Json<DocCoverageDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let report = repowise_docs::check_freshness(&index);
@@ -2992,6 +3068,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/coverage", get(get_coverage))
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/refactor-candidates", get(get_refactor_candidates))
+        .route("/api/security", get(get_security))
         .route("/api/doc-coverage", get(get_doc_coverage))
         .route("/api/saved", get(get_saved))
         .route("/api/chat", post(post_chat))
@@ -4381,6 +4458,79 @@ mod tests {
         index_with_an_import_cycle(&root);
 
         let (status, _json) = get(root, "/api/refactor-candidates?kind=nonsense").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_security_finds_a_hardcoded_aws_key_and_never_echoes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_busy_symbol(&root);
+        std::fs::write(
+            &index.files[0].path,
+            "pub fn busy() {}\nlet key = \"AKIAABCDEFGHIJKLMNOP\";\n",
+        )
+        .unwrap();
+
+        let (status, json) = get(root, "/api/security").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["total_matching"], 1);
+        let findings = json["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0]["kind"], "aws-access-key-id");
+        assert_eq!(findings[0]["severity"], "high");
+        assert_eq!(findings[0]["line"], 2);
+        assert_eq!(findings[0]["file"], "busy.rs");
+        let message = findings[0]["message"].as_str().unwrap();
+        assert!(
+            !message.contains("AKIA"),
+            "must never echo the secret: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_security_reports_no_findings_for_clean_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/security").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["total_matching"], 0);
+        assert_eq!(json["findings"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_security_filters_by_min_severity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_busy_symbol(&root);
+        std::fs::write(
+            &index.files[0].path,
+            "let key = \"AKIAABCDEFGHIJKLMNOP\";\napi_key = \"sk_live_9f8a7b6c5d4e3f2a1b0c\"\n",
+        )
+        .unwrap();
+
+        let (status, json) = get(root.clone(), "/api/security?min_severity=high").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["total_matching"], 1);
+        assert_eq!(json["findings"][0]["kind"], "aws-access-key-id");
+
+        let (status, json) = get(root, "/api/security?min_severity=medium").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["total_matching"], 2);
+    }
+
+    #[tokio::test]
+    async fn get_security_errors_on_an_invalid_min_severity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, _json) = get(root, "/api/security?min_severity=critical").await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }

@@ -20,6 +20,7 @@ members = [
     "crates/repowise-graphql",
     "crates/repowise-terraform",
     "crates/repowise-external-deps",
+    "crates/repowise-security",
     "crates/repowise-cli",
 ]
 

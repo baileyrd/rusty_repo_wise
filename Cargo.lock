@@ -1330,6 +1330,7 @@ dependencies = [
  "repowise-parser",
  "repowise-protobuf",
  "repowise-refactor",
+ "repowise-security",
  "repowise-server",
  "repowise-sql",
  "repowise-terraform",
@@ -1456,6 +1457,7 @@ dependencies = [
  "repowise-llm",
  "repowise-parser",
  "repowise-refactor",
+ "repowise-security",
  "repowise-workspace",
  "rmcp",
  "schemars",
@@ -1528,6 +1530,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "repowise-security"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "repowise-core",
+ "tempfile",
+]
+
+[[package]]
 name = "repowise-server"
 version = "0.1.0"
 dependencies = [
@@ -1545,6 +1556,7 @@ dependencies = [
  "repowise-llm",
  "repowise-parser",
  "repowise-refactor",
+ "repowise-security",
  "repowise-workspace",
  "ring",
  "serde",

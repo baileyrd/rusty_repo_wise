@@ -17,6 +17,7 @@ repowise-llm = { path = "../repowise-llm" }
 repowise-parser = { path = "../repowise-parser" }
 repowise-workspace = { path = "../repowise-workspace" }
 repowise-distill = { path = "../repowise-distill" }
+repowise-security = { path = "../repowise-security" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

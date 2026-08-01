@@ -379,7 +379,11 @@ repowise refactor [PATH]           # deterministic refactor candidates: import c
 repowise external-deps [PATH]      # third-party deps declared in Cargo.toml/package.json/
                                     #   composer.json/requirements.txt/pyproject.toml/go.mod
                                     #   (declared, not lockfile-resolved; see issue #353)
-repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_doc_coverage/get_coupling/get_external_deps/get_commits/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
+repowise security [PATH]           # signature-based findings: hardcoded AWS/GitHub/Slack
+                                    #   credentials, PEM private-key blocks, credential-shaped
+                                    #   literal assignments -- no CVE checking, no injection-shape
+                                    #   detection (see issue #360) -- --min-severity <high|medium|low>
+repowise serve [PATH]               # run an MCP server over stdio (get_overview/search_codebase/get_context/get_risk/get_change_risk/get_symbol/get_why/get_answer/get_dead_code/get_health/get_refactor_candidates/get_security_findings/get_doc_coverage/get_coupling/get_external_deps/get_commits/list_repos/get_architecture/get_blast_radius; every response carries a `_meta` staleness block)
                                      #   --workspace <FILE> to opt into list_repos/get_architecture/get_blast_radius (see "Multi-repo workspace support")
 repowise generate [PATH]            # add an LLM-written summary to each wiki page, and infer
                                     #   architectural decisions from code (opt-in, requires prior `docs`)
@@ -1603,6 +1607,66 @@ re-arrange the code is left to whoever reads the report.
 analysis runs first, and near-duplicate detection alone measured
 ~6 seconds on this port's own workspace (the same cost `repowise health`
 already pays for its `near-duplicate-code` marker).
+
+## Security findings
+
+`repowise security [PATH]` (`crates/repowise-security`) lists
+deterministic, signature-based security findings — the largest and most
+novel of the Round 2 parity gaps (issue #360), since unlike every other
+gap in that batch, this port had no security-scanning capability at all
+to build on.
+
+**Scope, and why it stops where it does.** Upstream's own docs describe
+security scanning as "a separate security layer" — an "adjacent axis"
+to Code Health, not folded into it — and its own tool-comparison table
+concedes "full SAST/SCA/secrets/IaC" scanning to dedicated tools rather
+than claiming it itself. No dedicated security-layer doc exists
+alongside upstream's `CODE_HEALTH.md`/`CHANGE_RISK.md`/etc.; its
+dashboard docs mention only "the security findings table, by directory
+and by severity" as a one-line sub-tab description, with no public
+specification of what it actually detects. Given that, this covers
+exactly one category — the one that's deterministic, well-understood,
+and needs no infrastructure this port doesn't already have:
+
+- **Hardcoded secrets/credentials**: known-prefix signatures (AWS
+  access key IDs, GitHub/Slack tokens, PEM private-key blocks) plus one
+  generic "suspicious assignment" heuristic (a credential-shaped field
+  name assigned a long quoted literal), filtered against a placeholder
+  denylist (`example`, `changeme`, `your_`, `xxx`, `<...>`, and similar)
+  to keep obvious non-secrets out.
+
+Two categories the issue's own open questions raised are deliberately
+**not** covered:
+
+- **Dependency CVE checking** needs a live vulnerability feed this port
+  has no infrastructure for, and a hardcoded snapshot would go stale
+  the day it shipped — a different problem than this port's static,
+  point-in-time analysis model solves. `repowise-external-deps`'s
+  declared-dependency inventory (issue #353) is the piece this would
+  need to build on if ever attempted.
+- **Insecure-pattern/injection-shape detection** (SQL injection shape,
+  etc.) needs real dataflow/taint analysis to keep false positives down
+  at any real precision — exactly the ground upstream's own comparison
+  table concedes to dedicated SAST tools. A regex-only approximation
+  would be too noisy to be worth shipping.
+
+**Findings never include the matched secret text** — every finding
+names the file, line, kind, and severity of what pattern matched, never
+the value itself. A security report is not the place to re-leak what it
+found.
+
+- `--min-severity <high|medium|low>` shows only findings at or above
+  that severity. High: known-prefix signatures (AWS/GitHub/Slack,
+  private-key blocks). Medium: the generic suspicious-assignment
+  heuristic, which trades some false positives for catching secrets
+  with no known-prefix signature.
+- Scans every indexed source file's current on-disk content (not just
+  parsed symbol data, since secrets live in string literals). Files the
+  index lists but that have since been deleted, or that aren't valid
+  UTF-8, are skipped rather than failing the whole scan. Non-source
+  files (`.env`, arbitrary config files) aren't scanned yet — this
+  port's index only tracks parsed source files by path, not every
+  file's path — noted here as a real limitation, not silently dropped.
 
 ## Docker build-stage extraction
 
@@ -2912,7 +2976,7 @@ to check for.
   `/api/search`, `/api/search-semantic`, `/api/graph`, `/api/graph-modules`, `/api/ownership`, `/api/dead-code`,
   `/api/refactor-candidates`, `/api/doc-coverage`, `/api/coupling`,
   `/api/external-deps`, `/api/commits`, `/api/commit-risk`,
-  `/api/communities`, `/api/saved`, plus
+  `/api/communities`, `/api/saved`, `/api/security`, plus
   `POST /api/chat` — the same data `repowise
   overview`/`health`/`hotspots`/`decisions` already compute, plus the
   full symbol list, as JSON. File paths are always relative to `PATH`,
@@ -2966,6 +3030,15 @@ to check for.
   `?kind=break-import-cycle|split-god-class|split-by-cohesion|extract-duplicate`
   filter, mirroring the `get_refactor_candidates` MCP tool's own shape
   (`total_matching` before the 20-candidate cap; issue #355);
+  `/api/security` returns signature-based security findings (hardcoded
+  AWS/GitHub/Slack credentials, PEM private-key blocks,
+  credential-shaped literal assignments -- see `repowise-security`'s own
+  module doc for why dependency-CVE checking and injection-shape
+  detection aren't covered) with an optional
+  `?min_severity=high|medium|low` filter, mirroring the
+  `get_security_findings` MCP tool's own shape (`total_matching` before
+  the 100-finding cap; issue #360); findings never carry the matched
+  secret text, only what pattern matched and where;
   `/api/doc-coverage` returns every indexed file's wiki-page freshness
   (`missing`/`fresh`/`stale`, counts plus a per-file list), mirroring
   the `get_doc_coverage` MCP tool's own shape (issue #351);
@@ -3230,7 +3303,13 @@ to check for.
   `/api/refactor-candidates`'s deterministic candidates — import cycles,
   god classes, low-cohesion classes, duplicate/near-duplicate functions —
   with a kind filter, each row's files linking into the same
-  file-detail panel. A **Docs section** (issue #351) lists
+  file-detail panel. A **Security section** (issue #360) lists
+  `/api/security`'s signature-based findings with a minimum-severity
+  filter, each row's file linking into the same file-detail panel — a
+  states-its-own-scope empty state ("no findings" is never phrased as a
+  clean bill of health, since this only covers hardcoded-secret
+  patterns) rather than implying broader coverage than it has. A
+  **Docs section** (issue #351) lists
   `/api/doc-coverage`'s missing/fresh/stale status for every indexed
   file, with a status filter, files linking into the same file-detail
   panel (which already renders a file's wiki content). A **Coupling

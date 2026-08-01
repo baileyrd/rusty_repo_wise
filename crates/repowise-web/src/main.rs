@@ -582,6 +582,13 @@ struct ChatRequest {
     history: Vec<ChatTurn>,
 }
 
+/// Mirrors `repowise-server`'s `UpdateHealthWeightsDto` wire shape
+/// (issue #359).
+#[derive(Serialize)]
+struct UpdateHealthWeights {
+    toml: String,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 struct ChatResponse {
     available: bool,
@@ -598,6 +605,7 @@ struct Settings {
     wiki_pages_available: bool,
     llm_configured: bool,
     llm_model: Option<String>,
+    health_weights_toml: String,
 }
 
 /// Mirrors `repowise-server`'s `WorkspaceRepoDto` wire shape.
@@ -3523,13 +3531,44 @@ fn JobBanner() -> impl IntoView {
     }
 }
 
-/// A read-only Settings view over `/api/settings`: repo root, indexed
-/// file counts, and whether git history / wiki pages / an LLM are
-/// available -- this port has no persisted config to write to yet, so
-/// there's no edit form here, just the server's current status.
+/// The Settings view over `/api/settings`: repo root, indexed file
+/// counts, and whether git history / wiki pages / an LLM are available
+/// -- still mostly read-only (this port has no persisted exclusion/
+/// generation config, or global server/webhook/MCP config, to write to
+/// yet), except for the health-weights editor (issue #359's first
+/// slice). That editor is a raw TOML textarea rather than one input per
+/// weight (`HealthWeights` has ~39 fields) -- it's literally the same
+/// `[health_weights]`-nested document `--weights <FILE>` already reads,
+/// just persisted to `.repowise/config.toml` through the dashboard
+/// instead of an arbitrary path on disk, so a user who already knows the
+/// CLI's format needs no new mental model.
 #[component]
 fn SettingsSection() -> impl IntoView {
     let settings = LocalResource::new(|| fetch_json::<Settings>("/api/settings"));
+    let draft = RwSignal::new(None::<String>);
+    let saving = RwSignal::new(false);
+    let save_result = RwSignal::new(None::<Result<(), String>>);
+
+    let do_save = move |_| {
+        let Some(text) = draft.get() else { return };
+        saving.set(true);
+        save_result.set(None);
+        spawn_local(async move {
+            let result = post_json::<UpdateHealthWeights, Settings>(
+                "/api/settings/health-weights",
+                &UpdateHealthWeights { toml: text },
+            )
+            .await;
+            match result {
+                Ok(s) => {
+                    draft.set(Some(s.health_weights_toml));
+                    save_result.set(Some(Ok(())));
+                }
+                Err(e) => save_result.set(Some(Err(e))),
+            }
+            saving.set(false);
+        });
+    };
 
     view! {
         <h2>"Settings"</h2>
@@ -3538,7 +3577,16 @@ fn SettingsSection() -> impl IntoView {
                 settings
                     .get()
                     .map(|result| match result.take() {
-                        Ok(s) => view! {
+                        Ok(s) => {
+                            // Seed the editable draft once from the server's
+                            // current value; a later successful save updates
+                            // it directly (see `do_save`) rather than
+                            // re-fetching, so an in-flight edit is never
+                            // silently clobbered by this re-running.
+                            if draft.get_untracked().is_none() {
+                                draft.set(Some(s.health_weights_toml.clone()));
+                            }
+                            view! {
                             <ul>
                                 <li>{format!("Root: {}", s.root)}</li>
                                 <li>
@@ -3567,8 +3615,40 @@ fn SettingsSection() -> impl IntoView {
                                     }}
                                 </li>
                             </ul>
+
+                            <h3>"Health weights"</h3>
+                            <p class="empty">
+                                "Overrides the fixed penalty weights `repowise health` scores \
+                                 with -- same format `repowise health --weights <FILE>` already \
+                                 reads, persisted here to .repowise/config.toml. An omitted key \
+                                 keeps its documented default."
+                            </p>
+                            <textarea
+                                rows="16"
+                                cols="60"
+                                prop:value=move || draft.get().unwrap_or_default()
+                                on:input=move |ev| draft.set(Some(event_target_value(&ev)))
+                            ></textarea>
+                            <div>
+                                <button
+                                    on:click=do_save
+                                    disabled=move || saving.get()
+                                >
+                                    {move || if saving.get() { "Saving..." } else { "Save" }}
+                                </button>
+                                {move || match save_result.get() {
+                                    Some(Ok(())) => view! {
+                                        <span class="empty">" Saved."</span>
+                                    }.into_any(),
+                                    Some(Err(e)) => view! {
+                                        <span class="error">{format!(" Error: {e}")}</span>
+                                    }.into_any(),
+                                    None => view! { <span></span> }.into_any(),
+                                }}
+                            </div>
+                            }
+                            .into_any()
                         }
-                        .into_any(),
                         Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
                     })
             }}

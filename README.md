@@ -3010,12 +3010,14 @@ to check for.
   — `{"status": "idle" | "running"}` or `{"status": "completed",
   "file_count", "other_file_count", "duration_ms"}` or `{"status":
   "failed", "error"}`. A bad root surfaces as `failed`, never a 500.
-  `GET /api/settings` (issue #65's Settings view, read-only) returns
+  `GET /api/settings` (issue #65's Settings view) returns
   `{"root", "file_count", "other_file_count", "git_available",
-  "wiki_pages_available", "llm_configured", "llm_model"}` — a status
-  snapshot, not a config editor: this port has no persisted repo-level
-  exclusion/generation config or global server/webhook/MCP config to
-  write to yet, so there's no write endpoint here. `GET /api/usage`
+  "wiki_pages_available", "llm_configured", "llm_model",
+  "health_weights_toml"}` — mostly still a status snapshot, not a config
+  editor: this port has no persisted repo-level exclusion/generation
+  config or global server/webhook/MCP config to write to yet, except for
+  `health_weights_toml` (issue #359's first slice — see below), the one
+  thing with an existing write path. `GET /api/usage`
   (issue #65's cost-tracking view, its fifth and last bundled feature)
   returns `{"chat_call_count", "prompt_tokens", "completion_tokens",
   "total_tokens"}`, tallied across every `/api/chat` call this server
@@ -3036,6 +3038,29 @@ to check for.
   rewrite hook's skipped-command breakdown (the CLI's `--missed` report,
   always included rather than gated behind a separate mode, since a
   dashboard view has no flag to gate it behind).
+  `POST /api/settings/health-weights` (issue #359's first slice) takes
+  `{"toml": "<config.toml text>"}`, validates it parses as this port's
+  first persisted, repo-level config file
+  (`.repowise/config.toml`, `[health_weights]`-nested), and — only once
+  valid — persists it verbatim and returns the same shape `GET
+  /api/settings` does, `health_weights_toml` reflecting what was just
+  saved. Every health-scored endpoint (`/api/health`, `/api/files`)
+  loads this file and applies it via `repowise_health::HealthWeights`
+  (falling back to the fixed defaults when the file is absent or
+  malformed, never erroring the request) instead of always using
+  `HealthWeights::default()`, so an override actually changes what the
+  dashboard reports, not just what `GET /api/settings` echoes back.
+  Everything else configurable in this port remains env-vars/CLI-flags-
+  only by design (matching its "no hidden state" philosophy) — health
+  weights were the one exception with an existing schema, parser
+  (`HealthWeights::from_toml_str`), and CLI precedent
+  (`repowise health --weights <FILE>`) already in place and nothing
+  security-sensitive about them, unlike e.g. `REPOWISE_WEBHOOK_SECRET`.
+  File-exclusion patterns for indexing were the other candidate the
+  issue considered and were deliberately left out of this first slice:
+  there's no existing exclusion mechanism to persist a setting for yet
+  (only `.gitignore`-aware discovery), so wiring one up would mean
+  building new indexer-level logic, not just a settings write path.
 - **Detail views** (issue #263) for symbols and decisions, deep-linkable at
   `#/symbols?id=<file>@<line>` and `#/decisions?id=<id>`, reached by clicking a
   row in either index.
@@ -3232,10 +3257,15 @@ to check for.
   the background job finishes, showing "Reindexing...", a completion
   summary, or the error message on failure; it also polls once on page
   load so a job already running from a previous visit still shows up. A
-  **Settings section** (bottom of the page) is a read-only status view
-  over `/api/settings`: repo root, indexed file counts, and whether git
-  history, wiki pages, and an LLM are available — no edit form, since
-  this port has no persisted config to write to yet. A **Usage section**
+  **Settings section** (bottom of the page) is mostly a read-only status
+  view over `/api/settings`: repo root, indexed file counts, and whether
+  git history, wiki pages, and an LLM are available. It also has one
+  edit form (issue #359): a raw-TOML textarea, seeded with the current
+  effective health weights, saving to `POST /api/settings/health-weights`
+  — the same `[health_weights]` document `--weights <FILE>` reads, so
+  editing it needs no new mental model. Everything else here stays
+  read-only, since this port has no other persisted config to write to
+  yet. A **Usage section**
   polls `/api/usage` every 3s for running chat-call and
   prompt/completion/total token counts, so it keeps reflecting the chat
   section's activity elsewhere on the page without the two components

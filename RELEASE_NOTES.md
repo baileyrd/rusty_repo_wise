@@ -6,6 +6,47 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #373 — Security findings: signature-based secret detection (closes #360)
+**2026-08-01**
+
+- Closes #360, the last of the Round 2 parity-gap batch (issues
+  #351–#360). The largest and most novel of the ten: this port had no
+  security-scanning capability at all, unlike every other Round 2 gap
+  (each either wired existing data into a new view or reorganized one).
+- Read upstream's docs directly to scope it: no dedicated
+  security-scanning layer/doc exists (unlike `CODE_HEALTH.md`,
+  `CHANGE_RISK.md`, etc.), just a one-line "security findings table, by
+  directory and by severity" dashboard sub-tab mention, and upstream's
+  own tool-comparison table concedes full SAST/SCA/secrets scanning to
+  dedicated tools rather than claiming it itself.
+- New `repowise-security` crate: deterministic, regex-only,
+  signature-based hardcoded-secret detection -- AWS access key IDs,
+  GitHub/Slack tokens, PEM private-key blocks, plus a generic
+  suspicious-assignment heuristic (credential-shaped field name,
+  long quoted literal) filtered against a placeholder denylist.
+  Findings never include the matched secret text, only what pattern
+  matched and where.
+- Resolves all three of the issue's own open questions: **secrets/
+  credentials only** for this scope (deterministic, no ML, no
+  infrastructure this port doesn't already have); **dependency-CVE
+  checking declined** (needs a live vulnerability feed this port has no
+  infra for, and a hardcoded snapshot would go stale immediately) and
+  **injection-shape detection declined** (needs real dataflow/taint
+  analysis this port doesn't have -- exactly what upstream's own
+  comparison table concedes to dedicated SAST tools); **ships
+  independently** of the external-dependency-registry gap, since it
+  doesn't depend on it.
+- Wired through every existing surface: `repowise security
+  [--min-severity high|medium|low]`, `GET /api/security`,
+  `get_security_findings` (MCP), and a new dashboard `#/security`
+  section with a severity filter, files linking into the existing
+  file-detail panel.
+- `README.md`: new "Security findings" section; `ParityGaps.md` row #20
+  updated to closed; issue #360 closed. **All ten Round 2 issues
+  (#351–#360) are now closed.**
+
+---
+
 ## PR #372 — Dashboard: configurable Settings view (closes #359)
 **2026-08-01**
 

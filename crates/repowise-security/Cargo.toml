@@ -1,0 +1,12 @@
+[package]
+name = "repowise-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+repowise-core = { path = "../repowise-core" }
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

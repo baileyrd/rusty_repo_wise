@@ -467,11 +467,25 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// List signature-based security findings (issue #360):
+    /// hardcoded/leaked-secret patterns (AWS access key IDs, GitHub/
+    /// Slack tokens, PEM private-key blocks, credential-shaped literal
+    /// assignments). See `repowise-security`'s own module doc for why
+    /// dependency-CVE checking and injection-shape detection are
+    /// deliberately not covered.
+    Security {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Only show findings at or above this severity: high, medium,
+        /// or low. Omit for everything.
+        #[arg(long)]
+        min_severity: Option<String>,
+    },
     /// Run an MCP server over stdio exposing the agent-facing tools
     /// (get_overview, search_codebase, get_context, get_risk,
     /// get_change_risk, get_symbol, get_why, get_answer, get_dead_code,
-    /// get_health, get_refactor_candidates, and the
-    /// workspace tools). Every response carries a `_meta` block with
+    /// get_health, get_refactor_candidates, get_security_findings, and
+    /// the workspace tools). Every response carries a `_meta` block with
     /// timing and index-staleness. Requires a prior `repowise
     /// init`/`update`.
     Serve {
@@ -814,6 +828,7 @@ fn main() -> anyhow::Result<()> {
         Command::Terraform { path } => cmd_terraform(&path),
         Command::ExternalDeps { path } => cmd_external_deps(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
+        Command::Security { path, min_severity } => cmd_security(&path, min_severity.as_deref()),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Generate { path } => cmd_generate(&path),
         Command::ServeDashboard {
@@ -3294,6 +3309,54 @@ fn cmd_refactor(path: &Path, kind: Option<&str>, limit: usize) -> anyhow::Result
         if !c.symbols.is_empty() {
             println!("    symbols: {}", c.symbols.join(", "));
         }
+    }
+    Ok(())
+}
+
+fn cmd_security(path: &Path, min_severity: Option<&str>) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+
+    let min_rank = min_severity
+        .map(|s| match s {
+            "high" => Ok(repowise_security::Severity::High),
+            "medium" => Ok(repowise_security::Severity::Medium),
+            "low" => Ok(repowise_security::Severity::Low),
+            other => anyhow::bail!("--min-severity must be high, medium, or low, got {other:?}"),
+        })
+        .transpose()?;
+
+    let mut findings = repowise_security::scan(&index);
+    if let Some(min_rank) = min_rank {
+        findings.retain(|f| f.severity >= min_rank);
+    }
+
+    println!(
+        "Repowise security findings for {} ({} found)",
+        index.root.display(),
+        findings.len(),
+    );
+    if findings.is_empty() {
+        println!(
+            "  No signature-based findings (hardcoded AWS/GitHub/Slack credentials, PEM \
+             private-key blocks, credential-shaped literal assignments)."
+        );
+        return Ok(());
+    }
+    println!(
+        "  Signature-based only -- no dependency-CVE checking, no injection-shape detection. \
+         See repowise-security's own module doc for why."
+    );
+
+    for f in &findings {
+        println!(
+            "  {:<6} {:<24} {}:{} -- {}",
+            f.severity.label(),
+            f.kind.label(),
+            f.file.display(),
+            f.line,
+            f.message,
+        );
     }
     Ok(())
 }

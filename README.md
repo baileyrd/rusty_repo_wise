@@ -2995,6 +2995,33 @@ documented future work rather than shipped slow or half-right:
   reachable through this plugin's default config yet.
 - **Codex/opencode.** See the first open question above.
 
+## Zed extension
+
+Issue #332's first slice: originally scoped as a VS Code extension,
+retargeted to [Zed](https://zed.dev/) — Zed extensions are written in
+Rust and compiled to WebAssembly via the `zed_extension_api` crate, a
+native fit for this workspace rather than a second TypeScript toolchain
+(see the issue for the full comparison against upstream's VS Code
+feature list, and why most of it — health gutter/status bar, hover,
+CodeLens, embedded dashboards — has no direct Zed equivalent).
+
+`zed-extension/` at this repo's root (same "companion directory at
+root, not under `crates/`" shape `claude-plugin/` already takes,
+answering the issue's third open question) registers `repowise serve`
+as a Zed context server (Zed's term for an MCP server integration) —
+the one upstream capability that maps cleanly, since it's direct reuse
+of the existing `repowise-mcp` server, not new capability. See
+`zed-extension/README.md` for install/testing instructions and
+`zed-extension/src/lib.rs`'s own doc comment for why no project path is
+passed to `repowise serve` explicitly (Zed's context-server API gives
+no way to resolve a worktree ID to a filesystem path; this relies on
+the same "spawn with cwd = project root" convention language servers
+already follow). **Deliberately its own standalone Cargo workspace**
+(the same reasoning as `crates/repowise-web`'s own `Cargo.toml`) since
+it only ever targets `wasm32-wasip2`, and **MCP registration only** for
+this first slice — no slash commands, no language-server registration,
+no publishing to Zed's own extension registry yet.
+
 ## Dashboard
 
 The dashboard is served live — `repowise serve-dashboard [PATH]` starts a

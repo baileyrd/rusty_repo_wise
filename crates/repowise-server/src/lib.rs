@@ -1028,11 +1028,13 @@ struct ChatResponseDto {
     vectors_embedded_now: Option<usize>,
 }
 
-/// A read-only snapshot of this server's current configuration and
-/// indexed-repo status -- the Settings view. No write endpoint exists:
-/// this port has no persisted repo-level exclusion/generation config or
-/// global server/webhook/MCP config to write to yet, so surfacing what
-/// the server already knows about itself is this slice's honest scope.
+/// A snapshot of this server's current configuration and indexed-repo
+/// status -- the Settings view. Mostly still read-only (this port has no
+/// persisted exclusion/generation config, or global server/webhook/MCP
+/// config, to write to yet), except for `health_weights_toml`
+/// (issue #359's first slice): the effective `HealthWeights`, serialized
+/// back to the same TOML shape `--weights <FILE>` already reads, so the
+/// dashboard can show and edit it without a bespoke per-field form.
 #[derive(Serialize)]
 struct SettingsDto {
     root: String,
@@ -1042,6 +1044,47 @@ struct SettingsDto {
     wiki_pages_available: bool,
     llm_configured: bool,
     llm_model: Option<String>,
+    health_weights_toml: String,
+}
+
+/// This port's first persisted, repo-level config file
+/// (`.repowise/config.toml`, issue #359) -- everything else configurable
+/// today is env-vars/CLI-flags-only. Nested under `[health_weights]`
+/// rather than flat at the document root, even though it's the only
+/// section so far, so a later config category (file-exclusion patterns
+/// was the other candidate the issue considered, deliberately left out
+/// of this first slice) can be added as a sibling table without a
+/// breaking format change to existing `config.toml` files.
+#[derive(Deserialize, Serialize, Default)]
+struct RepoConfig {
+    #[serde(default)]
+    health_weights: repowise_health::HealthWeights,
+}
+
+fn repo_config_path(root: &Path) -> PathBuf {
+    root.join(".repowise").join("config.toml")
+}
+
+#[derive(Deserialize)]
+struct UpdateHealthWeightsDto {
+    /// A full `config.toml` document, `[health_weights]` header
+    /// included -- not just the bare weight keys, so the file this
+    /// writes is self-describing on its own if someone opens it outside
+    /// the dashboard.
+    toml: String,
+}
+
+/// Never fails: a missing file is every fresh repo's normal state, and a
+/// malformed one (hand-edited outside the dashboard's own validated save
+/// path) degrades to defaults rather than breaking every health-scored
+/// endpoint -- the same "skip what can't be read, don't error the whole
+/// report" convention `repowise_distill::ledger::read` and
+/// `repowise-docs`'s freshness check both already follow.
+fn load_repo_config(root: &Path) -> RepoConfig {
+    std::fs::read_to_string(repo_config_path(root))
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 struct ApiError(anyhow::Error);
@@ -1077,10 +1120,11 @@ async fn get_health(State(state): State<AppState>) -> Result<Json<HealthDto>, Ap
     let org_signals = analytics
         .as_ref()
         .and_then(|a| repowise_git::org_signals::collect_org_signals(&state.root, &index, a).ok());
+    let config = load_repo_config(&state.root);
     let health = repowise_health::analyze_with_context(
         &index,
         &graph,
-        &repowise_health::HealthWeights::default(),
+        &config.health_weights,
         &std::collections::HashSet::new(),
         None,
         org_signals.as_ref(),
@@ -1870,7 +1914,8 @@ async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsDto>, ApiE
 async fn get_files(State(state): State<AppState>) -> Result<Json<FilesDto>, ApiError> {
     let index = RepoIndex::load(&state.root)?;
     let graph = repowise_graph::RepoGraph::build(&index);
-    let report = repowise_health::analyze(&index, &graph);
+    let config = load_repo_config(&state.root);
+    let report = repowise_health::analyze_with_weights(&index, &graph, &config.health_weights);
 
     let scores: std::collections::HashMap<&Path, (f64, usize)> = report
         .file_scores
@@ -2687,6 +2732,7 @@ async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>
     let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
     let wiki_pages_available = !wiki_indexed_files(&state.root, &index).is_empty();
     let llm_config = state.llm_config.as_ref().clone();
+    let config = load_repo_config(&state.root);
 
     Ok(Json(SettingsDto {
         root: state.root.display().to_string(),
@@ -2696,7 +2742,34 @@ async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>
         wiki_pages_available,
         llm_configured: llm_config.is_some(),
         llm_model: llm_config.map(|c| c.model),
+        health_weights_toml: toml::to_string_pretty(&config)
+            .unwrap_or_else(|_| "[health_weights]\n".to_string()),
     }))
+}
+
+/// The write half of issue #359's first slice: validates `body.toml`
+/// parses as a `RepoConfig` (the same `[health_weights]`-nested shape
+/// `GET /api/settings`'s own `health_weights_toml` field renders), then
+/// persists it verbatim to `.repowise/config.toml` -- the user's own
+/// formatting/comments/ordering survive a round trip, since this stores
+/// the submitted text directly rather than a re-serialized copy.
+/// Malformed input is reported as a normal `ApiError`, matching every
+/// other invalid-input case in this module (`get_refactor_candidates`'s
+/// `kind`, `get_saved`'s `by`) rather than a distinct status code.
+async fn post_settings_health_weights(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateHealthWeightsDto>,
+) -> Result<Json<SettingsDto>, ApiError> {
+    let _: RepoConfig = toml::from_str(&body.toml)
+        .map_err(|e| anyhow::anyhow!("not a valid config.toml document: {e}"))?;
+
+    let path = repo_config_path(&state.root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &body.toml)?;
+
+    get_settings(State(state)).await
 }
 
 /// Kick off a background reindex (`repowise_parser::build_index`, the
@@ -2926,6 +2999,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/webhook/github", post(post_webhook_github))
         .route("/api/webhook/gitlab", post(post_webhook_gitlab))
         .route("/api/settings", get(get_settings))
+        .route(
+            "/api/settings/health-weights",
+            post(post_settings_health_weights),
+        )
         .route("/api/usage", get(get_usage))
         .route("/api/workspace-repos", get(get_workspace_repos))
         .route("/api/workspace-co-changes", get(get_workspace_co_changes))
@@ -3975,6 +4052,87 @@ mod tests {
         assert_eq!(json["git_available"], true);
         assert_eq!(json["llm_configured"], true);
         assert_eq!(json["llm_model"], "smart");
+    }
+
+    #[tokio::test]
+    async fn get_settings_reports_default_health_weights_with_no_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/settings").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let toml_text = json["health_weights_toml"].as_str().unwrap();
+        assert!(toml_text.contains("[health_weights]"));
+        let parsed: RepoConfig = toml::from_str(toml_text).unwrap();
+        assert_eq!(
+            parsed.health_weights.long_function,
+            repowise_health::HealthWeights::default().long_function
+        );
+    }
+
+    #[tokio::test]
+    async fn post_settings_health_weights_persists_and_is_reflected_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        let router = app(root.clone(), None, None);
+
+        let body = serde_json::json!({
+            "toml": "[health_weights]\nlong_function = 1.5\n"
+        });
+        let (status, json) = post_json(router, "/api/settings/health-weights", body).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let toml_text = json["health_weights_toml"].as_str().unwrap();
+        let parsed: RepoConfig = toml::from_str(toml_text).unwrap();
+        assert_eq!(parsed.health_weights.long_function, 1.5);
+        assert!(repo_config_path(&root).exists());
+    }
+
+    #[tokio::test]
+    async fn post_settings_health_weights_rejects_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+        let router = app(root.clone(), None, None);
+
+        let body = serde_json::json!({ "toml": "not valid toml {{{" });
+        let (status, _json) = post_json(router, "/api/settings/health-weights", body).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !repo_config_path(&root).exists(),
+            "an invalid submission must not be written to disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persisted_health_weight_override_changes_the_reported_health_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (_status, baseline) = get(root.clone(), "/api/health").await;
+        let baseline_score = baseline["worst_files"][0]["score"].as_f64().unwrap();
+
+        std::fs::create_dir_all(root.join(".repowise")).unwrap();
+        std::fs::write(
+            repo_config_path(&root),
+            "[health_weights]\nhigh_complexity = 100.0\n",
+        )
+        .unwrap();
+
+        let (status, overridden) = get(root, "/api/health").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let overridden_score = overridden["worst_files"][0]["score"].as_f64().unwrap();
+        assert!(
+            overridden_score < baseline_score,
+            "a much larger high-complexity penalty must lower the score \
+             (baseline {baseline_score}, overridden {overridden_score})"
+        );
     }
 
     #[tokio::test]

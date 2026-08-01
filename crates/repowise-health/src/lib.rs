@@ -410,7 +410,7 @@ const UNTESTED_HOTSPOT_MIN_DEPENDENTS: usize = 4;
 /// plug calibrated numbers into once they exist, without touching any
 /// scoring logic — today every caller still gets the same fixed
 /// penalties as before, just no longer hardcoded as unreachable consts.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct HealthWeights {
     #[serde(default = "default_coverage_gap")]
     pub coverage_gap: f64,

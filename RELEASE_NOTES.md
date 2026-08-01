@@ -6,6 +6,41 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #372 — Dashboard: configurable Settings view (closes #359)
+**2026-08-01**
+
+- Closes #359: upstream's Settings view offers actual configuration
+  options; this port's was explicitly read-only, with no persisted
+  config to write to at all.
+- New `.repowise/config.toml`, this port's first persisted repo-level
+  config file, `[health_weights]`-nested so a later config category can
+  be added as a sibling table without a breaking format change.
+- New `POST /api/settings/health-weights` validates the submitted TOML
+  parses, then persists it verbatim; `GET /api/settings` gains
+  `health_weights_toml`, the effective weights serialized back to the
+  same shape. `/api/health` and `/api/files` now load this file
+  (falling back to fixed defaults when absent/malformed, never erroring
+  the request) instead of always using `HealthWeights::default()`, so a
+  saved override actually changes what the dashboard reports.
+- Resolves all three of the issue's own open questions: **health
+  weights only** for this first slice (`HealthWeights::from_toml_str`
+  and `--weights <FILE>` already existed; nothing security-sensitive
+  about them unlike webhook secrets; file-exclusion patterns declined
+  since no exclusion mechanism exists yet to persist a setting for);
+  **`.repowise/config.toml`** as the location; and **worth the scope**,
+  since it stays file-based and inspectable, matching the `--weights
+  <FILE>` precedent rather than adding hidden state.
+- `repowise-web`: the Settings section gains a raw-TOML textarea (not a
+  per-field form -- `HealthWeights` has ~39 fields) seeded with the
+  current effective weights, with a Save button reporting success/error.
+- `repowise-health`: `HealthWeights` gained `Serialize` (previously
+  `Deserialize`-only) so the server can round-trip it back to TOML text.
+- `README.md`: `/api/settings`'s shape and the Settings-section
+  description both updated; a new paragraph on the write endpoint;
+  `ParityGaps.md` row #19 updated to closed; issue #359 closed.
+
+---
+
 ## PR #371 — Dashboard: Costs view, surfacing distill/MCP savings (closes #358)
 **2026-08-01**
 

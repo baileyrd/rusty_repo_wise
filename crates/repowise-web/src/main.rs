@@ -502,6 +502,35 @@ struct ExternalDependency {
     file: String,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+struct Commit {
+    hash: String,
+    short_hash: String,
+    author: String,
+    message: String,
+    /// Unix seconds (author date).
+    timestamp: i64,
+    files_touched: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Commits {
+    available: bool,
+    commits: Vec<Commit>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct CommitRisk {
+    lines_added: usize,
+    lines_deleted: usize,
+    files_touched: usize,
+    subsystems_touched: usize,
+    concentration: f64,
+    author: String,
+    author_prior_commits: usize,
+    score: f64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ChatTurn {
     role: String,
@@ -1818,6 +1847,7 @@ enum Route {
     Docs,
     Coupling,
     ExternalDeps,
+    Commits,
     Chat,
     Usage,
     Settings,
@@ -1857,6 +1887,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
     (Route::Docs, "docs", "Docs"),
     (Route::Coupling, "coupling", "Coupling"),
     (Route::ExternalDeps, "dependencies", "Dependencies"),
+    (Route::Commits, "commits", "Commits"),
     (Route::Chat, "chat", "Chat"),
     (Route::Usage, "usage", "Usage"),
     (Route::Settings, "settings", "Settings"),
@@ -2652,6 +2683,161 @@ fn CouplingSection(selected: RwSignal<Option<String>>) -> impl IntoView {
                                             <td>{file_cell(p.file_b, selected)}</td>
                                             <td>{p.count}</td>
                                         </tr>
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// Days-since-epoch to `(year, month, day)`, Howard Hinnant's
+/// `civil_from_days` algorithm -- a small, well-known, dependency-free
+/// conversion, in keeping with this crate's own "no D3 or other JS
+/// library involved" convention (this crate has no date/time
+/// dependency to reach for either).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// `timestamp` (Unix seconds) as `"YYYY-MM-DD HH:MM"` UTC.
+fn format_timestamp(timestamp: i64) -> String {
+    let days = timestamp.div_euclid(86400);
+    let secs_of_day = timestamp.rem_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}")
+}
+
+/// One commit's diff-shape risk score, fetched only once its row is
+/// clicked (`/api/commit-risk?revspec=<hash>`) -- the same lazy,
+/// load-on-selection shape `FileDetail`'s wiki/ownership/decisions
+/// panels already use, and for the same reason issue #356 calls for
+/// it: scoring is a real per-commit diff computation, expensive enough
+/// that eagerly scoring every listed commit would multiply that cost
+/// by however many are listed.
+#[component]
+fn CommitRiskDetail(hash: String) -> impl IntoView {
+    let risk = LocalResource::new({
+        let hash = hash.clone();
+        move || {
+            let hash = hash.clone();
+            async move {
+                fetch_json_with_query::<CommitRisk>("/api/commit-risk", &[("revspec", &hash)]).await
+            }
+        }
+    });
+
+    view! {
+        <Suspense fallback=|| view! { <p>"Loading risk score..."</p> }>
+            {move || {
+                risk.get()
+                    .map(|result| match result.take() {
+                        Ok(r) => view! {
+                            <ul>
+                                <li>{format!("Score: {:.1} / 10", r.score)}</li>
+                                <li>{format!("+{} / -{} lines", r.lines_added, r.lines_deleted)}</li>
+                                <li>{format!("{} file(s), {} subsystem(s) touched", r.files_touched, r.subsystems_touched)}</li>
+                                <li>{format!("Concentration: {:.2}", r.concentration)}</li>
+                                <li>{format!("Author: {} ({} prior commits)", r.author, r.author_prior_commits)}</li>
+                            </ul>
+                        }
+                        .into_any(),
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// The Commits view (issue #356): a bounded, recent-first list of
+/// commits (`/api/commits`), each row expanding to its on-demand risk
+/// score when clicked -- see `CommitRiskDetail`'s doc comment for why
+/// scoring isn't eager.
+#[component]
+fn CommitsSection() -> impl IntoView {
+    let commits = LocalResource::new(|| fetch_json::<Commits>("/api/commits"));
+    let expanded = RwSignal::new(None::<String>);
+
+    view! {
+        <h2>"Commits"</h2>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                commits
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(c) if !c.available => {
+                            view! { <p class="empty">"No git history found for this repo."</p> }
+                                .into_any()
+                        }
+                        Ok(c) if c.commits.is_empty() => {
+                            view! { <p class="empty">"No commits found."</p> }.into_any()
+                        }
+                        Ok(c) => view! {
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"Commit"</th>
+                                        <th>"Date"</th>
+                                        <th>"Author"</th>
+                                        <th>"Files"</th>
+                                        <th>"Message"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {c.commits.into_iter().map(|commit| {
+                                        let hash = commit.hash.clone();
+                                        let row_hash = hash.clone();
+                                        let detail_hash = hash.clone();
+                                        let is_expanded = move || expanded.get().as_deref() == Some(hash.as_str());
+                                        view! {
+                                            <tr
+                                                style="cursor: pointer"
+                                                on:click=move |_| {
+                                                    let current = expanded.get();
+                                                    if current.as_deref() == Some(row_hash.as_str()) {
+                                                        expanded.set(None);
+                                                    } else {
+                                                        expanded.set(Some(row_hash.clone()));
+                                                    }
+                                                }
+                                            >
+                                                <td>{commit.short_hash}</td>
+                                                <td>{format_timestamp(commit.timestamp)}</td>
+                                                <td>{commit.author}</td>
+                                                <td>{commit.files_touched}</td>
+                                                <td>{commit.message}</td>
+                                            </tr>
+                                            {move || {
+                                                if is_expanded() {
+                                                    view! {
+                                                        <tr>
+                                                            <td colspan="5">
+                                                                <CommitRiskDetail hash=detail_hash.clone() />
+                                                            </td>
+                                                        </tr>
+                                                    }
+                                                    .into_any()
+                                                } else {
+                                                    ().into_any()
+                                                }
+                                            }}
+                                        }
                                     }).collect::<Vec<_>>()}
                                 </tbody>
                             </table>
@@ -3613,6 +3799,7 @@ fn App() -> impl IntoView {
             Route::Docs => view! { <DocsSection selected=selected /> }.into_any(),
             Route::Coupling => view! { <CouplingSection selected=selected /> }.into_any(),
             Route::ExternalDeps => view! { <ExternalDepsSection selected=selected /> }.into_any(),
+            Route::Commits => view! { <CommitsSection /> }.into_any(),
             Route::Chat => view! { <ChatSection /> }.into_any(),
             Route::Usage => view! { <UsageSection /> }.into_any(),
             Route::Settings => view! { <SettingsSection /> }.into_any(),
@@ -3641,6 +3828,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_timestamp_renders_the_unix_epoch() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00");
+    }
+
+    #[test]
+    fn format_timestamp_renders_a_known_recent_date() {
+        // 2024-01-15 12:30:00 UTC.
+        assert_eq!(format_timestamp(1_705_321_800), "2024-01-15 12:30");
+    }
 
     /// Values must reach `squarify` sorted descending (the server sorts
     /// them); these fixtures mirror that.

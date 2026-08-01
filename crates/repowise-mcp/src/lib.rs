@@ -5,9 +5,10 @@
 //! Implements `get_overview`, `search_codebase`, `get_context`,
 //! `get_risk`, `get_change_risk`, `get_symbol`, `get_why`, `get_answer`,
 //! `get_dead_code`, `get_health`, `get_refactor_candidates`,
-//! `get_doc_coverage`, `get_coupling`, `get_external_deps`, plus
+//! `get_doc_coverage`, `get_coupling`, `get_external_deps`,
+//! `get_commits`, plus
 //! `list_repos`, `get_architecture` and `get_blast_radius` (the last
-//! six have no counterpart in the reference) — the ones
+//! seven have no counterpart in the reference) — the ones
 //! whose backing data (the index, the resolved dependency graph, health
 //! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
@@ -900,6 +901,48 @@ struct CouplingPairOutput {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct CouplingOutput {
     pairs: Vec<CouplingPairOutput>,
+}
+
+/// Default rows for `get_commits`.
+const COMMITS_DEFAULT_LIMIT: usize = 30;
+/// Hard cap, however large a `limit` is requested.
+const COMMITS_MAX_LIMIT: usize = 200;
+
+fn default_commits_limit() -> usize {
+    COMMITS_DEFAULT_LIMIT
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CommitsParams {
+    /// Max commits returned, newest first. Default 30, capped at 200.
+    #[serde(default = "default_commits_limit")]
+    limit: usize,
+}
+
+impl Default for CommitsParams {
+    fn default() -> Self {
+        CommitsParams {
+            limit: default_commits_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CommitOutput {
+    hash: String,
+    /// First 7 characters of `hash`, for display.
+    short_hash: String,
+    author: String,
+    /// The commit's subject line.
+    message: String,
+    /// Unix seconds (author date).
+    timestamp: i64,
+    files_touched: usize,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct CommitsOutput {
+    commits: Vec<CommitOutput>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -2252,6 +2295,34 @@ impl RepowiseServer {
     }
 
     #[tool(
+        name = "get_commits",
+        description = "The most recent commits, newest first: hash, author, subject line, timestamp, and how many files each touched. No risk score attached -- call `get_change_risk` with a specific commit hash for that, since scoring every listed commit eagerly would multiply its real per-commit diff cost by however many are listed. `limit` (default 30, capped at 200) bounds the list; this always queries git for exactly that many commits rather than walking the whole history and truncating, so it stays cheap on a long-lived repo."
+    )]
+    fn get_commits(
+        &self,
+        Parameters(CommitsParams { limit }): Parameters<CommitsParams>,
+    ) -> Result<Json<Envelope<CommitsOutput>>, ErrorData> {
+        let started = Instant::now();
+        let limit = limit.clamp(1, COMMITS_MAX_LIMIT);
+        let commits = repowise_git::collect_recent_commits(&self.root, limit)
+            .map_err(|e| ErrorData::invalid_params(format!("failed to list commits: {e}"), None))?;
+
+        let commits = commits
+            .into_iter()
+            .map(|c| CommitOutput {
+                short_hash: c.hash.chars().take(7).collect(),
+                hash: c.hash,
+                author: c.author,
+                message: c.message,
+                timestamp: c.timestamp,
+                files_touched: c.files.len(),
+            })
+            .collect();
+
+        Ok(self.untracked(CommitsOutput { commits }, started))
+    }
+
+    #[tool(
         name = "get_external_deps",
         description = "Third-party (package-manager) dependencies declared across every manifest this port recognizes: Cargo.toml, package.json, composer.json, requirements.txt, pyproject.toml, and go.mod. Declared, not resolved -- the version constraint exactly as written in the manifest, not a lockfile-resolved version; this doesn't walk a lockfile or resolve transitive dependencies. Workspace-internal path dependencies (e.g. a monorepo's own sibling packages) are excluded. Java/Kotlin/Scala's pom.xml/Gradle build scripts and C#'s .csproj aren't recognized yet."
     )]
@@ -3086,6 +3157,62 @@ mod tests {
 
         let server = RepowiseServer::new(root, None);
         let result = server.get_coupling(Parameters(CouplingParams::default()));
+        let Err(err) = result else {
+            panic!("expected an error when the root isn't a git repository");
+        };
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn get_commits_lists_newest_first_with_no_risk_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "second"]);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_commits(Parameters(CommitsParams::default()))
+            .unwrap();
+
+        assert_eq!(data.commits.len(), 2, "{:?}", data.commits);
+        assert_eq!(data.commits[0].message, "second");
+        assert_eq!(data.commits[1].message, "first");
+        assert_eq!(data.commits[0].files_touched, 1);
+        assert_eq!(data.commits[0].short_hash.len(), 7);
+    }
+
+    #[test]
+    fn get_commits_respects_the_limit_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_init(&root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "second"]);
+
+        let server = RepowiseServer::new(root, None);
+        let Json(Envelope { data, .. }) = server
+            .get_commits(Parameters(CommitsParams { limit: 1 }))
+            .unwrap();
+
+        assert_eq!(data.commits.len(), 1);
+        assert_eq!(data.commits[0].message, "second");
+    }
+
+    #[test]
+    fn get_commits_errors_when_not_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let server = RepowiseServer::new(root, None);
+        let result = server.get_commits(Parameters(CommitsParams::default()));
         let Err(err) = result else {
             panic!("expected an error when the root isn't a git repository");
         };

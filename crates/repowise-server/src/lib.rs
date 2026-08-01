@@ -356,6 +356,63 @@ struct ExternalDependencyDto {
     line: usize,
 }
 
+/// Default rows for `GET /api/commits` -- a bounded recent window, not
+/// the whole history (issue #356's own open question: `git log` on the
+/// whole history is comparatively cheap on its own, but scoring every
+/// listed commit eagerly would multiply `change_risk`'s real per-commit
+/// diff cost by however many are listed, which is why risk is a
+/// separate, on-demand `/api/commit-risk` call instead).
+const COMMITS_DEFAULT_LIMIT: usize = 30;
+/// Hard cap, however large a `?limit=` is requested.
+const COMMITS_MAX_LIMIT: usize = 200;
+
+#[derive(Deserialize)]
+struct CommitsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct CommitDto {
+    hash: String,
+    /// First 7 characters of `hash`, for display.
+    short_hash: String,
+    author: String,
+    /// The commit's subject line.
+    message: String,
+    /// Unix seconds (author date).
+    timestamp: i64,
+    files_touched: usize,
+}
+
+#[derive(Serialize)]
+struct CommitsDto {
+    /// `false` when `PATH` isn't a git repository -- same
+    /// degrade-gracefully convention as `HotspotsDto`.
+    available: bool,
+    commits: Vec<CommitDto>,
+}
+
+#[derive(Deserialize)]
+struct CommitRiskQuery {
+    /// A single commit hash or a `base..head` range. Defaults to `HEAD`,
+    /// same as `get_change_risk`.
+    revspec: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CommitRiskDto {
+    revspec: String,
+    lines_added: usize,
+    lines_deleted: usize,
+    files_touched: usize,
+    subsystems_touched: usize,
+    concentration: f64,
+    author: String,
+    author_prior_commits: usize,
+    score: f64,
+}
+
 /// A JSON-serializable `repowise_git::Hotspot`. `available: false` (with
 /// an empty list) means this root has no git history to analyze --
 /// distinct from "available, but no file has both history and
@@ -949,6 +1006,64 @@ async fn get_hotspots(State(state): State<AppState>) -> Result<Json<HotspotsDto>
         },
     };
     Ok(Json(dto))
+}
+
+/// The Commits view (issue #356): a bounded, recent-first commit list,
+/// with no risk score attached -- scoring is a separate, on-demand
+/// `/api/commit-risk` call per commit (see `COMMITS_DEFAULT_LIMIT`'s
+/// doc comment for why).
+async fn get_commits(
+    State(state): State<AppState>,
+    Query(query): Query<CommitsQuery>,
+) -> Result<Json<CommitsDto>, ApiError> {
+    let limit = query
+        .limit
+        .unwrap_or(COMMITS_DEFAULT_LIMIT)
+        .clamp(1, COMMITS_MAX_LIMIT);
+    let dto = match repowise_git::collect_recent_commits(&state.root, limit) {
+        Ok(commits) => CommitsDto {
+            available: true,
+            commits: commits
+                .into_iter()
+                .map(|c| CommitDto {
+                    short_hash: c.hash.chars().take(7).collect(),
+                    hash: c.hash,
+                    author: c.author,
+                    message: c.message,
+                    timestamp: c.timestamp,
+                    files_touched: c.files.len(),
+                })
+                .collect(),
+        },
+        Err(_) => CommitsDto {
+            available: false,
+            commits: Vec::new(),
+        },
+    };
+    Ok(Json(dto))
+}
+
+/// One commit's diff-shape risk score, computed on demand -- the same
+/// `repowise_git::change_risk` the `get_change_risk` MCP tool and
+/// `repowise risk` CLI command already use, exposed here so the
+/// dashboard's Commits view (issue #356) can score a clicked-on commit
+/// without paying for every listed commit's score up front.
+async fn get_commit_risk(
+    State(state): State<AppState>,
+    Query(query): Query<CommitRiskQuery>,
+) -> Result<Json<CommitRiskDto>, ApiError> {
+    let risk = repowise_git::change_risk(&state.root, query.revspec.as_deref())?;
+    Ok(Json(CommitRiskDto {
+        revspec: risk.revspec,
+        lines_added: risk.lines_added,
+        lines_deleted: risk.lines_deleted,
+        files_touched: risk.files_touched,
+        subsystems_touched: risk.subsystems_touched,
+        concentration: risk.concentration,
+        author: risk.author,
+        author_prior_commits: risk.author_prior_commits,
+        score: risk.score,
+    }))
 }
 
 /// Repo-wide change-coupling: the file pairs that most often change
@@ -2431,6 +2546,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/overview", get(get_overview))
         .route("/api/health", get(get_health))
         .route("/api/hotspots", get(get_hotspots))
+        .route("/api/commits", get(get_commits))
+        .route("/api/commit-risk", get(get_commit_risk))
         .route("/api/coupling", get(get_coupling))
         .route("/api/external-deps", get(get_external_deps))
         .route("/api/decisions", get(get_decisions))
@@ -3257,6 +3374,82 @@ mod tests {
         assert_eq!(pairs[0]["file_a"], "a.txt");
         assert_eq!(pairs[0]["file_b"], "b.txt");
         assert_eq!(pairs[0]["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn get_commits_lists_newest_first_with_no_risk_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_commit_all(&root, "first");
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        git_commit_all(&root, "second");
+
+        let (status, json) = get(root, "/api/commits").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], true);
+        let commits = json["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert_eq!(commits[0]["message"], "second");
+        assert_eq!(commits[1]["message"], "first");
+        assert_eq!(commits[0]["files_touched"], 1);
+        assert!(commits[0]["short_hash"].as_str().unwrap().len() == 7);
+        assert!(commits[0].get("score").is_none(), "{commits:?}");
+    }
+
+    #[tokio::test]
+    async fn get_commits_respects_the_limit_query_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_commit_all(&root, "first");
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        git_commit_all(&root, "second");
+
+        let (status, json) = get(root, "/api/commits?limit=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["commits"].as_array().unwrap().len(), 1);
+        assert_eq!(json["commits"][0]["message"], "second");
+    }
+
+    #[tokio::test]
+    async fn get_commits_is_unavailable_without_git_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_busy_symbol(&root);
+
+        let (status, json) = get(root, "/api/commits").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["available"], false);
+        assert_eq!(json["commits"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_commit_risk_scores_the_head_commit_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_commit_all(&root, "add a");
+
+        let (status, json) = get(root, "/api/commit-risk").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["revspec"], "HEAD");
+        assert_eq!(json["files_touched"], 1);
+        assert!(json["score"].as_f64().unwrap() >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn get_commit_risk_errors_when_not_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let (status, _json) = get(root, "/api/commit-risk").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

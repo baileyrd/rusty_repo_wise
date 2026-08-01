@@ -6,6 +6,35 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## PR #367 — Dashboard: Commits view, risk-scored on demand (closes #356)
+**2026-08-01**
+
+- `repowise-git`: new `collect_recent_commits(root, limit)` -- bounded
+  via git's own `-n` flag, not a full-history walk truncated in Rust,
+  so listing "the 30 most recent commits" stays cheap on a long-lived
+  repo. Resolves the issue's first open question (how many commits to
+  list: a bounded recent window, not all of history).
+- Resolves the issue's second open question (eager vs. lazy risk
+  scoring) as lazy: listing commits carries no risk score at all;
+  scoring is a separate, on-demand call per commit, reusing the
+  existing `change_risk` computation (`get_change_risk`/`repowise
+  risk` already use it) rather than duplicating it. Scoring every
+  listed commit eagerly would multiply that real per-commit diff cost
+  by however many are listed.
+- Wired into three surfaces: `repowise commits [PATH] [--limit N]`
+  (`repowise-cli`), `GET /api/commits?limit=<N>` +
+  `GET /api/commit-risk?revspec=<...>` (`repowise-server`), and
+  `get_commits` (`repowise-mcp` -- scoring reuses the existing
+  `get_change_risk` tool, no new MCP tool needed for that half).
+- `repowise-web`: a new `#/commits` dashboard section listing recent
+  commits (hash/author/date/files-touched/message); clicking a row
+  fetches and expands that commit's risk score on demand, the same
+  lazy, load-on-selection shape `FileDetail`'s wiki/ownership/decisions
+  panels already use.
+- `ParityGaps.md` row #16 updated; issue #356 closed.
+
+---
+
 ## PR #366 — Dashboard: module-grouping toggle on the graph view (narrows #354)
 **2026-07-31**
 

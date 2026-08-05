@@ -39,7 +39,6 @@
 //! output; a flattering one isn't.
 
 use crate::{workspace_architecture, ResolvedWorkspaceRepo};
-use repowise_core::RepoIndex;
 use std::collections::{BTreeSet, HashMap};
 
 /// How much the numbers below can be trusted.

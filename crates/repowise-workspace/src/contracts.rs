@@ -16,7 +16,6 @@
 
 use crate::ResolvedWorkspaceRepo;
 use regex::Regex;
-use repowise_core::RepoIndex;
 use std::path::PathBuf;
 
 /// One HTTP route a repo appears to register (a "producer"), inferred

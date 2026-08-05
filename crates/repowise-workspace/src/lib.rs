@@ -661,7 +661,7 @@ mod tests {
             .save(&root.join("consumer"))
             .unwrap();
 
-        let repos = vec![
+        let repos = [
             ResolvedWorkspaceRepo {
                 name: "provider".to_string(),
                 path: root.join("provider"),

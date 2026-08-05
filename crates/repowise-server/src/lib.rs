@@ -258,6 +258,14 @@ impl ReindexJob {
 /// that needs one.
 #[derive(Serialize)]
 struct OverviewDto {
+    /// Which repo this describes; absent on an unscoped call and on the
+    /// aggregate wrapper of a federated one (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    /// One entry per workspace repo, present only on `?repo=all`.
+    /// Absent otherwise, so an unscoped response is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repos: Option<Vec<OverviewDto>>,
     file_count: usize,
     other_file_count: usize,
     by_language: Vec<(String, usize)>,
@@ -273,6 +281,8 @@ struct OverviewDto {
 impl OverviewDto {
     fn from_overview(root: &Path, o: &repowise_graph::Overview) -> Self {
         OverviewDto {
+            repo: None,
+            repos: None,
             file_count: o.file_count,
             other_file_count: o.other_file_count,
             by_language: o.by_language.clone(),
@@ -1128,25 +1138,142 @@ fn load_repo_config(root: &Path) -> RepoConfig {
         .unwrap_or_default()
 }
 
-struct ApiError(anyhow::Error);
+struct ApiError(anyhow::Error, StatusCode);
+
+impl ApiError {
+    /// A caller mistake, not a server fault -- naming a repo that isn't
+    /// in the configured workspace, or asking for one without
+    /// `--workspace`. Reported as 400 rather than the blanket 500,
+    /// because a client that can't tell "you asked wrong" from "the
+    /// server broke" will retry the former forever.
+    fn bad_request(message: impl Into<String>) -> Self {
+        ApiError(anyhow::anyhow!(message.into()), StatusCode::BAD_REQUEST)
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+        (self.1, self.0.to_string()).into_response()
     }
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(err: E) -> Self {
-        ApiError(err.into())
+        ApiError(err.into(), StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
-async fn get_overview(State(state): State<AppState>) -> Result<Json<OverviewDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
-    let overview = graph.overview(&index);
-    Ok(Json(OverviewDto::from_overview(&state.root, &overview)))
+/// A `?repo=` query parameter, shared by every federatable endpoint
+/// (issue #337).
+#[derive(Deserialize, Default)]
+struct RepoQuery {
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+/// One repo to serve a request from: its name (`None` for this server's
+/// own root, so unscoped responses stay unlabeled) and its path.
+struct RepoTarget {
+    repo: Option<String>,
+    root: PathBuf,
+}
+
+/// Resolve `?repo=` into the roots to answer from -- the dashboard's
+/// counterpart to the MCP server's `resolve_search_targets` (issue
+/// #337), with the same three meanings and the same refusals.
+///
+/// Omitted means this server's own root, which is the pre-#337 behaviour
+/// and stays unlabeled. `all` federates across every configured
+/// workspace repo. A name selects one. The latter two require
+/// `--workspace`, and error rather than quietly falling back to the
+/// server's own root -- that would look like an answer about the
+/// workspace while describing one repo.
+fn resolve_repo_targets(state: &AppState, repo: Option<&str>) -> Result<Vec<RepoTarget>, ApiError> {
+    let Some(repo) = repo else {
+        return Ok(vec![RepoTarget {
+            repo: None,
+            root: state.root.as_ref().clone(),
+        }]);
+    };
+    let Some(repos) = state.workspace_repos.as_ref().as_ref() else {
+        return Err(ApiError::bad_request(format!(
+            "repo={repo:?} requires a workspace; start the server with --workspace"
+        )));
+    };
+    if repo == "all" {
+        return Ok(repos
+            .iter()
+            .map(|r| RepoTarget {
+                repo: Some(r.name.clone()),
+                root: r.path.clone(),
+            })
+            .collect());
+    }
+    match repos.iter().find(|r| r.name == repo) {
+        Some(target) => Ok(vec![RepoTarget {
+            repo: Some(target.name.clone()),
+            root: target.path.clone(),
+        }]),
+        None => Err(ApiError::bad_request(format!(
+            "no repo named {repo:?} in the configured workspace"
+        ))),
+    }
+}
+
+async fn get_overview(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<OverviewDto>, ApiError> {
+    // Mirrors the MCP tool's federation exactly (issue #337): one entry
+    // per repo, since counts are additive but `most_depended_on` is a
+    // within-repo ranking that must not be merged across repos.
+    let targets = resolve_repo_targets(&state, q.repo.as_deref())?;
+    let mut per_repo = Vec::with_capacity(targets.len());
+    for target in &targets {
+        let index = RepoIndex::load(&target.root)?;
+        let graph = repowise_graph::RepoGraph::build(&index);
+        let overview = graph.overview(&index);
+        let mut dto = OverviewDto::from_overview(&target.root, &overview);
+        dto.repo = target.repo.clone();
+        per_repo.push(dto);
+    }
+    if per_repo.len() == 1 {
+        let mut only = per_repo.remove(0);
+        // A single named repo still answers in the unscoped shape.
+        only.repo = None;
+        return Ok(Json(only));
+    }
+
+    // Federated: flat fields are workspace totals (all additive), and
+    // `most_depended_on` is dropped because a dependent count is a
+    // within-repo number -- ranking those across repos would compare
+    // different scales. The per-repo entries carry it instead.
+    let merge = |pick: fn(&OverviewDto) -> &Vec<(String, usize)>| {
+        let mut m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for r in &per_repo {
+            for (k, v) in pick(r) {
+                *m.entry(k.clone()).or_default() += v;
+            }
+        }
+        let mut out: Vec<(String, usize)> = m.into_iter().collect();
+        out.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
+        out
+    };
+    let totals = OverviewDto {
+        repo: None,
+        file_count: per_repo.iter().map(|r| r.file_count).sum(),
+        other_file_count: per_repo.iter().map(|r| r.other_file_count).sum(),
+        by_language: merge(|r| &r.by_language),
+        symbol_counts: merge(|r| &r.symbol_counts),
+        total_lines: per_repo.iter().map(|r| r.total_lines).sum(),
+        import_edges: per_repo.iter().map(|r| r.import_edges).sum(),
+        call_edges: per_repo.iter().map(|r| r.call_edges).sum(),
+        unresolved_imports: per_repo.iter().map(|r| r.unresolved_imports).sum(),
+        unresolved_calls: per_repo.iter().map(|r| r.unresolved_calls).sum(),
+        most_depended_on: Vec::new(),
+        repos: Some(per_repo),
+    };
+    Ok(Json(totals))
 }
 
 async fn get_health(State(state): State<AppState>) -> Result<Json<HealthDto>, ApiError> {
@@ -3362,6 +3489,156 @@ mod tests {
         };
         index.save(root).unwrap();
         index
+    }
+
+    /// Two indexed repos plus a workspace TOML naming both, so
+    /// `?repo=` has something real to resolve against.
+    fn workspace_of_two(dir: &Path) -> (PathBuf, PathBuf) {
+        for (name, n) in [("repo-a", 1usize), ("repo-b", 2usize)] {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.join("src")).unwrap();
+            std::fs::write(
+                path.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+            for i in 0..n {
+                std::fs::write(
+                    path.join("src").join(format!("f{i}.rs")),
+                    format!("pub fn f{i}() -> i32 {{ {i} }}\n"),
+                )
+                .unwrap();
+            }
+            index_dir_at(&path);
+        }
+        let ws = dir.join("ws.toml");
+        std::fs::write(
+            &ws,
+            "[[repo]]\nname = \"repo-a\"\npath = \"repo-a\"\n\n             [[repo]]\nname = \"repo-b\"\npath = \"repo-b\"\n",
+        )
+        .unwrap();
+        (dir.join("repo-a"), ws)
+    }
+
+    fn index_dir_at(root: &Path) {
+        let discovered = repowise_core::discover_files(root).unwrap();
+        let mut files = Vec::new();
+        let mut other_files = 0;
+        for entry in discovered {
+            if matches!(entry.language, repowise_core::Language::Other) {
+                other_files += 1;
+                continue;
+            }
+            let source = std::fs::read_to_string(&entry.path).unwrap();
+            match repowise_parser::parse_file(&entry.path, entry.language, &source).unwrap() {
+                Some(record) => files.push(record),
+                None => other_files += 1,
+            }
+        }
+        RepoIndex {
+            root: root.to_path_buf(),
+            files,
+            other_files,
+            indexed_commit: None,
+        }
+        .save(root)
+        .unwrap();
+    }
+
+    async fn get_ws(
+        root: PathBuf,
+        workspace: PathBuf,
+        uri: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app(root, None, Some(workspace))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)
+        };
+        (status, json)
+    }
+
+    /// `?repo=all` federates, and the flat counts are the workspace
+    /// total -- checked against the breakdown, not a literal, so the two
+    /// can't drift apart.
+    #[tokio::test]
+    async fn overview_federates_across_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/overview?repo=all").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let repos = json["repos"]
+            .as_array()
+            .expect("federated call lists repos");
+        assert_eq!(repos.len(), 2);
+        let sum: u64 = repos
+            .iter()
+            .map(|r| r["file_count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            json["file_count"].as_u64().unwrap(),
+            sum,
+            "the total must equal the breakdown it claims to total"
+        );
+        assert_eq!(json["file_count"].as_u64().unwrap(), 3, "1 + 2 files");
+        assert!(
+            json["most_depended_on"].as_array().unwrap().is_empty(),
+            "within-repo dependent counts must not be ranked across repos"
+        );
+    }
+
+    /// An unscoped call keeps its exact pre-#337 shape.
+    #[tokio::test]
+    async fn an_unscoped_overview_omits_the_repos_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/overview").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json.get("repos").is_none(),
+            "unscoped must not gain a field"
+        );
+        assert_eq!(json["file_count"].as_u64().unwrap(), 1, "own repo only");
+    }
+
+    /// Naming a repo without --workspace is a client error, not a 500:
+    /// a client that can't tell "you asked wrong" from "the server
+    /// broke" will retry the former forever.
+    #[tokio::test]
+    async fn overview_with_a_repo_but_no_workspace_is_a_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_dir_at(&root);
+
+        let (status, _) = get(root, "/api/overview?repo=all").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// An unknown repo name is likewise the caller's mistake.
+    #[tokio::test]
+    async fn overview_with_an_unknown_repo_is_a_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, _) = get_ws(own, ws, "/api/overview?repo=nope").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     async fn get(root: PathBuf, uri: &str) -> (StatusCode, serde_json::Value) {

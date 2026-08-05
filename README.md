@@ -1417,14 +1417,30 @@ your checkout is at 51c821224a75. Findings may not match your working tree.
 Unknown is reported as unknown: an artifact with no recorded commit says
 so rather than implying it is current.
 
-**Size is the honest caveat.** The artifact is ~7.7 MB for this
-122-file repo, because `calls` is 51.7% of the index and `symbols` 45.3%
-— rebasing paths reclaims only ~750 KB of that. Teams committing one
-should expect git-lfs territory on a larger repo. A reduced read-only
-projection that drops `calls` would roughly halve it, but it would also
-disable dead-code detection and the call-graph health markers, so that
-is a capability decision deferred to its own issue rather than bundled
-into the format.
+**Callers are interned** (issue #381). `CallRef.caller` was 33% of the
+entire index — the same 2,020 distinct symbol ids written out across
+21,519 call references, about eleven copies each, every one a full
+`path::name@line` string. They now live in one table with the calls
+referring to them by index: **7.73 MB → 6.32 MB, 18.3% smaller, with
+nothing given up.**
+
+**Why not just drop `calls`?** It is 51.7% of the index, so it looks like
+the obvious lever. It isn't. `call_in_degree` would be zero for every
+symbol, which does not produce an *empty* dead-code list — it produces
+one containing **everything**, and collapses every health score with it.
+Dropping `field_accesses` fails the opposite way: LCOM4 reports "not
+enough data", the `low-cohesion` marker never fires, and scores silently
+*rise*. Two fields, two opposite kinds of wrong answer, both quiet. A
+lossy projection therefore stays a capability decision on its own issue,
+not a compression trick folded into the format.
+
+**Size is still the honest caveat.** 6.32 MB for a 122-file repo is
+committable but not small, and teams should expect git-lfs territory on
+a larger one. Most of what remains is JSON's own pretty-printed
+structure: ~55 bytes per call, of which the data is about 15. Compact
+JSON would be 29.5% smaller again, and is deliberately not used —
+canonical ordering exists so the artifact diffs in review, and a
+single-line file diffs not at all.
 
 ## Coverage health markers
 

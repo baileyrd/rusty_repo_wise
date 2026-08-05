@@ -6,6 +6,61 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## Interned caller ids: portable index schema v2 (closes #381)
+**2026-08-05**
+
+- Closes #381, but **not as the issue specified it** -- measuring first
+  reversed the premise, and the issue's own plan would have been the
+  worse change.
+- #381 proposed dropping `calls` (51.7% of the index) and
+  `field_accesses` for a ~53% reduction, with machinery to make affected
+  commands refuse. Measuring the field instead found `CallRef::caller`
+  alone is **33% of the entire index** -- 2,020 distinct symbol ids
+  written out across 21,519 references, about eleven copies each, every
+  one a full `path::name@line` string.
+- Interning them into a table is lossless: **7.73 MB -> 6.32 MB, 18.3%
+  smaller, no capability given up.** Schema v2.
+- **The audit corrected the issue's stated failure direction, which was
+  backwards.** #381 said a reduced artifact "must never silently return
+  0 dead-code candidates". The opposite is true: with no `calls`,
+  `call_in_degree` is zero for *every* symbol, so the dead-code list
+  contains everything and every health score collapses. And
+  `field_accesses` fails the other way -- LCOM4 reports "not enough
+  data", `low-cohesion` never fires, scores silently *rise*. Two fields,
+  two opposite quiet wrong answers, skewing health in both directions at
+  once.
+- Verified dependency map, derived from the code rather than guessed
+  (the issue flagged its own list as unverified): `calls` feeds
+  `Calls` edges -> `call_in_degree` -> `repowise dead-code`, the
+  `possibly-dead-code` health marker, dashboard search ranking, and
+  `overview`'s edge counts. `field_accesses` feeds LCOM4 only -> the
+  `low-cohesion` marker and `repowise refactor`'s `split-by-cohesion`.
+- **A bug caught by testing the failure path, not the happy path.** A v1
+  artifact read by the v2 binary failed with `missing field caller_ids
+  at line 220729` -- a serde shape error that pre-empted the version
+  check, so the whole point of having `schema_version` (an actionable
+  message) never fired. The new fields are `serde(default)` so a
+  foreign-version artifact parses far enough to be rejected *by
+  version*: "portable index is schema version 1, this repowise
+  understands 2 -- re-export it". Pinned by
+  `an_older_schema_artifact_reports_the_version_not_a_serde_error`.
+- Corruption is reported, never papered over: an out-of-range caller
+  index errors rather than degrading to a module-scope call, since
+  silently dropping a caller understates `call_in_degree` and makes live
+  code look dead. Calls naming an unknown file error too. Keyed by path
+  rather than position, so a reordered file list cannot mis-attach.
+- Remaining size is JSON's own pretty-printed structure: ~55 bytes per
+  call, of which the data is ~15. Compact JSON would be 29.5% smaller
+  again and is deliberately not used -- canonical ordering exists so the
+  artifact diffs in review, and a single-line file diffs not at all.
+- Breaking for v1 artifacts, which must be re-exported. Nothing external
+  consumes them (v1 shipped hours earlier, same day), and the rejection
+  is loud and actionable.
+- 5 new tests in `repowise-core`; 966 workspace tests green, clippy
+  clean.
+
+---
+
 ## `--index` on every index-derived read command (closes #382)
 **2026-08-05**
 

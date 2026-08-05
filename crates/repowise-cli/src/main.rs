@@ -164,6 +164,11 @@ enum Command {
         /// Max results. 0 means no limit.
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Show a file's resolved import dependencies and dependents.
     Deps {
@@ -212,6 +217,11 @@ enum Command {
         /// count is still reported.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Export the generated wiki, or the dependency graph as an
     /// architecture model.
@@ -305,6 +315,11 @@ enum Command {
         /// How many of the highest-scoring files to list.
         #[arg(long, default_value_t = 15)]
         top: usize,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Show per-author line ownership for a file, from `git blame`.
     Ownership {
@@ -360,6 +375,11 @@ enum Command {
         /// List every file's status rather than only the counts.
         #[arg(long)]
         verbose: bool,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// List mined architectural decisions (from docs/adr/*.md and
     /// decision-like commit messages), and which files they're linked to.
@@ -369,6 +389,11 @@ enum Command {
         /// Only show decisions linked to this file.
         #[arg(long)]
         for_file: Option<PathBuf>,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Record a decision you already made, directly -- the `cli`
     /// decision source (issue #66's `cli` half; its `session`
@@ -483,6 +508,11 @@ enum Command {
         /// each kind, so a cap keeps the signal.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// A guided tour: an ordered reading path through the codebase
     /// (issue #377). Ordered so nothing is introduced before what it is
@@ -527,6 +557,11 @@ enum Command {
         /// or low. Omit for everything.
         #[arg(long)]
         min_severity: Option<String>,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Run an MCP server over stdio exposing the agent-facing tools
     /// (get_overview, search_codebase, get_context, get_risk,
@@ -827,6 +862,7 @@ fn main() -> anyhow::Result<()> {
             kind,
             symbol_kind,
             limit,
+            index,
         } => cmd_search(
             &query,
             &path,
@@ -834,6 +870,7 @@ fn main() -> anyhow::Result<()> {
             kind.as_deref(),
             symbol_kind.as_deref(),
             limit,
+            index.as_deref(),
         ),
         Command::Deps { file, path, index } => cmd_deps(&file, &path, index.as_deref()),
         Command::Health {
@@ -846,7 +883,8 @@ fn main() -> anyhow::Result<()> {
             path,
             min_confidence,
             limit,
-        } => cmd_dead_code(&path, &min_confidence, limit),
+            index,
+        } => cmd_dead_code(&path, &min_confidence, limit, index.as_deref()),
         Command::Export {
             path,
             out,
@@ -860,14 +898,22 @@ fn main() -> anyhow::Result<()> {
         Command::ClaudeHook { action } => cmd_claude_hook(action),
         Command::Status { path, verbose } => cmd_status(&path, verbose),
         Command::Risk { revspec, path } => cmd_risk(revspec.as_deref(), &path),
-        Command::Hotspots { path, top } => cmd_hotspots(&path, top),
+        Command::Hotspots { path, top, index } => cmd_hotspots(&path, top, index.as_deref()),
         Command::Ownership { file, path } => cmd_ownership(&file, &path),
         Command::Coupled { file, path, top } => cmd_coupled(&file, &path, top),
         Command::Coupling { path, top } => cmd_coupling(&path, top),
         Command::Commits { path, limit } => cmd_commits(&path, limit),
         Command::Docs { path } => cmd_docs(&path),
-        Command::DocCoverage { path, verbose } => cmd_doc_coverage(&path, verbose),
-        Command::Decisions { path, for_file } => cmd_decisions(&path, for_file.as_deref()),
+        Command::DocCoverage {
+            path,
+            verbose,
+            index,
+        } => cmd_doc_coverage(&path, verbose, index.as_deref()),
+        Command::Decisions {
+            path,
+            for_file,
+            index,
+        } => cmd_decisions(&path, for_file.as_deref(), index.as_deref()),
         Command::Decide {
             title,
             rationale,
@@ -880,7 +926,12 @@ fn main() -> anyhow::Result<()> {
         Command::Graphql { path } => cmd_graphql(&path),
         Command::Terraform { path } => cmd_terraform(&path),
         Command::ExternalDeps { path } => cmd_external_deps(&path),
-        Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
+        Command::Refactor {
+            path,
+            kind,
+            limit,
+            index,
+        } => cmd_refactor(&path, kind.as_deref(), limit, index.as_deref()),
         Command::Tour {
             path,
             from,
@@ -888,7 +939,11 @@ fn main() -> anyhow::Result<()> {
             format,
             index,
         } => cmd_tour(&path, from.as_deref(), max_steps, &format, index.as_deref()),
-        Command::Security { path, min_severity } => cmd_security(&path, min_severity.as_deref()),
+        Command::Security {
+            path,
+            min_severity,
+            index,
+        } => cmd_security(&path, min_severity.as_deref(), index.as_deref()),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Generate { path } => cmd_generate(&path),
         Command::ServeDashboard {
@@ -1824,6 +1879,7 @@ fn cmd_search(
     kind: Option<&str>,
     symbol_kind: Option<&str>,
     limit: usize,
+    index_file: Option<&Path>,
 ) -> anyhow::Result<()> {
     let mode = repowise_graph::SearchMode::parse(mode).map_err(|e| anyhow::anyhow!(e))?;
     // Semantic is handled separately: it ranks whole files by embedding
@@ -1832,6 +1888,19 @@ fn cmd_search(
     // list of variants means a future mode that also isn't substring
     // matching can't fall through into filters that don't fit it.
     if !mode.is_lexical() {
+        // Rejected rather than ignored, matching this command's existing
+        // rule for filters it can't honour: semantic mode ranks by an
+        // embedding index that lives under the *local* `.repowise/` and
+        // is tied to the root that built it. A portable artifact carries
+        // no embeddings, so accepting `--index` here would silently
+        // answer from a different source than the caller named.
+        if index_file.is_some() {
+            anyhow::bail!(
+                "--index is not supported with --mode semantic: embeddings live in the \
+                 local .repowise/ and aren't part of a portable index. Use a lexical \
+                 mode (symbol/path/hybrid), or run `repowise update` to embed them."
+            );
+        }
         return cmd_search_semantic(query, path, limit);
     }
     let kind = kind
@@ -1844,7 +1913,7 @@ fn cmd_search(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let graph = RepoGraph::build(&index);
 
     // A file passes the `--kind` filter, or there is no filter.
@@ -2145,10 +2214,15 @@ fn render_dead_code(
     out
 }
 
-fn cmd_dead_code(path: &Path, min_confidence: &str, limit: usize) -> anyhow::Result<()> {
+fn cmd_dead_code(
+    path: &Path,
+    min_confidence: &str,
+    limit: usize,
+    index_file: Option<&Path>,
+) -> anyhow::Result<()> {
     let threshold = parse_min_confidence(min_confidence)?;
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let graph = RepoGraph::build(&index);
     let candidates = repowise_health::find_dead_code(&index, &graph);
 
@@ -2740,9 +2814,9 @@ fn cmd_risk(revspec: Option<&str>, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_hotspots(path: &Path, top: usize) -> anyhow::Result<()> {
+fn cmd_hotspots(path: &Path, top: usize, index_file: Option<&Path>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let analytics = repowise_git::GitAnalytics::collect(&root)?;
     let hotspots = repowise_git::hotspots(&index, &analytics);
 
@@ -2904,9 +2978,9 @@ fn cmd_docs(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_doc_coverage(path: &Path, verbose: bool) -> anyhow::Result<()> {
+fn cmd_doc_coverage(path: &Path, verbose: bool, index_file: Option<&Path>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let report = repowise_docs::check_freshness(&index);
     let (missing, fresh, stale) = report.counts();
 
@@ -2926,9 +3000,13 @@ fn cmd_doc_coverage(path: &Path, verbose: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_decisions(path: &Path, for_file: Option<&Path>) -> anyhow::Result<()> {
+fn cmd_decisions(
+    path: &Path,
+    for_file: Option<&Path>,
+    index_file: Option<&Path>,
+) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let (mut decisions, inferred_state) = repowise_adr::mine_reporting(&index)?;
 
     if let Some(f) = for_file {
@@ -3348,9 +3426,14 @@ fn cmd_external_deps(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_refactor(path: &Path, kind: Option<&str>, limit: usize) -> anyhow::Result<()> {
+fn cmd_refactor(
+    path: &Path,
+    kind: Option<&str>,
+    limit: usize,
+    index_file: Option<&Path>,
+) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let graph = RepoGraph::build(&index);
 
     let kind_filter = kind
@@ -3510,9 +3593,13 @@ fn cmd_tour(
     Ok(())
 }
 
-fn cmd_security(path: &Path, min_severity: Option<&str>) -> anyhow::Result<()> {
+fn cmd_security(
+    path: &Path,
+    min_severity: Option<&str>,
+    index_file: Option<&Path>,
+) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
 
     let min_rank = min_severity
         .map(|s| match s {
@@ -4435,6 +4522,60 @@ mod tests {
     use repowise_workspace::{
         ContractDiagnostics, OrphanProducer, RepoEndpointCounts, UnmatchedConsumer, UnmatchedReason,
     };
+
+    /// Which commands expose `--index` is a deliberate list, not an
+    /// accident of which ones happened to get wired (issue #382). These
+    /// two tests pin both halves of it, so adding a command without
+    /// deciding which half it belongs in fails here rather than shipping.
+    ///
+    /// The read commands: index-derived, and correct when the answer
+    /// comes from an artifact somebody else built.
+    #[test]
+    fn every_index_derived_read_command_accepts_an_index_override() {
+        let cases: Vec<Vec<&str>> = vec![
+            vec!["repowise", "overview", "."],
+            vec!["repowise", "health", "."],
+            vec!["repowise", "deps", "src/lib.rs", "."],
+            vec!["repowise", "tour", "."],
+            vec!["repowise", "search", "query", "."],
+            vec!["repowise", "dead-code", "."],
+            vec!["repowise", "refactor", "."],
+            vec!["repowise", "security", "."],
+            vec!["repowise", "hotspots", "."],
+            vec!["repowise", "doc-coverage", "."],
+            vec!["repowise", "decisions", "."],
+        ];
+        for case in cases {
+            let mut argv = case.clone();
+            argv.extend(["--index", "shared.portable.json"]);
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "{} should accept --index",
+                case[1]
+            );
+        }
+    }
+
+    /// The other half. Each of these is excluded for a stated reason,
+    /// and the point is that they *reject* the flag rather than
+    /// accepting and ignoring it -- silently reading a different index
+    /// than the caller named is the failure this whole feature exists to
+    /// avoid.
+    #[test]
+    fn commands_that_cannot_honour_an_index_override_reject_it() {
+        // `update` builds the index; `docs`/`generate` write output
+        // derived from it, and writing artifact-derived content into the
+        // repo is exactly where staleness stops being cosmetic;
+        // `status`/`doctor` report on the *local* index, which is their
+        // entire subject; `export` reading an export is circular.
+        for cmd in ["update", "docs", "generate", "status", "doctor", "export"] {
+            let argv = vec!["repowise", cmd, ".", "--index", "shared.portable.json"];
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "{cmd} should reject --index rather than silently ignoring it"
+            );
+        }
+    }
 
     fn candidate(
         name: &str,

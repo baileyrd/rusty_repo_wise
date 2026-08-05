@@ -348,8 +348,8 @@ repowise export --out <DIR> [PATH] # export the wiki tree, the dependency graph 
                                     #   Format, or a portable committable index (see issue #378)
                                     #   --format <markdown|json-graph|index> (default markdown),
                                     #   --force for a non-empty target
-                                    # `--index <FILE>` on overview/health/deps/tour reads a
-                                    #   committed portable index instead of .repowise/index.json
+                                    # `--index <FILE>` reads a committed portable index instead
+                                    #   of .repowise/index.json -- see "Portable, committable index"
 repowise coverage add <REPORTS...> # ingest LCOV report(s), merging into existing coverage
                                     #   --replace to discard prior coverage, --path <DIR>
 repowise coverage status [PATH]    # per-file coverage summary + per-test map stats
@@ -1375,9 +1375,34 @@ repowise export --format index --out .repowise-share .   # producer, once
 repowise overview . --index .repowise-share/index.portable.json
 ```
 
-Supported on `overview`, `health`, `deps`, and `tour` today. The
-remaining read commands still require a local index; widening that is
-mechanical follow-up, not a design question.
+**Which commands take `--index` is a deliberate list** (issue #382), and
+both halves of it are pinned by tests so a new command can't quietly land
+in neither.
+
+Supported — every index-derived read command: `overview`, `health`,
+`deps`, `tour`, `search` (lexical modes), `dead-code`, `refactor`,
+`security`, `hotspots`, `doc-coverage`, `decisions`.
+
+Not supported, each for a stated reason:
+
+- `update` builds the index; `docs` and `generate` *write* output derived
+  from it, and writing artifact-derived content back into the repo is
+  where staleness stops being cosmetic.
+- `status` and `doctor` report on the *local* index — that is their
+  entire subject, so overriding it would answer a different question.
+- `export` reading an export is circular.
+- `search --mode semantic` **errors rather than ignoring the flag**:
+  embeddings live in the local `.repowise/` and are tied to the root that
+  built them, so a portable artifact carries none. This is the same rule
+  semantic mode already applies to filters it can't honour — refuse, don't
+  silently answer from a different source.
+- `ownership`, `coupled`, `risk`, and `commits` read git directly and
+  never load an index at all, so there is nothing for `--index` to
+  override.
+
+`hotspots` *is* supported and worth calling out: it needs both git and the
+index (churn × complexity), and git is already present in any checkout, so
+a shared index removes the only missing piece.
 
 **Staleness is always reported, never assumed.** A committed index is
 *routinely* behind the working tree — that is the normal case, not an

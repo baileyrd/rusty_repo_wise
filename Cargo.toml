@@ -21,6 +21,7 @@ members = [
     "crates/repowise-terraform",
     "crates/repowise-external-deps",
     "crates/repowise-security",
+    "crates/repowise-tour",
     "crates/repowise-cli",
 ]
 

@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `repowise tour` and the `repowise-tour` crate: a deterministic,
+  dependency-ordered reading path through a codebase, with `--from`,
+  `--max-steps`, and `--format text|markdown` (#377).
 ### Changed
 ### Fixed
 ### Security

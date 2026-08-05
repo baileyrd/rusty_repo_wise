@@ -25,6 +25,7 @@ repowise-graphql = { path = "../repowise-graphql" }
 repowise-terraform = { path = "../repowise-terraform" }
 repowise-external-deps = { path = "../repowise-external-deps" }
 repowise-security = { path = "../repowise-security" }
+repowise-tour = { path = "../repowise-tour" }
 # Cross-platform filesystem events for `repowise watch`. Pinned to the
 # latest stable major (9.x is a release candidate). Its transitive deps
 # are almost entirely platform-gated backends -- inotify on Linux,

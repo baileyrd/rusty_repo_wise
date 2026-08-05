@@ -306,6 +306,18 @@ impl OverviewDto {
 /// dashboard's health section renders, not the full per-finding detail.
 #[derive(Serialize)]
 struct HealthDto {
+    /// Which repo this describes; absent unscoped (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    /// One entry per workspace repo, present only on `?repo=all`.
+    ///
+    /// Health federates **per repo** and synthesises no workspace-wide
+    /// average, matching the `get_health` MCP tool: a mean of means is
+    /// not a mean, and a merged score would look authoritative while
+    /// being wrong. On a federated call the flat fields describe the
+    /// first repo and this list carries the real answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repos: Option<Vec<HealthDto>>,
     average_score: f64,
     file_count: usize,
     finding_count: usize,
@@ -662,10 +674,16 @@ struct OwnershipDto {
 struct DeadCodeQuery {
     #[serde(default)]
     min_confidence: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Serialize)]
 struct DeadCodeCandidateDto {
+    /// Which repo this came from; absent on an unscoped call, so the
+    /// current dashboard sees no change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     symbol: String,
     line: usize,
@@ -690,10 +708,16 @@ const DEAD_CODE_LIMIT: usize = 50;
 struct RefactorCandidatesQuery {
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Serialize)]
 struct RefactorCandidateDto {
+    /// Which repo this came from; absent on an unscoped call, so the
+    /// current dashboard sees no change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     id: String,
     /// `break-import-cycle`, `split-god-class`, `split-by-cohesion`, or
     /// `extract-duplicate`.
@@ -723,10 +747,16 @@ struct SecurityQuery {
     /// severity. Omit for everything.
     #[serde(default)]
     min_severity: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Serialize)]
 struct SecurityFindingDto {
+    /// Which repo this came from; absent on an unscoped call, so the
+    /// current dashboard sees no change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     line: usize,
     /// `aws-access-key-id`, `private-key-block`, `github-token`,
@@ -1276,19 +1306,42 @@ async fn get_overview(
     Ok(Json(totals))
 }
 
-async fn get_health(State(state): State<AppState>) -> Result<Json<HealthDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+async fn get_health(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<HealthDto>, ApiError> {
+    let targets = resolve_repo_targets(&state, q.repo.as_deref())?;
+    if targets.len() > 1 {
+        let mut per_repo = Vec::with_capacity(targets.len());
+        for target in &targets {
+            let mut dto = health_dto_for(&target.root)?;
+            dto.repo = target.repo.clone();
+            per_repo.push(dto);
+        }
+        let mut first = health_dto_for(&targets[0].root)?;
+        first.repos = Some(per_repo);
+        return Ok(Json(first));
+    }
+    let dto = health_dto_for(&targets[0].root)?;
+    Ok(Json(dto))
+}
+
+/// One repo's health report (issue #337) -- shared by the unscoped
+/// path and by each entry of a federated `?repo=all` answer, so the
+/// two can't compute it differently.
+fn health_dto_for(root: &Path) -> Result<HealthDto, ApiError> {
+    let index = RepoIndex::load(root)?;
     let graph = repowise_graph::RepoGraph::build(&index);
     // Organizational-signal markers (#313) need one `git blame` per
     // indexed file on top of a history walk -- several seconds on this
     // port's own workspace, acceptable for a full-report endpoint.
     // Degrades to skipping those six markers (not reporting zero risk)
     // when the root isn't a git repository.
-    let analytics = repowise_git::GitAnalytics::collect(&state.root).ok();
+    let analytics = repowise_git::GitAnalytics::collect(root).ok();
     let org_signals = analytics
         .as_ref()
-        .and_then(|a| repowise_git::org_signals::collect_org_signals(&state.root, &index, a).ok());
-    let config = load_repo_config(&state.root);
+        .and_then(|a| repowise_git::org_signals::collect_org_signals(root, &index, a).ok());
+    let config = load_repo_config(root);
     let health = repowise_health::analyze_with_context(
         &index,
         &graph,
@@ -1313,19 +1366,21 @@ async fn get_health(State(state): State<AppState>) -> Result<Json<HealthDto>, Ap
         .filter(|f| f.finding_count > 0)
         .take(WORST_FILES_LIMIT)
         .map(|f| FileHealthDto {
-            file: relative(&state.root, &f.file),
+            file: relative(root, &f.file),
             score: f.score,
             finding_count: f.finding_count,
         })
         .collect();
 
-    Ok(Json(HealthDto {
+    Ok(HealthDto {
+        repo: None,
+        repos: None,
         average_score: health.average_score,
         file_count: health.file_scores.len(),
         finding_count: health.findings.len(),
         by_kind,
         worst_files,
-    }))
+    })
 }
 
 async fn get_hotspots(State(state): State<AppState>) -> Result<Json<HotspotsDto>, ApiError> {
@@ -2254,9 +2309,7 @@ async fn get_dead_code(
     State(state): State<AppState>,
     Query(query): Query<DeadCodeQuery>,
 ) -> Result<Json<DeadCodeDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
-    let candidates = repowise_health::find_dead_code(&index, &graph);
+    let targets = resolve_repo_targets(&state, query.repo.as_deref())?;
 
     let threshold = match query.min_confidence.as_deref() {
         None => repowise_health::DeadCodeConfidence::Low,
@@ -2270,25 +2323,32 @@ async fn get_dead_code(
         }
     };
 
-    let matching: Vec<_> = candidates
-        .into_iter()
-        .filter(|c| c.confidence >= threshold)
-        .collect();
-    let total_matching = matching.len();
-    let candidates = matching
-        .into_iter()
-        .take(DEAD_CODE_LIMIT)
-        .map(|c| DeadCodeCandidateDto {
-            file: relative(&state.root, &c.file),
+    // total_matching sums across repos before the shared cap truncates,
+    // so a capped federated answer still reports the true total rather
+    // than one repo's share of it.
+    let mut all: Vec<DeadCodeCandidateDto> = Vec::new();
+    let mut total_matching = 0usize;
+    for target in &targets {
+        let index = RepoIndex::load(&target.root)?;
+        let graph = repowise_graph::RepoGraph::build(&index);
+        let matching: Vec<_> = repowise_health::find_dead_code(&index, &graph)
+            .into_iter()
+            .filter(|c| c.confidence >= threshold)
+            .collect();
+        total_matching += matching.len();
+        all.extend(matching.into_iter().map(|c| DeadCodeCandidateDto {
+            repo: target.repo.clone(),
+            file: relative(&target.root, &c.file),
             symbol: c.symbol,
             line: c.line,
             confidence: c.confidence.label().to_string(),
             risk_factors: c.risk_factors,
-        })
-        .collect();
+        }));
+    }
+    all.truncate(DEAD_CODE_LIMIT);
 
     Ok(Json(DeadCodeDto {
-        candidates,
+        candidates: all,
         total_matching,
     }))
 }
@@ -2297,16 +2357,12 @@ async fn get_refactor_candidates(
     State(state): State<AppState>,
     Query(query): Query<RefactorCandidatesQuery>,
 ) -> Result<Json<RefactorCandidatesDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
-    let mut candidates = repowise_refactor::find_refactor_candidates(&index, &graph);
+    let targets = resolve_repo_targets(&state, query.repo.as_deref())?;
 
     if let Some(kind) = query.kind.as_deref() {
         match kind {
             "break-import-cycle" | "split-god-class" | "split-by-cohesion"
-            | "extract-duplicate" => {
-                candidates.retain(|c| c.kind.label() == kind);
-            }
+            | "extract-duplicate" => {}
             other => {
                 return Err(anyhow::anyhow!(
                     "kind must be break-import-cycle/split-god-class/split-by-cohesion/\
@@ -2317,22 +2373,30 @@ async fn get_refactor_candidates(
         }
     }
 
-    let total_matching = candidates.len();
-    let candidates = candidates
-        .into_iter()
-        .take(REFACTOR_CANDIDATES_LIMIT)
-        .map(|c| RefactorCandidateDto {
+    let mut all: Vec<RefactorCandidateDto> = Vec::new();
+    let mut total_matching = 0usize;
+    for target in &targets {
+        let index = RepoIndex::load(&target.root)?;
+        let graph = repowise_graph::RepoGraph::build(&index);
+        let mut found = repowise_refactor::find_refactor_candidates(&index, &graph);
+        if let Some(kind) = query.kind.as_deref() {
+            found.retain(|c| c.kind.label() == kind);
+        }
+        total_matching += found.len();
+        all.extend(found.into_iter().map(|c| RefactorCandidateDto {
+            repo: target.repo.clone(),
             id: c.id,
             kind: c.kind.label().to_string(),
             title: c.title,
             rationale: c.rationale,
             files: c.files,
             symbols: c.symbols,
-        })
-        .collect();
+        }));
+    }
+    all.truncate(REFACTOR_CANDIDATES_LIMIT);
 
     Ok(Json(RefactorCandidatesDto {
-        candidates,
+        candidates: all,
         total_matching,
     }))
 }
@@ -2341,33 +2405,42 @@ async fn get_security(
     State(state): State<AppState>,
     Query(query): Query<SecurityQuery>,
 ) -> Result<Json<SecurityDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let mut findings = repowise_security::scan(&index);
+    let targets = resolve_repo_targets(&state, query.repo.as_deref())?;
 
-    if let Some(min) = query.min_severity.as_deref() {
-        let Some(min_rank) = security_severity_rank(min) else {
-            return Err(
-                anyhow::anyhow!("min_severity must be high/medium/low, got {min:?}").into(),
-            );
-        };
-        findings.retain(|f| f.severity >= min_rank);
-    }
+    let min_rank = match query.min_severity.as_deref() {
+        Some(min) => match security_severity_rank(min) {
+            Some(rank) => Some(rank),
+            None => {
+                return Err(
+                    anyhow::anyhow!("min_severity must be high/medium/low, got {min:?}").into(),
+                );
+            }
+        },
+        None => None,
+    };
 
-    let total_matching = findings.len();
-    let findings = findings
-        .into_iter()
-        .take(SECURITY_LIMIT)
-        .map(|f| SecurityFindingDto {
-            file: relative(&state.root, &f.file),
+    let mut all: Vec<SecurityFindingDto> = Vec::new();
+    let mut total_matching = 0usize;
+    for target in &targets {
+        let index = RepoIndex::load(&target.root)?;
+        let mut found = repowise_security::scan(&index);
+        if let Some(rank) = min_rank {
+            found.retain(|f| f.severity >= rank);
+        }
+        total_matching += found.len();
+        all.extend(found.into_iter().map(|f| SecurityFindingDto {
+            repo: target.repo.clone(),
+            file: relative(&target.root, &f.file),
             line: f.line,
             kind: f.kind.label(),
             severity: f.severity.label(),
             message: f.message,
-        })
-        .collect();
+        }));
+    }
+    all.truncate(SECURITY_LIMIT);
 
     Ok(Json(SecurityDto {
-        findings,
+        findings: all,
         total_matching,
     }))
 }
@@ -3628,6 +3701,92 @@ mod tests {
 
         let (status, _) = get(root, "/api/overview?repo=all").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// Every federatable endpoint honours `?repo=all`, not just the one
+    /// that shipped first -- and each labels its results.
+    #[tokio::test]
+    async fn every_federatable_endpoint_accepts_repo_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        for uri in [
+            "/api/health?repo=all",
+            "/api/dead-code?repo=all",
+            "/api/refactor-candidates?repo=all",
+            "/api/security?repo=all",
+        ] {
+            let (status, _) = get_ws(own.clone(), ws.clone(), uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri} should federate");
+        }
+    }
+
+    /// Health federates per repo and synthesises no merged average --
+    /// a mean of means is not a mean.
+    #[tokio::test]
+    async fn health_federates_per_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/health?repo=all").await;
+        assert_eq!(status, StatusCode::OK);
+        let repos = json["repos"]
+            .as_array()
+            .expect("federated health lists repos");
+        assert_eq!(repos.len(), 2);
+        assert!(
+            repos.iter().all(|r| r["repo"].is_string()),
+            "every entry must name its repo"
+        );
+    }
+
+    /// Dead-code results carry the repo they came from, and the total
+    /// sums across repos rather than reporting one repo's share.
+    #[tokio::test]
+    async fn dead_code_federates_and_labels_each_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/dead-code?repo=all").await;
+        assert_eq!(status, StatusCode::OK);
+        let candidates = json["candidates"].as_array().unwrap();
+        assert!(!candidates.is_empty(), "fixture must produce candidates");
+        let repos: std::collections::HashSet<&str> = candidates
+            .iter()
+            .filter_map(|c| c["repo"].as_str())
+            .collect();
+        assert!(
+            repos.contains("repo-a") && repos.contains("repo-b"),
+            "a federated call must reach both repos, got {repos:?}"
+        );
+        assert_eq!(
+            json["total_matching"].as_u64().unwrap() as usize,
+            candidates.len(),
+            "nothing was truncated here, so the total must match the list"
+        );
+    }
+
+    /// Unscoped calls keep their exact pre-#337 shape on every endpoint.
+    #[tokio::test]
+    async fn unscoped_calls_carry_no_repo_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (_, health) = get_ws(own.clone(), ws.clone(), "/api/health").await;
+        assert!(health.get("repos").is_none());
+        assert!(health.get("repo").is_none());
+
+        let (_, dead) = get_ws(own, ws, "/api/dead-code").await;
+        for c in dead["candidates"].as_array().unwrap() {
+            assert!(
+                c.get("repo").is_none(),
+                "unscoped results must stay unlabeled"
+            );
+        }
     }
 
     /// An unknown repo name is likewise the caller's mistake.

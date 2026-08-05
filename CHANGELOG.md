@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Dashboard: a stylesheet. The frontend had carried class hooks
+  (`empty`, `error`, `mono`, `view-nav`, `badge`, `repo-card`, ...)
+  since it was written but no CSS ever existed, so every view rendered
+  on browser defaults. Both colour schemes are honoured via
+  `prefers-color-scheme`.
 - Dashboard: a repo selector in the header, for servers started with
   `--workspace` and more than one repo. The choice lives in the URL
   hash, so it survives navigation and travels in a shared link

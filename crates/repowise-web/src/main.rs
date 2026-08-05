@@ -4809,15 +4809,20 @@ fn App() -> impl IntoView {
     });
 
     view! {
-        <h1>"repowise dashboard"</h1>
-        <p class="subtitle">"live server"</p>
-        <RepoSelector />
-        <JobBanner />
-        <button on:click=move |_| {
-            present_step.set(Some(0));
-            set_present_hash(Some(0));
-        }>"Present"</button>
-        <SearchBox selected=selected />
+        // The controls were already a flat run of siblings; grouping
+        // them under a `header` is what lets the stylesheet lay them
+        // out on one bar instead of stacking each on its own line.
+        <header class="app-header">
+            <h1>"repowise dashboard"</h1>
+            <p class="subtitle">"live server"</p>
+            <RepoSelector />
+            <JobBanner />
+            <button on:click=move |_| {
+                present_step.set(Some(0));
+                set_present_hash(Some(0));
+            }>"Present"</button>
+            <SearchBox selected=selected />
+        </header>
         <PresentMode step=present_step selected=selected />
         <nav class="view-nav">
             {ROUTES.iter().map(|(r, slug, label)| {
@@ -4832,6 +4837,7 @@ fn App() -> impl IntoView {
                 }
             }).collect::<Vec<_>>()}
         </nav>
+        <main class="app-main">
         <FileDetailPanel wiki_pages=wiki_pages selected=selected />
         {move || match (current.get(), detail_id.get()) {
             (Route::Symbols, Some(id)) => {
@@ -4880,6 +4886,7 @@ fn App() -> impl IntoView {
             .into_any(),
             },
         }}
+        </main>
     }
 }
 

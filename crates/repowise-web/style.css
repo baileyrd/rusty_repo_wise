@@ -1,0 +1,404 @@
+/* repowise dashboard.
+ *
+ * The frontend has carried class hooks (`empty`, `error`, `mono`,
+ * `view-nav`, `badge`, `repo-card`, ...) since it was written, but no
+ * stylesheet ever existed -- the dashboard rendered on browser
+ * defaults. This is that stylesheet. It styles the hooks that are
+ * already in the markup rather than asking the markup to change.
+ *
+ * Both colour schemes are defined here. A dev tool gets left open all
+ * day; honouring `prefers-color-scheme` costs one media query.
+ */
+
+:root {
+  --bg: #ffffff;
+  --surface: #f7f8fa;
+  --surface-alt: #eef0f4;
+  --text: #16191d;
+  --text-dim: #5c6672;
+  --border: #dfe3e8;
+  --accent: #2257d6;
+  --accent-soft: #e8eefc;
+  --danger: #b4232b;
+  --danger-soft: #fdeced;
+  --warn: #8a5a00;
+  --warn-soft: #fdf3e0;
+  --radius: 6px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181c;
+    --surface: #1b1f24;
+    --surface-alt: #22272e;
+    --text: #e4e8ed;
+    --text-dim: #98a3b0;
+    --border: #2d343c;
+    --accent: #78a9ff;
+    --accent-soft: #1d2a44;
+    --danger: #ff7b7b;
+    --danger-soft: #3a1e22;
+    --warn: #e3b341;
+    --warn-soft: #38300f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- header ---------- */
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 12px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.app-header .subtitle {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Pushes search to the right edge on wide screens; harmless when the
+ * header wraps on narrow ones. */
+.app-header .search-box {
+  margin-left: auto;
+}
+
+.repo-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ---------- nav ---------- */
+
+.view-nav {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 8px 20px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Browser defaults ran all 30 links together as one wrapped sentence of
+ * blue underlines. Discrete tabs is the whole fix. */
+.view-nav a {
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 13px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.view-nav a:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.view-nav a.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 550;
+}
+
+/* ---------- content ---------- */
+
+.app-main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 24px 24px 64px;
+}
+
+h2 {
+  margin: 32px 0 12px;
+  font-size: 19px;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+
+.app-main > h2:first-child,
+.app-main > div > h2:first-child {
+  margin-top: 4px;
+}
+
+h3 {
+  margin: 24px 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+h4 {
+  margin: 18px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+ul,
+ol {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+
+li {
+  margin: 2px 0;
+}
+
+/* ---------- tables ---------- */
+
+table {
+  width: 100%;
+  margin: 10px 0 20px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+tbody tr:hover {
+  background: var(--surface);
+}
+
+/* Numeric columns read as columns only when right-aligned, but the
+ * markup has no per-column class to hang that on -- so this is
+ * deliberately left alone rather than guessed at by index. */
+
+/* ---------- controls ---------- */
+
+button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--surface-alt);
+  border-color: var(--text-dim);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+input,
+select,
+textarea {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.search-box input {
+  width: 260px;
+}
+
+.search-results {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ---------- state text ---------- */
+
+/* 73 sites. Every "nothing here" message in the dashboard. */
+.empty {
+  margin: 8px 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* 41 sites. These were indistinguishable from body copy. */
+.error {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.warning {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 13px;
+}
+
+.mono,
+code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+pre,
+pre.mono {
+  margin: 10px 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+/* ---------- cards & panels ---------- */
+
+.repo-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.repo-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.repo-card h3 {
+  margin-top: 0;
+}
+
+.job-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.job-banner-status {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.file-detail {
+  margin: 12px 0 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.file-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-history {
+  max-height: 480px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}

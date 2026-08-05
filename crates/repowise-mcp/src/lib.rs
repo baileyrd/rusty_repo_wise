@@ -573,8 +573,69 @@ struct DependedOnFile {
     dependent_count: usize,
 }
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+struct OverviewParams {
+    /// Which repo(s) to summarise (issue #337). Omit for this server's
+    /// own indexed root -- the unscoped default, whose shape is
+    /// unchanged. Name a configured workspace repo for just that one, or
+    /// pass `"all"` to get one summary **per repo** in the `repos` list.
+    /// Anything other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+/// The additive scalars, summed across every target.
+struct OverviewTotals {
+    file_count: usize,
+    other_file_count: usize,
+    total_lines: usize,
+    import_edges: usize,
+    call_edges: usize,
+    unresolved_imports: usize,
+    unresolved_calls: usize,
+}
+
+/// One workspace repo's overview, as returned inside
+/// [`OverviewOutput::repos`] on a `repo="all"` call (issue #337).
+///
+/// Deliberately a per-repo breakdown rather than a merged super-summary.
+/// Counts would sum correctly, but `most_depended_on` would not: a
+/// dependent count is a within-repo number, so ranking those across
+/// repos silently compares different scales. Per-repo keeps every figure
+/// meaning exactly what it means in the single-repo case.
+#[derive(Serialize, schemars::JsonSchema)]
+struct RepoOverview {
+    repo: String,
+    file_count: usize,
+    other_file_count: usize,
+    total_lines: usize,
+    by_language: Vec<LanguageCount>,
+    symbol_counts: Vec<SymbolKindCount>,
+    import_edges: usize,
+    call_edges: usize,
+    unresolved_imports: usize,
+    unresolved_calls: usize,
+    most_depended_on: Vec<DependedOnFile>,
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 struct OverviewOutput {
+    /// One entry per workspace repo, present only on a `repo="all"`
+    /// call. Absent otherwise, so an unscoped call's shape is byte-for-
+    /// byte what it was before #337.
+    ///
+    /// When present, the flat fields below are **workspace totals** --
+    /// correct sums across every repo, since file/line/edge counts are
+    /// additive and `by_language`/`symbol_counts` merge by key. A caller
+    /// that ignores `repos` therefore still reads a true number rather
+    /// than one repo's share of it.
+    ///
+    /// The one exception is `most_depended_on`, which is **empty** on a
+    /// federated call: a dependent count is a within-repo number, so
+    /// ranking those across repos would silently compare different
+    /// scales. The per-repo lists in `repos` carry it instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repos: Option<Vec<RepoOverview>>,
     file_count: usize,
     other_file_count: usize,
     total_lines: usize,
@@ -1096,6 +1157,31 @@ struct HealthParams {
     /// Max rows in every ranked list. Default 20, capped at 50.
     #[serde(default = "default_health_limit")]
     limit: usize,
+    /// Which repo(s) to score (issue #337). Omit for this server's own
+    /// indexed root -- the unscoped default, whose shape is unchanged.
+    /// Name a configured workspace repo, or pass `"all"` for one summary
+    /// **per repo** in the `repos` list.
+    ///
+    /// Only meaningful in repo-wide mode: combined with `targets` it is
+    /// rejected rather than ignored, since a file path names a file in
+    /// one repo and "score these files across all repos" isn't a
+    /// question this can answer.
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+/// One workspace repo's health summary, inside [`HealthOutput::repos`].
+#[derive(Serialize, schemars::JsonSchema)]
+struct RepoHealth {
+    repo: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    average_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    average_score_unweighted: Option<f64>,
+    files: Vec<FileHealthOutput>,
+    files_total: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    findings_by_kind: Vec<FindingKindCount>,
 }
 
 /// A requested target that produced no score, and why.
@@ -1130,6 +1216,18 @@ struct FindingKindCount {
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct HealthOutput {
+    /// One entry per workspace repo, present only on a `repo="all"`
+    /// call (issue #337). Absent otherwise, so an unscoped call's shape
+    /// is unchanged.
+    ///
+    /// A per-repo breakdown rather than a merged score. The flat fields
+    /// below then describe the **first** configured repo: unlike
+    /// `get_overview`'s counts, health figures are not additive -- a
+    /// mean of means is not a mean -- so no workspace-wide average is
+    /// synthesised here rather than one that would look authoritative
+    /// and be wrong.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repos: Option<Vec<RepoHealth>>,
     /// `"repo"` (no targets given) or `"targeted"`.
     mode: &'static str,
     /// Line-count-weighted mean score across every indexed file.
@@ -1418,16 +1516,28 @@ impl RepowiseServer {
         name = "get_overview",
         description = "Summary stats about the indexed codebase: file/language/symbol counts, dependency-graph edge counts, and the most depended-on files. Requires a prior `repowise init`/`update`."
     )]
-    fn get_overview(&self) -> Result<Json<Envelope<OverviewOutput>>, ErrorData> {
+    fn get_overview(
+        &self,
+        Parameters(OverviewParams { repo }): Parameters<OverviewParams>,
+    ) -> Result<Json<Envelope<OverviewOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, graph, cached) = self.load()?;
-        let overview = graph.overview(&index);
-        Ok(self.indexed(
-            OverviewOutput {
-                file_count: overview.file_count,
-                other_file_count: overview.other_file_count,
-                total_lines: overview.total_lines,
-                by_language: overview
+        let targets = self.resolve_search_targets(repo.as_deref())?;
+        let federated = targets.len() > 1;
+
+        // Build one summary per target first; the flat fields are then
+        // derived from those, so the aggregate can never drift from the
+        // breakdown it claims to total.
+        let mut per_repo: Vec<RepoOverview> = Vec::new();
+        let mut first: Option<(RepoIndex, bool)> = None;
+        for target in &targets {
+            let (idx, gph, cached) = self.load_at(&target.root)?;
+            let o = gph.overview(&idx);
+            per_repo.push(RepoOverview {
+                repo: target.repo.clone().unwrap_or_default(),
+                file_count: o.file_count,
+                other_file_count: o.other_file_count,
+                total_lines: o.total_lines,
+                by_language: o
                     .by_language
                     .into_iter()
                     .map(|(language, file_count)| LanguageCount {
@@ -1435,23 +1545,92 @@ impl RepowiseServer {
                         file_count,
                     })
                     .collect(),
-                symbol_counts: overview
+                symbol_counts: o
                     .symbol_counts
                     .into_iter()
                     .map(|(kind, count)| SymbolKindCount { kind, count })
                     .collect(),
+                import_edges: o.import_edges,
+                call_edges: o.call_edges,
+                unresolved_imports: o.unresolved_imports,
+                unresolved_calls: o.unresolved_calls,
+                most_depended_on: o
+                    .most_depended_on
+                    .into_iter()
+                    .map(|(file, dependent_count)| DependedOnFile {
+                        file: display_rel(&file, &idx.root),
+                        dependent_count,
+                    })
+                    .collect(),
+            });
+            if first.is_none() {
+                first = Some((idx, cached));
+            }
+        }
+        let (index, cached) = first.ok_or_else(|| {
+            ErrorData::invalid_params("the configured workspace has no repos".to_string(), None)
+        })?;
+
+        let mut lang_merged: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for r in &per_repo {
+            for entry in &r.by_language {
+                *lang_merged.entry(entry.language.clone()).or_default() += entry.file_count;
+            }
+        }
+        let mut by_language: Vec<LanguageCount> = lang_merged
+            .into_iter()
+            .map(|(language, file_count)| LanguageCount {
+                language,
+                file_count,
+            })
+            .collect();
+        by_language.sort_by_key(|l| std::cmp::Reverse(l.file_count));
+
+        let mut symbol_merged: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for r in &per_repo {
+            for entry in &r.symbol_counts {
+                *symbol_merged.entry(entry.kind.clone()).or_default() += entry.count;
+            }
+        }
+        let mut symbol_counts: Vec<SymbolKindCount> = symbol_merged
+            .into_iter()
+            .map(|(kind, count)| SymbolKindCount { kind, count })
+            .collect();
+        symbol_counts.sort_by_key(|s| std::cmp::Reverse(s.count));
+
+        let overview = OverviewTotals {
+            file_count: per_repo.iter().map(|r| r.file_count).sum(),
+            other_file_count: per_repo.iter().map(|r| r.other_file_count).sum(),
+            total_lines: per_repo.iter().map(|r| r.total_lines).sum(),
+            import_edges: per_repo.iter().map(|r| r.import_edges).sum(),
+            call_edges: per_repo.iter().map(|r| r.call_edges).sum(),
+            unresolved_imports: per_repo.iter().map(|r| r.unresolved_imports).sum(),
+            unresolved_calls: per_repo.iter().map(|r| r.unresolved_calls).sum(),
+        };
+        // Ranking within-repo dependent counts across repos would
+        // compare different scales, so a federated call reports none and
+        // the per-repo lists carry it instead.
+        let most_depended_on = if federated {
+            Vec::new()
+        } else {
+            std::mem::take(&mut per_repo[0].most_depended_on)
+        };
+
+        Ok(self.indexed(
+            OverviewOutput {
+                repos: federated.then_some(per_repo),
+                file_count: overview.file_count,
+                other_file_count: overview.other_file_count,
+                total_lines: overview.total_lines,
+                by_language,
+                symbol_counts,
                 import_edges: overview.import_edges,
                 call_edges: overview.call_edges,
                 unresolved_imports: overview.unresolved_imports,
                 unresolved_calls: overview.unresolved_calls,
-                most_depended_on: overview
-                    .most_depended_on
-                    .into_iter()
-                    .map(|(file, dependent_count)| DependedOnFile {
-                        file: display_rel(&file, &index.root),
-                        dependent_count,
-                    })
-                    .collect(),
+                most_depended_on,
             },
             &index,
             started,
@@ -2081,17 +2260,30 @@ impl RepowiseServer {
     )]
     fn get_health(
         &self,
-        Parameters(HealthParams { targets, limit }): Parameters<HealthParams>,
+        Parameters(HealthParams {
+            targets,
+            limit,
+            repo,
+        }): Parameters<HealthParams>,
     ) -> Result<Json<Envelope<HealthOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, graph, cached) = self.load()?;
+        if repo.is_some() && !targets.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "repo and targets can't be combined: a target path names a file in one repo,                  so there is no coherent way to score given files across a whole workspace.                  Score files with targets, or a workspace with repo."
+                    .to_string(),
+                None,
+            ));
+        }
+        let scope = self.resolve_search_targets(repo.as_deref())?;
+        let scope_root = scope[0].root.clone();
+        let (index, graph, cached) = self.load_at(&scope_root)?;
         // One `GitAnalytics::collect` walk feeds the organizational
         // signals; a repo with no git history (or that isn't a git repo
         // at all) simply skips those six markers, the same degrade-
         // gracefully convention `coverage`/`hot_files` already use here.
-        let analytics = repowise_git::GitAnalytics::collect(&self.root).ok();
+        let analytics = repowise_git::GitAnalytics::collect(&scope_root).ok();
         let org_signals = analytics.as_ref().and_then(|a| {
-            repowise_git::org_signals::collect_org_signals(&self.root, &index, a).ok()
+            repowise_git::org_signals::collect_org_signals(&scope_root, &index, a).ok()
         });
         let report = repowise_health::analyze_with_context(
             &index,
@@ -2128,8 +2320,19 @@ impl RepowiseServer {
         if targets.is_empty() {
             // `analyze` returns file_scores sorted worst-first already.
             let files: Vec<_> = report.file_scores.iter().take(limit).map(render).collect();
+
+            // On a federated call, score every other configured repo the
+            // same way and report each separately. Deliberately not
+            // merged into one score: a mean of means is not a mean, and
+            // a synthesised workspace average would look authoritative
+            // while being wrong.
+            let repos = (scope.len() > 1)
+                .then(|| self.per_repo_health(&scope, limit))
+                .transpose()?;
+
             return Ok(self.indexed(
                 HealthOutput {
+                    repos,
                     mode: "repo",
                     average_score: weighted_average_score(&report, &index),
                     average_score_unweighted: (!report.file_scores.is_empty())
@@ -2179,6 +2382,7 @@ impl RepowiseServer {
 
         Ok(self.indexed(
             HealthOutput {
+                repos: None,
                 mode: "targeted",
                 // Repo-wide averages would be a non-sequitur next to a
                 // two-file answer, and worse, could be read as those
@@ -2195,6 +2399,74 @@ impl RepowiseServer {
             started,
             cached,
         ))
+    }
+
+    /// Score every repo in `scope` independently for a federated
+    /// `get_health` call (issue #337).
+    fn per_repo_health(
+        &self,
+        scope: &[SearchTarget],
+        limit: usize,
+    ) -> Result<Vec<RepoHealth>, ErrorData> {
+        let mut out = Vec::with_capacity(scope.len());
+        for target in scope {
+            let (idx, gph, _) = self.load_at(&target.root)?;
+            let analytics = repowise_git::GitAnalytics::collect(&target.root).ok();
+            let org = analytics.as_ref().and_then(|a| {
+                repowise_git::org_signals::collect_org_signals(&target.root, &idx, a).ok()
+            });
+            let rep = repowise_health::analyze_with_context(
+                &idx,
+                &gph,
+                &repowise_health::HealthWeights::default(),
+                &std::collections::HashSet::new(),
+                None,
+                org.as_ref(),
+            );
+            let files = rep
+                .file_scores
+                .iter()
+                .take(limit)
+                .map(|fh| FileHealthOutput {
+                    file: display_rel(&fh.file, &idx.root),
+                    score: fh.score,
+                    lines: idx
+                        .files
+                        .iter()
+                        .find(|f| f.path == fh.file)
+                        .map(|f| f.lines)
+                        .unwrap_or(0),
+                    findings: rep
+                        .findings
+                        .iter()
+                        .filter(|f| f.file == fh.file)
+                        .map(|f| HealthFindingOutput {
+                            kind: f.kind.label().to_string(),
+                            symbol: f.symbol.clone(),
+                            line: f.line,
+                            detail: f.detail.clone(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            out.push(RepoHealth {
+                repo: target.repo.clone().unwrap_or_default(),
+                average_score: weighted_average_score(&rep, &idx),
+                average_score_unweighted: (!rep.file_scores.is_empty())
+                    .then_some(rep.average_score),
+                files,
+                files_total: rep.file_scores.len(),
+                findings_by_kind: rep
+                    .findings_by_kind()
+                    .into_iter()
+                    .map(|(kind, count)| FindingKindCount {
+                        kind: kind.label().to_string(),
+                        count,
+                    })
+                    .collect(),
+            });
+        }
+        Ok(out)
     }
 
     #[tool(
@@ -2751,6 +3023,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data, .. }) = server
             .get_health(Parameters(HealthParams {
+                repo: None,
                 targets: Vec::new(),
                 limit: HEALTH_DEFAULT_LIMIT,
             }))
@@ -2791,6 +3064,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data, .. }) = server
             .get_health(Parameters(HealthParams {
+                repo: None,
                 targets: Vec::new(),
                 limit: 3,
             }))
@@ -2813,6 +3087,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data, .. }) = server
             .get_health(Parameters(HealthParams {
+                repo: None,
                 targets: Vec::new(),
                 limit: 100_000,
             }))
@@ -2832,6 +3107,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data, .. }) = server
             .get_health(Parameters(HealthParams {
+                repo: None,
                 targets: vec!["messy.rs".to_string()],
                 limit: HEALTH_DEFAULT_LIMIT,
             }))
@@ -2863,6 +3139,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data, .. }) = server
             .get_health(Parameters(HealthParams {
+                repo: None,
                 targets: vec!["late.rs".to_string(), "ghost.rs".to_string()],
                 limit: HEALTH_DEFAULT_LIMIT,
             }))
@@ -2899,6 +3176,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data, .. }) = server
             .get_health(Parameters(HealthParams {
+                repo: None,
                 targets: Vec::new(),
                 limit: HEALTH_DEFAULT_LIMIT,
             }))
@@ -2927,7 +3205,9 @@ mod tests {
         build_and_save_stamped_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(envelope) = server.get_overview().unwrap();
+        let Json(envelope) = server
+            .get_overview(Parameters(OverviewParams::default()))
+            .unwrap();
 
         assert_eq!(
             envelope.meta.indexed_commit,
@@ -2966,7 +3246,9 @@ mod tests {
         assert_ne!(indexed, live, "the test needs HEAD to have actually moved");
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(envelope) = server.get_overview().unwrap();
+        let Json(envelope) = server
+            .get_overview(Parameters(OverviewParams::default()))
+            .unwrap();
 
         assert_eq!(envelope.meta.indexed_commit.as_deref(), Some(&*indexed));
         assert_eq!(envelope.meta.live_head.as_deref(), Some(&*live));
@@ -3007,7 +3289,9 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(Envelope { data: overview, .. }) = server.get_overview().unwrap();
+        let Json(Envelope { data: overview, .. }) = server
+            .get_overview(Parameters(OverviewParams::default()))
+            .unwrap();
         assert_eq!(overview.file_count, 1);
         assert_eq!(
             overview
@@ -4090,6 +4374,133 @@ mod tests {
         for (rel_path, contents) in files {
             std::fs::write(root.join(rel_path), contents).unwrap();
         }
+    }
+
+    /// Two repos, each with a known file count, so the workspace total
+    /// can be checked against something real rather than against itself.
+    fn counted_workspace(root: &Path) -> Vec<repowise_workspace::ResolvedWorkspaceRepo> {
+        [("repo-a", 2usize), ("repo-b", 3usize)]
+            .iter()
+            .map(|(name, n)| {
+                let path = root.join(name);
+                let files: Vec<(String, String)> = (0..*n)
+                    .map(|i| {
+                        (
+                            format!("src/f{i}.rs"),
+                            format!("pub fn f{i}() -> i32 {{ {i} }}\n"),
+                        )
+                    })
+                    .collect();
+                let refs: Vec<(&str, &str)> = files
+                    .iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect();
+                write_crate(&path, name, &refs);
+                build_and_save_index(&path);
+                repowise_workspace::ResolvedWorkspaceRepo {
+                    name: name.to_string(),
+                    path,
+                    index: None,
+                }
+            })
+            .collect()
+    }
+
+    /// `get_overview` with `repo="all"` reports one entry per repo, and
+    /// the flat counts are the workspace **total** -- not one repo's
+    /// share, which is what a caller ignoring `repos` would otherwise
+    /// silently read.
+    #[test]
+    fn get_overview_federates_and_totals_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repos = counted_workspace(&root);
+        let own = repos[0].path.clone();
+        let server = RepowiseServer::new(own, Some(repos));
+
+        let out = server
+            .get_overview(Parameters(OverviewParams {
+                repo: Some("all".to_string()),
+            }))
+            .expect("federated overview");
+        let data = &out.0.data;
+
+        let per = data.repos.as_ref().expect("federated call must list repos");
+        assert_eq!(per.len(), 2);
+        assert_eq!(
+            data.file_count, 5,
+            "2 + 3 files, summed across the workspace"
+        );
+        assert_eq!(
+            data.file_count,
+            per.iter().map(|r| r.file_count).sum::<usize>(),
+            "the total must equal the breakdown it claims to total"
+        );
+        assert!(
+            data.most_depended_on.is_empty(),
+            "within-repo dependent counts must not be ranked across repos"
+        );
+    }
+
+    /// The unscoped call keeps its exact pre-#337 shape.
+    #[test]
+    fn an_unscoped_overview_has_no_repos_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repos = counted_workspace(&root);
+        let own = repos[0].path.clone();
+        let server = RepowiseServer::new(own, Some(repos));
+
+        let out = server
+            .get_overview(Parameters(OverviewParams::default()))
+            .expect("unscoped overview");
+        assert!(out.0.data.repos.is_none());
+        assert_eq!(out.0.data.file_count, 2, "just this server's own repo");
+    }
+
+    /// `get_health` federates per repo, and deliberately synthesises no
+    /// workspace-wide average -- a mean of means is not a mean.
+    #[test]
+    fn get_health_federates_per_repo_without_a_merged_average() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repos = counted_workspace(&root);
+        let own = repos[0].path.clone();
+        let server = RepowiseServer::new(own, Some(repos));
+
+        let out = server
+            .get_health(Parameters(HealthParams {
+                repo: Some("all".to_string()),
+                ..Default::default()
+            }))
+            .expect("federated health");
+        let per = out.0.data.repos.as_ref().expect("must list repos");
+        assert_eq!(per.len(), 2);
+        assert!(
+            per.iter().all(|r| !r.repo.is_empty()),
+            "every entry must name its repo"
+        );
+    }
+
+    /// Scoring named files across a whole workspace isn't a coherent
+    /// question, so it is refused rather than answered narrowly.
+    #[test]
+    fn get_health_rejects_repo_combined_with_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repos = counted_workspace(&root);
+        let own = repos[0].path.clone();
+        let server = RepowiseServer::new(own, Some(repos));
+
+        let result = server.get_health(Parameters(HealthParams {
+            repo: Some("all".to_string()),
+            targets: vec!["src/f0.rs".to_string()],
+            ..Default::default()
+        }));
+        let Err(err) = result else {
+            panic!("repo + targets must be refused");
+        };
+        assert!(format!("{err:?}").contains("targets"), "{err:?}");
     }
 
     /// #337's next slice: `get_dead_code` federates the same way

@@ -1976,6 +1976,34 @@ fn FileDetailPanel(wiki_pages: WikiPages, selected: RwSignal<Option<String>>) ->
 fn RepoSelector() -> impl IntoView {
     let workspace = LocalResource::new(|| fetch_json::<WorkspaceRepos>("/api/workspace-repos"));
     let current = RwSignal::new(repo_from_hash(&location_hash()));
+    let select_ref: NodeRef<leptos::html::Select> = NodeRef::new();
+
+    // The component is created once, so its signal would otherwise keep
+    // whatever the hash said at mount. A hash-only change (a pasted deep
+    // link in an open tab, back/forward, or another view's link) doesn't
+    // recreate it -- leaving the dropdown reading "(this server's repo)"
+    // while the data underneath came from another one. Only driving a
+    // real browser through consecutive navigations surfaces this.
+    window_event_listener_untyped("hashchange", move |_| {
+        current.set(repo_from_hash(&location_hash()));
+    });
+
+    // Set the value *after* the options exist. `prop:value` on the
+    // <select> runs when that node is created, but the options are
+    // appended afterwards (they're inside a Suspense), so the browser
+    // has nothing to match and silently leaves the first option
+    // selected -- a deep link then rendered the right data under a
+    // dropdown reading "(this server's repo)". Only rendering it
+    // catches that; the data and its label disagreeing is worse than
+    // either being wrong alone.
+    Effect::new(move |_| {
+        // Subscribe to both, so this re-runs once the list arrives.
+        let want = current.get().unwrap_or_default();
+        let loaded = workspace.get().is_some();
+        if let (true, Some(el)) = (loaded, select_ref.get()) {
+            el.set_value(&want);
+        }
+    });
 
     let on_change = move |ev: leptos::ev::Event| {
         let value = event_target_value(&ev);
@@ -2012,27 +2040,26 @@ fn RepoSelector() -> impl IntoView {
                 match repos {
                     None => view! { <span /> }.into_any(),
                     Some(w) => {
-                        let selected = current.get();
                         view! {
                             <label class="repo-selector">
                                 "Repo: "
-                                <select on:change=on_change>
-                                    <option
-                                        value=""
-                                        selected=selected.is_none()
-                                    >"(this server's repo)"</option>
+                                // `prop:value` on the <select>, not
+                                // `selected` on each <option>: the
+                                // attribute form is only the *initial*
+                                // DOM state, so a deep link rendered
+                                // the right data under a dropdown still
+                                // reading "(this server's repo)" --
+                                // the data and its label disagreeing,
+                                // which is worse than either being
+                                // wrong alone. Caught by rendering it.
+                                <select node_ref=select_ref on:change=on_change>
+                                    <option value="">"(this server's repo)"</option>
                                     {w.repos.iter().map(|r| {
                                         let name = r.name.clone();
                                         let label = r.name.clone();
-                                        let is_sel = selected.as_deref() == Some(name.as_str());
-                                        view! {
-                                            <option value=name selected=is_sel>{label}</option>
-                                        }
+                                        view! { <option value=name>{label}</option> }
                                     }).collect::<Vec<_>>()}
-                                    <option
-                                        value="all"
-                                        selected=selected.as_deref() == Some("all")
-                                    >"All repos"</option>
+                                    <option value="all">"All repos"</option>
                                 </select>
                             </label>
                         }.into_any()
@@ -4740,6 +4767,14 @@ fn App() -> impl IntoView {
 
     // Back/forward and manual edits both fire `hashchange`.
     window_event_listener_untyped("hashchange", move |_| {
+        // Re-sync the repo scope first (issue #337). A hash-only change
+        // does not reload the page, so `main`'s startup sync never runs
+        // again -- without this, pasting a deep link into an already-open
+        // tab (or using back/forward) left the scope stale, and the
+        // hash-rewrite below then dropped `repo=` entirely. Caught by
+        // driving a real browser through three navigations rather than
+        // one.
+        set_fetch_repo(repo_from_hash(&location_hash()));
         let (route, file) = parse_hash(&location_hash());
         // A present-mode hash must not move the underlying view.
         if !location_hash()

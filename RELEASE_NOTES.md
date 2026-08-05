@@ -6,6 +6,49 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## ADR-0003: a static, committed-payload dashboard (design for #383)
+**2026-08-05**
+
+- Design-only, no implementation. #383 is Large and gated on an ADR;
+  this is that gate.
+- **Measuring reversed two of the issue's assumptions, one of which was
+  asserted in #383 and #384 without being checked.**
+- **A static dashboard should not ship the portable index at all.** The
+  frontend never consumes the index -- it consumes endpoint responses,
+  which are summaries. Measured on this repo: 22 aggregate views total
+  545 KB, 2,913 symbol details 830 KB, 171 decision details 2.02 MB, for
+  a **3.23 MB bundle vs the 6.32 MB index**. So the payload is about
+  half what was assumed, and computing views in the browser would also
+  mean reimplementing health scoring and graph queries in WASM.
+- **#381 was therefore never a prerequisite for #383.** Both #383 and
+  #384 name it as one. Interning caller ids was worth doing on its own,
+  but it does not gate this, and the issues should be corrected rather
+  than left to mislead.
+- **30 of 32 views are coverable, not 17.** The first classification
+  said git- and ADR-derived views must be absent. But the *exporter runs
+  where the checkout is*, so hotspots, churn, ownership, contributors,
+  commits, and mined decisions can be pre-computed at export time --
+  they are read-only snapshots like everything else. Only `chat` and
+  `search-semantic` genuinely cannot work: they need a live model
+  endpoint and an API key at request time.
+- Those two are **absent, not degraded**: a chat box that cannot answer
+  is worse than no chat box, the same rule `search --mode semantic`
+  follows when it refuses `--index`.
+- Method note worth recording: the first pass classified handlers using
+  a fixed 40-line window per function, which bled into adjacent
+  functions and misclassified at least two of four spot-checks
+  (`get_overview` and `get_search` were both called git/LLM-dependent
+  and are neither). That pass was discarded and redone with real
+  function boundaries; the 17/9/2/2/2 split in the ADR is from the
+  corrected one.
+- Open question the ADR names and quantifies rather than settles:
+  detail-view bundling. Decision details alone are 59% of the payload
+  and symbol details another 25%, so eager bundling is the simplest and
+  most expensive option -- worth deciding against a working seam, not in
+  advance.
+
+---
+
 ## Portable-index-backed workspace members (closes #384)
 **2026-08-05**
 

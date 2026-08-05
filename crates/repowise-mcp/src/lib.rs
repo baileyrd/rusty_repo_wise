@@ -841,6 +841,13 @@ struct RefactorParams {
     /// come back ranked strongest-first (within `extract-duplicate`:
     /// exact matches, then near-duplicates by descending overlap), so a
     /// cap keeps the signal rather than an arbitrary slice.
+    /// Which repo(s) to scan (issue #337). Omit for this server's own
+    /// indexed root -- the unscoped default, whose results carry no
+    /// `repo` label. Name a configured workspace repo, or pass `"all"`
+    /// to federate across every configured repo in one call. Anything
+    /// other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
     #[serde(default = "default_refactor_limit")]
     limit: usize,
 }
@@ -849,6 +856,7 @@ impl Default for RefactorParams {
     fn default() -> Self {
         RefactorParams {
             kind: None,
+            repo: None,
             limit: default_refactor_limit(),
         }
     }
@@ -856,6 +864,9 @@ impl Default for RefactorParams {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct RefactorCandidateOutput {
+    /// Which repo this came from; absent on an unscoped call (#337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     id: String,
     /// `break-import-cycle`, `split-god-class`, `split-by-cohesion`, or
     /// `extract-duplicate`.
@@ -892,10 +903,20 @@ struct SecurityParams {
     /// `medium`, or `low`. Omit for everything.
     #[serde(default)]
     min_severity: Option<String>,
+    /// Which repo(s) to scan (issue #337). Omit for this server's own
+    /// indexed root -- the unscoped default, whose results carry no
+    /// `repo` label. Name a configured workspace repo, or pass `"all"`
+    /// to federate across every configured repo in one call. Anything
+    /// other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SecurityFindingOutput {
+    /// Which repo this came from; absent on an unscoped call (#337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     line: usize,
     /// `aws-access-key-id`, `private-key-block`, `github-token`,
@@ -2270,10 +2291,11 @@ impl RepowiseServer {
     )]
     fn get_refactor_candidates(
         &self,
-        Parameters(RefactorParams { kind, limit }): Parameters<RefactorParams>,
+        Parameters(RefactorParams { kind, limit, repo }): Parameters<RefactorParams>,
     ) -> Result<Json<Envelope<RefactorOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, graph, cached) = self.load()?;
+        let targets = self.resolve_search_targets(repo.as_deref())?;
+        let (index, graph, cached) = self.load_at(&targets[0].root)?;
 
         let kind_filter = kind
             .as_deref()
@@ -2290,25 +2312,32 @@ impl RepowiseServer {
             })
             .transpose()?;
 
-        let mut candidates = repowise_refactor::find_refactor_candidates(&index, &graph);
-        if let Some(k) = &kind_filter {
-            candidates.retain(|c| c.kind.label() == k);
-        }
-        let total_matching = candidates.len();
-        let limit = limit.clamp(1, REFACTOR_MAX_LIMIT);
-
-        let candidates = candidates
-            .into_iter()
-            .take(limit)
-            .map(|c| RefactorCandidateOutput {
+        let mut all: Vec<RefactorCandidateOutput> = Vec::new();
+        let mut total_matching = 0usize;
+        for target in &targets {
+            let (idx, gph, _) = if target.root == targets[0].root {
+                (index.clone(), graph.clone(), cached)
+            } else {
+                self.load_at(&target.root)?
+            };
+            let mut found = repowise_refactor::find_refactor_candidates(&idx, &gph);
+            if let Some(k) = &kind_filter {
+                found.retain(|c| c.kind.label() == k);
+            }
+            total_matching += found.len();
+            all.extend(found.into_iter().map(|c| RefactorCandidateOutput {
+                repo: target.repo.clone(),
                 id: c.id,
                 kind: c.kind.label().to_string(),
                 title: c.title,
                 rationale: c.rationale,
                 files: c.files,
                 symbols: c.symbols,
-            })
-            .collect();
+            }));
+        }
+        let limit = limit.clamp(1, REFACTOR_MAX_LIMIT);
+        all.truncate(limit);
+        let candidates = all;
 
         Ok(self.indexed(
             RefactorOutput {
@@ -2327,10 +2356,11 @@ impl RepowiseServer {
     )]
     fn get_security_findings(
         &self,
-        Parameters(SecurityParams { min_severity }): Parameters<SecurityParams>,
+        Parameters(SecurityParams { min_severity, repo }): Parameters<SecurityParams>,
     ) -> Result<Json<Envelope<SecurityOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, _graph, cached) = self.load()?;
+        let targets = self.resolve_search_targets(repo.as_deref())?;
+        let (index, _graph, cached) = self.load_at(&targets[0].root)?;
 
         let min_rank = min_severity
             .as_deref()
@@ -2345,23 +2375,30 @@ impl RepowiseServer {
             })
             .transpose()?;
 
-        let mut findings = repowise_security::scan(&index);
-        if let Some(min_rank) = min_rank {
-            findings.retain(|f| f.severity >= min_rank);
-        }
-        let total_matching = findings.len();
-
-        let findings = findings
-            .into_iter()
-            .take(SECURITY_LIMIT)
-            .map(|f| SecurityFindingOutput {
-                file: display_rel(&f.file, &index.root),
+        let mut all: Vec<SecurityFindingOutput> = Vec::new();
+        let mut total_matching = 0usize;
+        for target in &targets {
+            let idx = if target.root == targets[0].root {
+                index.clone()
+            } else {
+                self.load_at(&target.root)?.0
+            };
+            let mut found = repowise_security::scan(&idx);
+            if let Some(min_rank) = min_rank {
+                found.retain(|f| f.severity >= min_rank);
+            }
+            total_matching += found.len();
+            all.extend(found.into_iter().map(|f| SecurityFindingOutput {
+                repo: target.repo.clone(),
+                file: display_rel(&f.file, &idx.root),
                 line: f.line,
                 kind: f.kind.label(),
                 severity: f.severity.label(),
                 message: f.message,
-            })
-            .collect();
+            }));
+        }
+        all.truncate(SECURITY_LIMIT);
+        let findings = all;
 
         Ok(self.indexed(
             SecurityOutput {
@@ -3822,6 +3859,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_refactor_candidates(Parameters(RefactorParams {
                 kind: Some("extract-duplicate".to_string()),
+                repo: None,
                 limit: default_refactor_limit(),
             }))
             .unwrap();
@@ -3845,6 +3883,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_refactor_candidates(Parameters(RefactorParams {
             kind: Some("rewrite-everything".to_string()),
+            repo: None,
             limit: default_refactor_limit(),
         }));
         let Err(err) = result else {
@@ -3875,6 +3914,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_refactor_candidates(Parameters(RefactorParams {
                 kind: Some("extract-duplicate".to_string()),
+                repo: None,
                 limit: 2,
             }))
             .unwrap();
@@ -3926,6 +3966,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_security_findings(Parameters(SecurityParams {
                 min_severity: Some("high".to_string()),
+                repo: None,
             }))
             .unwrap();
 
@@ -3942,6 +3983,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_security_findings(Parameters(SecurityParams {
             min_severity: Some("critical".to_string()),
+            repo: None,
         }));
         let Err(err) = result else {
             panic!("expected an error for an unknown min_severity");

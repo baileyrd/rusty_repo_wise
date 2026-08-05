@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- MCP: `get_dead_code`, `get_refactor_candidates`, and
+  `get_security_findings` gained the `repo` parameter (a named workspace
+  repo, or `"all"` to federate across the workspace), matching
+  `search_codebase` (partial #337).
 - Workspace members may be backed by a committed portable index
   (`index = "..."` in the workspace TOML), so cross-repo commands no
   longer require every repo checked out and indexed. Source and

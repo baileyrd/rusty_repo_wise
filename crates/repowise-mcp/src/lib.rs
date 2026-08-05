@@ -150,6 +150,29 @@ impl RepowiseServer {
     /// rather than inferred by callers because this is the only place
     /// that knows — a caller can't tell a cache hit from a fast disk.
     fn load(&self) -> Result<(RepoIndex, RepoGraph, bool), ErrorData> {
+        self.load_at(&self.root)
+    }
+
+    /// [`Self::load`] for an arbitrary workspace repo root (issue #337).
+    ///
+    /// The mtime cache is only consulted for this server's *own* root.
+    /// A federated call touches every configured repo, and caching all
+    /// of them would quietly turn this into the multi-repo-resident
+    /// server #337 explicitly decided against -- PR #348 settled on
+    /// per-call, load-on-demand resolution because the query volume
+    /// doesn't justify holding every workspace index in memory, and
+    /// every other tool already re-loads fresh per call.
+    fn load_at(&self, root: &Path) -> Result<(RepoIndex, RepoGraph, bool), ErrorData> {
+        if root != self.root {
+            let index = RepoIndex::load(root).map_err(|e| {
+                ErrorData::internal_error(
+                    format!("failed to load index at {}: {e}", root.display()),
+                    None,
+                )
+            })?;
+            let graph = RepoGraph::build(&index);
+            return Ok((index, graph, false));
+        }
         let index_path = self.root.join(".repowise").join("index.json");
         let current_mtime = std::fs::metadata(&index_path)
             .and_then(|m| m.modified())
@@ -501,6 +524,13 @@ struct DeadCodeParams {
     /// entry points are all invisible to this port's static call graph.
     #[serde(default)]
     safe_only: bool,
+    /// Which repo(s) to scan (issue #337). Omit for this server's own
+    /// indexed root -- the unscoped default, whose results carry no
+    /// `repo` label. Name a configured workspace repo to scan just that
+    /// one, or pass `"all"` to federate across every configured repo in
+    /// one call. Anything other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
     /// Maximum number of candidates to return. Defaults to 50.
     #[serde(default = "default_dead_code_limit")]
     limit: usize,
@@ -511,6 +541,7 @@ impl Default for DeadCodeParams {
         DeadCodeParams {
             min_confidence: None,
             safe_only: false,
+            repo: None,
             limit: default_dead_code_limit(),
         }
     }
@@ -810,6 +841,13 @@ struct RefactorParams {
     /// come back ranked strongest-first (within `extract-duplicate`:
     /// exact matches, then near-duplicates by descending overlap), so a
     /// cap keeps the signal rather than an arbitrary slice.
+    /// Which repo(s) to scan (issue #337). Omit for this server's own
+    /// indexed root -- the unscoped default, whose results carry no
+    /// `repo` label. Name a configured workspace repo, or pass `"all"`
+    /// to federate across every configured repo in one call. Anything
+    /// other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
     #[serde(default = "default_refactor_limit")]
     limit: usize,
 }
@@ -818,6 +856,7 @@ impl Default for RefactorParams {
     fn default() -> Self {
         RefactorParams {
             kind: None,
+            repo: None,
             limit: default_refactor_limit(),
         }
     }
@@ -825,6 +864,9 @@ impl Default for RefactorParams {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct RefactorCandidateOutput {
+    /// Which repo this came from; absent on an unscoped call (#337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     id: String,
     /// `break-import-cycle`, `split-god-class`, `split-by-cohesion`, or
     /// `extract-duplicate`.
@@ -861,10 +903,20 @@ struct SecurityParams {
     /// `medium`, or `low`. Omit for everything.
     #[serde(default)]
     min_severity: Option<String>,
+    /// Which repo(s) to scan (issue #337). Omit for this server's own
+    /// indexed root -- the unscoped default, whose results carry no
+    /// `repo` label. Name a configured workspace repo, or pass `"all"`
+    /// to federate across every configured repo in one call. Anything
+    /// other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct SecurityFindingOutput {
+    /// Which repo this came from; absent on an unscoped call (#337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     line: usize,
     /// `aws-access-key-id`, `private-key-block`, `github-token`,
@@ -997,6 +1049,11 @@ struct ExternalDepsOutput {
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct DeadCodeCandidateOutput {
+    /// Which repo this came from. Absent on an unscoped call, so
+    /// existing callers see no shape change (issue #337) -- the same
+    /// rule `search_codebase`'s own `repo` label already follows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     symbol: String,
     line: usize,
@@ -2150,11 +2207,11 @@ impl RepowiseServer {
             min_confidence,
             safe_only,
             limit,
+            repo,
         }): Parameters<DeadCodeParams>,
     ) -> Result<Json<Envelope<DeadCodeOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, graph, cached) = self.load()?;
-        let candidates = repowise_health::find_dead_code(&index, &graph);
+        let targets = self.resolve_search_targets(repo.as_deref())?;
 
         let threshold = if safe_only {
             repowise_health::DeadCodeConfidence::High
@@ -2179,32 +2236,52 @@ impl RepowiseServer {
             }
         };
 
-        let matching: Vec<_> = candidates
-            .into_iter()
-            .filter(|c| c.confidence >= threshold)
-            .collect();
-        let total_matching = matching.len();
-
-        let candidates = matching
-            .into_iter()
-            .take(limit)
-            .map(|c| DeadCodeCandidateOutput {
+        // Federate across every resolved target. `total_matching` is
+        // summed across repos *before* the shared `limit` truncates, so
+        // a capped federated answer still reports the true total rather
+        // than one repo's share of it.
+        let mut all: Vec<DeadCodeCandidateOutput> = Vec::new();
+        let mut total_matching = 0usize;
+        let mut meta_index = None;
+        let mut meta_cached = false;
+        for target in &targets {
+            let (index, graph, cached) = self.load_at(&target.root)?;
+            let matching: Vec<_> = repowise_health::find_dead_code(&index, &graph)
+                .into_iter()
+                .filter(|c| c.confidence >= threshold)
+                .collect();
+            total_matching += matching.len();
+            all.extend(matching.into_iter().map(|c| DeadCodeCandidateOutput {
+                repo: target.repo.clone(),
                 file: display_rel(&c.file, &index.root),
                 symbol: c.symbol,
                 line: c.line,
                 confidence: c.confidence.label().to_string(),
                 risk_factors: c.risk_factors,
-            })
-            .collect();
+            }));
+            if meta_index.is_none() {
+                meta_cached = cached;
+                meta_index = Some(index);
+            }
+        }
+        all.truncate(limit);
+
+        // Staleness metadata describes the first target. On an unscoped
+        // call that is this server's own root, unchanged. On a federated
+        // one there is no single index to describe, and inventing a
+        // merged answer would be worse than naming one concretely.
+        let index = meta_index.ok_or_else(|| {
+            ErrorData::invalid_params("the configured workspace has no repos".to_string(), None)
+        })?;
 
         Ok(self.indexed(
             DeadCodeOutput {
-                candidates,
+                candidates: all,
                 total_matching,
             },
             &index,
             started,
-            cached,
+            meta_cached,
         ))
     }
 
@@ -2214,10 +2291,11 @@ impl RepowiseServer {
     )]
     fn get_refactor_candidates(
         &self,
-        Parameters(RefactorParams { kind, limit }): Parameters<RefactorParams>,
+        Parameters(RefactorParams { kind, limit, repo }): Parameters<RefactorParams>,
     ) -> Result<Json<Envelope<RefactorOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, graph, cached) = self.load()?;
+        let targets = self.resolve_search_targets(repo.as_deref())?;
+        let (index, graph, cached) = self.load_at(&targets[0].root)?;
 
         let kind_filter = kind
             .as_deref()
@@ -2234,25 +2312,32 @@ impl RepowiseServer {
             })
             .transpose()?;
 
-        let mut candidates = repowise_refactor::find_refactor_candidates(&index, &graph);
-        if let Some(k) = &kind_filter {
-            candidates.retain(|c| c.kind.label() == k);
-        }
-        let total_matching = candidates.len();
-        let limit = limit.clamp(1, REFACTOR_MAX_LIMIT);
-
-        let candidates = candidates
-            .into_iter()
-            .take(limit)
-            .map(|c| RefactorCandidateOutput {
+        let mut all: Vec<RefactorCandidateOutput> = Vec::new();
+        let mut total_matching = 0usize;
+        for target in &targets {
+            let (idx, gph, _) = if target.root == targets[0].root {
+                (index.clone(), graph.clone(), cached)
+            } else {
+                self.load_at(&target.root)?
+            };
+            let mut found = repowise_refactor::find_refactor_candidates(&idx, &gph);
+            if let Some(k) = &kind_filter {
+                found.retain(|c| c.kind.label() == k);
+            }
+            total_matching += found.len();
+            all.extend(found.into_iter().map(|c| RefactorCandidateOutput {
+                repo: target.repo.clone(),
                 id: c.id,
                 kind: c.kind.label().to_string(),
                 title: c.title,
                 rationale: c.rationale,
                 files: c.files,
                 symbols: c.symbols,
-            })
-            .collect();
+            }));
+        }
+        let limit = limit.clamp(1, REFACTOR_MAX_LIMIT);
+        all.truncate(limit);
+        let candidates = all;
 
         Ok(self.indexed(
             RefactorOutput {
@@ -2271,10 +2356,11 @@ impl RepowiseServer {
     )]
     fn get_security_findings(
         &self,
-        Parameters(SecurityParams { min_severity }): Parameters<SecurityParams>,
+        Parameters(SecurityParams { min_severity, repo }): Parameters<SecurityParams>,
     ) -> Result<Json<Envelope<SecurityOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, _graph, cached) = self.load()?;
+        let targets = self.resolve_search_targets(repo.as_deref())?;
+        let (index, _graph, cached) = self.load_at(&targets[0].root)?;
 
         let min_rank = min_severity
             .as_deref()
@@ -2289,23 +2375,30 @@ impl RepowiseServer {
             })
             .transpose()?;
 
-        let mut findings = repowise_security::scan(&index);
-        if let Some(min_rank) = min_rank {
-            findings.retain(|f| f.severity >= min_rank);
-        }
-        let total_matching = findings.len();
-
-        let findings = findings
-            .into_iter()
-            .take(SECURITY_LIMIT)
-            .map(|f| SecurityFindingOutput {
-                file: display_rel(&f.file, &index.root),
+        let mut all: Vec<SecurityFindingOutput> = Vec::new();
+        let mut total_matching = 0usize;
+        for target in &targets {
+            let idx = if target.root == targets[0].root {
+                index.clone()
+            } else {
+                self.load_at(&target.root)?.0
+            };
+            let mut found = repowise_security::scan(&idx);
+            if let Some(min_rank) = min_rank {
+                found.retain(|f| f.severity >= min_rank);
+            }
+            total_matching += found.len();
+            all.extend(found.into_iter().map(|f| SecurityFindingOutput {
+                repo: target.repo.clone(),
+                file: display_rel(&f.file, &idx.root),
                 line: f.line,
                 kind: f.kind.label(),
                 severity: f.severity.label(),
                 message: f.message,
-            })
-            .collect();
+            }));
+        }
+        all.truncate(SECURITY_LIMIT);
+        let findings = all;
 
         Ok(self.indexed(
             SecurityOutput {
@@ -3673,6 +3766,7 @@ mod tests {
         let Json(Envelope { data: safe, .. }) = server
             .get_dead_code(Parameters(DeadCodeParams {
                 min_confidence: None,
+                repo: None,
                 safe_only: true,
                 limit: 50,
             }))
@@ -3694,6 +3788,7 @@ mod tests {
         let Json(Envelope { data: dead, .. }) = server
             .get_dead_code(Parameters(DeadCodeParams {
                 min_confidence: None,
+                repo: None,
                 safe_only: false,
                 limit: 1,
             }))
@@ -3712,6 +3807,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_dead_code(Parameters(DeadCodeParams {
             min_confidence: Some("extreme".to_string()),
+            repo: None,
             safe_only: false,
             limit: 50,
         }));
@@ -3763,6 +3859,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_refactor_candidates(Parameters(RefactorParams {
                 kind: Some("extract-duplicate".to_string()),
+                repo: None,
                 limit: default_refactor_limit(),
             }))
             .unwrap();
@@ -3786,6 +3883,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_refactor_candidates(Parameters(RefactorParams {
             kind: Some("rewrite-everything".to_string()),
+            repo: None,
             limit: default_refactor_limit(),
         }));
         let Err(err) = result else {
@@ -3816,6 +3914,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_refactor_candidates(Parameters(RefactorParams {
                 kind: Some("extract-duplicate".to_string()),
+                repo: None,
                 limit: 2,
             }))
             .unwrap();
@@ -3867,6 +3966,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_security_findings(Parameters(SecurityParams {
                 min_severity: Some("high".to_string()),
+                repo: None,
             }))
             .unwrap();
 
@@ -3883,6 +3983,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_security_findings(Parameters(SecurityParams {
             min_severity: Some("critical".to_string()),
+            repo: None,
         }));
         let Err(err) = result else {
             panic!("expected an error for an unknown min_severity");
@@ -3989,6 +4090,107 @@ mod tests {
         for (rel_path, contents) in files {
             std::fs::write(root.join(rel_path), contents).unwrap();
         }
+    }
+
+    /// #337's next slice: `get_dead_code` federates the same way
+    /// `search_codebase` already did, and labels each candidate with the
+    /// repo it came from.
+    #[test]
+    fn get_dead_code_federates_across_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Both repos need an uncalled function, or the assertion below
+        // passes or fails for the fixture's reasons rather than the
+        // federation logic's. `two_repo_workspace`'s repo-b has no
+        // functions at all, so it yields no candidates.
+        let repos: Vec<repowise_workspace::ResolvedWorkspaceRepo> = ["repo-a", "repo-b"]
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                write_crate(
+                    &path,
+                    name,
+                    &[(
+                        "src/lib.rs",
+                        "pub fn never_called_anywhere() -> i32 { 1 }\n",
+                    )],
+                );
+                build_and_save_index(&path);
+                repowise_workspace::ResolvedWorkspaceRepo {
+                    name: name.to_string(),
+                    path,
+                    index: None,
+                }
+            })
+            .collect();
+        let own = repos[0].path.clone();
+        let server = RepowiseServer::new(own, Some(repos));
+
+        let all = server
+            .get_dead_code(Parameters(DeadCodeParams {
+                repo: Some("all".to_string()),
+                ..Default::default()
+            }))
+            .expect("federated call");
+        assert!(
+            !all.0.data.candidates.is_empty(),
+            "fixture must produce candidates, or this proves nothing"
+        );
+        let names: std::collections::HashSet<Option<String>> = all
+            .0
+            .data
+            .candidates
+            .iter()
+            .map(|c| c.repo.clone())
+            .collect();
+        assert!(
+            names.contains(&Some("repo-a".to_string()))
+                && names.contains(&Some("repo-b".to_string())),
+            "a federated call must reach both repos, got {names:?}"
+        );
+    }
+
+    /// The unscoped call must keep its exact pre-#337 shape: one repo,
+    /// and no `repo` label on any candidate. Existing agents parse this.
+    #[test]
+    fn an_unscoped_get_dead_code_call_carries_no_repo_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repos = two_repo_workspace(&root);
+        let own = repos[0].path.clone();
+        let server = RepowiseServer::new(own, Some(repos));
+
+        let out = server
+            .get_dead_code(Parameters(DeadCodeParams::default()))
+            .expect("unscoped call");
+        assert!(
+            out.0.data.candidates.iter().all(|c| c.repo.is_none()),
+            "an unscoped call must not start labelling results"
+        );
+    }
+
+    /// Naming a repo without `--workspace` is refused, not quietly
+    /// answered from this server's own root -- that would look like an
+    /// answer to "scan my workspace" while answering something narrower.
+    #[test]
+    fn get_dead_code_with_a_repo_but_no_workspace_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_crate(&root, "solo", &[("src/lib.rs", "pub fn a() {}\n")]);
+        build_and_save_index(&root);
+        let server = RepowiseServer::new(root, None);
+
+        let result = server.get_dead_code(Parameters(DeadCodeParams {
+            repo: Some("all".to_string()),
+            ..Default::default()
+        }));
+        let Err(err) = result else {
+            panic!("naming a repo without --workspace must error");
+        };
+        assert!(
+            format!("{err:?}").contains("workspace"),
+            "the error must name the missing --workspace: {err:?}"
+        );
     }
 
     fn two_repo_workspace(dir: &Path) -> Vec<repowise_workspace::ResolvedWorkspaceRepo> {

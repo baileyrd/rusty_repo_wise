@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Dashboard API: `/api/health`, `/api/dead-code`,
+  `/api/refactor-candidates`, and `/api/security` gained `?repo=` too —
+  every federatable endpoint now honours it. `/api/search` is
+  deliberately excluded: its `files` field is a bare string list, so
+  labelling matches would change a type the frontend consumes (#337).
 - Dashboard API: `GET /api/overview` gained a `?repo=` query parameter
   (a named workspace repo, or `all` to federate), mirroring the MCP
   tool — federated responses add a `repos` breakdown, and an unknown

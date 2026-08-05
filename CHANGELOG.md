@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Dashboard API: `GET /api/overview` gained a `?repo=` query parameter
+  (a named workspace repo, or `all` to federate), mirroring the MCP
+  tool — federated responses add a `repos` breakdown, and an unknown
+  repo or a missing `--workspace` is a 400 rather than a 500 (partial
+  #337).
 - MCP: `get_overview` and `get_health` gained the `repo` parameter,
   federating **per repo** (a `repos` list) rather than merging —
   overview's flat counts become workspace totals; health synthesises no

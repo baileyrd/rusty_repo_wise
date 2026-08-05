@@ -30,6 +30,15 @@ convention from issues like #64 and #319). **Priority for this repo's
 near-term work is parity** — closing these before starting anything not
 tracked back to the upstream reference.
 
+**Status as of 2026-08-05:** of the 20 tracked gaps below, 3 remain open
+([#333](https://github.com/baileyrd/rusty_repo_wise/issues/333),
+[#335](https://github.com/baileyrd/rusty_repo_wise/issues/335),
+[#337](https://github.com/baileyrd/rusty_repo_wise/issues/337)) — each
+partially closed, with the remainder needing a human decision. The other
+17 are closed or closed-not-planned. Work shipped in the same period that
+is *not* parity work is listed separately below, so this file isn't
+mistaken for a full changelog.
+
 ## Already at parity (not gaps)
 
 Worth stating plainly, since the first pass got this wrong: the port has
@@ -53,11 +62,18 @@ places exceeds upstream on raw count:
   **Correction (Round 2, 2026-07-31): this was parity with this repo's own
   issue #59/#65 bundle, not with upstream's actual current dashboard.** A
   direct read of upstream's `docs/start/DASHBOARD.md` found 23 named views;
-  this port has solid equivalents for roughly 15–16 of them and is missing
-  or has only a partial equivalent for the rest — see issues #351–#360.
+  this port had solid equivalents for roughly 15–16 of them and was missing
+  or had only a partial equivalent for the rest — tracked as issues
+  #351–#360. **All ten are now closed** (see the table below), so the
+  dashboard gap identified in Round 2 is worked through.
   The static-dashboard-vs-live-dashboard migration (this repo's own #59/#65
-  scope) is genuinely done; parity with upstream's actual, current dashboard
-  is not.
+  scope) is genuinely done. It is also settled policy rather than an
+  accident: issue #383 later proposed re-adding a static, committed-payload
+  dashboard alongside the live one and was **closed as not planned**, on
+  the grounds #59/#65 already established — keeping both means two
+  dashboards to keep in sync on every future feature rather than one built
+  well. See `docs/adr/0003-static-dashboard.md`, kept for the measurements
+  even though the work was declined.
 - `repowise-distill`: reversible command-output compaction with an
   omission store, a hook that routes recognized commands through it
   automatically, savings accounting, and fumble-correction detection
@@ -85,6 +101,45 @@ list:
 - **A hosted/SaaS offering and commercial dual-licensing**: a business-model
   decision, not an engineering gap — this port is MIT-licensed,
   self-hosted-only, and doesn't share code with upstream's AGPL-3.0 base.
+
+## Non-parity work shipped alongside (not gaps, not parity progress)
+
+**2026-08-05.** A separate comparison — against
+[Understand-Anything](https://github.com/Egonex-AI/Understand-Anything)
+(TypeScript, LLM-agent-first), *not* upstream repowise — produced seven
+issues and six shipped changes. **None of them are parity gaps**, none
+carry the `parity-gap` label, and none appear in the table below. They
+are listed here only so this file isn't read as a complete record of
+what the port has gained.
+
+| Shipped | Issue / PR |
+|---------|------------|
+| Guided tours: a deterministic, dependency-ordered reading path (`repowise tour`, `repowise-tour` crate) | #377 / PR #379 |
+| Portable, committable index — repo-relative, canonically sorted, schema-versioned (`export --format index`, `--index <FILE>`) | #378 / PR #380, ADR-0002 |
+| `--index` widened to all eleven index-derived read commands | #382 / PR #385 |
+| Interned caller ids (portable schema v2, 18.3% smaller, lossless) | #381 / PR #386 |
+| Portable-index-backed workspace members | #384 / PR #386 |
+| Rust/Go module paths recorded in the artifact, so a never-cloned member still resolves cross-repo | #388 / PR #389 |
+| Static committed-payload dashboard | #383 — **closed, not planned**; ADR-0003 kept |
+
+**This deviated from the priority stated above.** That line reads
+"closing these before starting anything not tracked back to the upstream
+reference", and three parity gaps (#333, #335, #337) stayed open
+throughout. Recorded rather than quietly absorbed, since the priority is
+either real or it should be rewritten.
+
+Two corrections these changes forced, worth keeping visible because they
+were wrong in the issue text before they were right in the code:
+
+- **Dropping `calls` from the index is not a compression option.** It
+  takes `call_in_degree` to zero for every symbol, so the dead-code list
+  contains *everything* and health scores collapse; dropping
+  `field_accesses` fails the opposite way (LCOM4 goes quiet, scores
+  silently rise). Interning was the lossless answer.
+- **A static dashboard was already a settled non-goal**, decided by
+  #59/#65 and documented in the README. #383 was filed from a
+  feature-comparison without checking whether the absence was deliberate
+  — a gap and a deliberate omission look identical from outside.
 
 ## Open parity gaps (tracked as issues)
 

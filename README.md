@@ -344,8 +344,12 @@ repowise watch [PATH] [--debounce MS] [-v]      # re-index after each quiet peri
 repowise deps <FILE> [PATH]        # a file's resolved dependencies/dependents
 repowise health [PATH]             # code-health KPIs and lowest-scoring files
                                     #   --weights <FILE> to override penalty weights (partial TOML)
-repowise export --out <DIR> [PATH] # export the wiki tree, or the dependency graph as JSON Graph Format
-                                    #   --format <markdown|json-graph> (default markdown), --force for a non-empty target
+repowise export --out <DIR> [PATH] # export the wiki tree, the dependency graph as JSON Graph
+                                    #   Format, or a portable committable index (see issue #378)
+                                    #   --format <markdown|json-graph|index> (default markdown),
+                                    #   --force for a non-empty target
+                                    # `--index <FILE>` on overview/health/deps/tour reads a
+                                    #   committed portable index instead of .repowise/index.json
 repowise coverage add <REPORTS...> # ingest LCOV report(s), merging into existing coverage
                                     #   --replace to discard prior coverage, --path <DIR>
 repowise coverage status [PATH]    # per-file coverage summary + per-test map stats
@@ -1323,6 +1327,79 @@ have no target node, so they have no edge. Rather than emit a graph that merely
 import stems that failed to resolve, and the command prints the same warning to
 the terminal. On this repo that's 381 unresolved imports and 7804 unresolved
 calls — a reader drawing conclusions from the edges needs to know that.
+
+## Portable, committable index
+
+`repowise export --format index --out <DIR>` writes
+`index.portable.json`: the full index in a form safe to **commit and read
+on another machine** (issue #378, designed in
+`docs/adr/0002-portable-committable-index.md`).
+
+Why it exists: `.repowise/index.json` is gitignored and not portable even
+if it weren't. On this repo the indexed root appears **27,884 times** in
+it, so committing it as-is would be wrong on every machine but the one
+that wrote it — and would publish one developer's home-directory layout
+to everyone who read it. So indexing is paid per developer, per machine,
+per CI job, forever, even by someone who only wants to *read* the
+analysis.
+
+**Seven fields carry a path, not two.** `RepoIndex.root`,
+`FileRecord.path`, `Symbol.file`, `Symbol.id`, `ImportRef.resolved_file`,
+`CallRef.caller`, and `FieldAccessRef.method`. The last three are
+`SymbolId` strings that *contain* the path (`{file}::{name}@{line}`),
+which is what makes them easy to miss and what would make an artifact
+look portable while silently isn't. All seven are rebased.
+
+**Canonical ordering, because `readdir` order is not portable.**
+`discover_files` walks via `ignore::WalkBuilder`, whose iteration order
+follows the filesystem. Two runs on one machine match by accident, not by
+contract. The exporter sorts files by path and records within each file,
+so the same commit exports identically anywhere — without that, every
+re-export would reorder itself between machines and become an
+unreviewable diff.
+
+**Forward slashes on every platform**, so a repo indexed on Linux reads
+correctly on Windows.
+
+**An explicit `schema_version`, which fails loudly.** A committed
+artifact outlives the binary that wrote it. A version mismatch errors
+telling you to re-export, and never misparses quietly — the
+`serde(default)` leniency the working index uses is right for a file you
+can always regenerate and wrong for one meant to be read by a binary that
+didn't write it.
+
+Read one with `--index <FILE>`:
+
+```
+repowise export --format index --out .repowise-share .   # producer, once
+repowise overview . --index .repowise-share/index.portable.json
+```
+
+Supported on `overview`, `health`, `deps`, and `tour` today. The
+remaining read commands still require a local index; widening that is
+mechanical follow-up, not a design question.
+
+**Staleness is always reported, never assumed.** A committed index is
+*routinely* behind the working tree — that is the normal case, not an
+error — so every read prints whether the artifact matches your checkout,
+compared against `indexed_commit`:
+
+```
+note: reading .repowise-share/index.portable.json -- STALE: built at 550d1fa69b85,
+your checkout is at 51c821224a75. Findings may not match your working tree.
+```
+
+Unknown is reported as unknown: an artifact with no recorded commit says
+so rather than implying it is current.
+
+**Size is the honest caveat.** The artifact is ~7.7 MB for this
+122-file repo, because `calls` is 51.7% of the index and `symbols` 45.3%
+— rebasing paths reclaims only ~750 KB of that. Teams committing one
+should expect git-lfs territory on a larger repo. A reduced read-only
+projection that drops `calls` would roughly halve it, but it would also
+disable dead-code detection and the call-graph health markers, so that
+is a capability decision deferred to its own issue rather than bundled
+into the format.
 
 ## Coverage health markers
 

@@ -9,6 +9,7 @@ pub mod docker;
 pub mod graphql;
 pub mod openapi;
 pub mod org_signals;
+pub mod portable;
 pub mod protobuf;
 pub mod sql;
 pub mod terraform;
@@ -242,8 +243,16 @@ impl Language {
 }
 
 /// Kind of a definition site extracted from source.
+///
+/// `Default` is derived **only in test builds** (`cfg_attr(test, ...)`),
+/// purely so test fixtures can use `..Default::default()` on [`Symbol`]
+/// without spelling out its twenty-odd health-marker fields. There is no
+/// meaningful "default kind" for real extracted code, so production
+/// builds deliberately don't get one to reach for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub enum SymbolKind {
+    #[cfg_attr(test, default)]
     Function,
     Method,
     Struct,
@@ -278,7 +287,10 @@ impl SymbolKind {
 pub type SymbolId = String;
 
 /// A function/struct/class/etc. definition discovered in a file.
+///
+/// `Default` is test-build-only — see [`SymbolKind`] for why.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,

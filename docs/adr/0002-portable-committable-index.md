@@ -1,9 +1,10 @@
 # ADR-0002: A portable, committable index artifact
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-05
 
-Tracks issue #378.
+Tracks issue #378. Implemented in the same branch that accepted it —
+`crates/repowise-core/src/portable.rs` is the choke point described below.
 
 ## Context
 

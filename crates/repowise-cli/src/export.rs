@@ -97,6 +97,10 @@ pub fn plan(wiki_root: &Path, out_dir: &Path, force: bool) -> anyhow::Result<Vec
 /// File the JSON-graph export is written to, inside `out_dir`.
 pub const JSON_GRAPH_FILE: &str = "architecture.json";
 
+/// Filename for `--format index` (issue #378). Named for what it is —
+/// a portable artifact, not the machine-local `.repowise/index.json`.
+pub const PORTABLE_INDEX_FILE: &str = "index.portable.json";
+
 /// Prepare `out_dir` for a JSON-graph export and return the file to
 /// write.
 ///
@@ -107,13 +111,24 @@ pub const JSON_GRAPH_FILE: &str = "architecture.json";
 /// demanding `--force` for it would train people to pass `--force`
 /// habitually -- which is exactly when it stops protecting anything.
 pub fn json_graph_dest(out_dir: &Path, force: bool) -> anyhow::Result<PathBuf> {
-    let dest = out_dir.join(JSON_GRAPH_FILE);
+    single_file_dest(out_dir, JSON_GRAPH_FILE, force)
+}
+
+pub fn portable_index_dest(out_dir: &Path, force: bool) -> anyhow::Result<PathBuf> {
+    single_file_dest(out_dir, PORTABLE_INDEX_FILE, force)
+}
+
+/// Destination for a one-file export into `out_dir`, refusing to write
+/// into a directory holding anything other than that file unless
+/// `force`.
+fn single_file_dest(out_dir: &Path, name: &str, force: bool) -> anyhow::Result<PathBuf> {
+    let dest = out_dir.join(name);
     if !force {
         let other_content = std::fs::read_dir(out_dir)
             .into_iter()
             .flatten()
             .flatten()
-            .any(|e| e.file_name() != JSON_GRAPH_FILE);
+            .any(|e| e.file_name() != name);
         if other_content {
             anyhow::bail!(
                 "{} is not empty -- pass --force to write into it anyway",

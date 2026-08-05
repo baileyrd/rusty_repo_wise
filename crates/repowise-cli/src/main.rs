@@ -43,6 +43,12 @@ enum Command {
     Overview {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` -- so you can read a repo's
+        /// analysis without indexing it yourself (issue #378). Drift
+        /// against your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Run a command and print a compact rendering of its output.
     /// Noise is dropped; errors, failures and summaries always survive;
@@ -164,6 +170,11 @@ enum Command {
         file: PathBuf,
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Show deterministic code-health KPIs and the lowest-scoring files.
     Health {
@@ -177,6 +188,11 @@ enum Command {
         /// See `repowise_health::HealthWeights` for the field names.
         #[arg(long)]
         weights: Option<PathBuf>,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// List confidence-tiered dead-code candidates: functions/methods
     /// with zero resolved in-repo callers.
@@ -492,6 +508,11 @@ enum Command {
         /// onboarding doc.
         #[arg(long, default_value = "text")]
         format: String,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// List signature-based security findings (issue #360):
     /// hardcoded/leaked-secret patterns (AWS access key IDs, GitHub/
@@ -663,6 +684,11 @@ enum ExportFormat {
     Markdown,
     /// The dependency graph as one JSON Graph Format document.
     JsonGraph,
+    /// The full index as a portable, committable artifact (issue #378):
+    /// repo-relative paths, canonical ordering, schema-versioned. Unlike
+    /// `.repowise/index.json`, this is safe to commit and read on
+    /// another machine.
+    Index,
 }
 
 /// `repowise coverage <action>`.
@@ -770,7 +796,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Init { path } => cmd_init(&path),
         Command::Update { path } => cmd_update(&path),
-        Command::Overview { path } => cmd_overview(&path),
+        Command::Overview { path, index } => cmd_overview(&path, index.as_deref()),
         Command::Distill { command } => cmd_distill(&command),
         Command::Expand { reference, query } => cmd_expand(&reference, query.as_deref()),
         Command::Watch {
@@ -809,12 +835,13 @@ fn main() -> anyhow::Result<()> {
             symbol_kind.as_deref(),
             limit,
         ),
-        Command::Deps { file, path } => cmd_deps(&file, &path),
+        Command::Deps { file, path, index } => cmd_deps(&file, &path, index.as_deref()),
         Command::Health {
             path,
             worst,
             weights,
-        } => cmd_health(&path, worst, weights.as_deref()),
+            index,
+        } => cmd_health(&path, worst, weights.as_deref(), index.as_deref()),
         Command::DeadCode {
             path,
             min_confidence,
@@ -859,7 +886,8 @@ fn main() -> anyhow::Result<()> {
             from,
             max_steps,
             format,
-        } => cmd_tour(&path, from.as_deref(), max_steps, &format),
+            index,
+        } => cmd_tour(&path, from.as_deref(), max_steps, &format, index.as_deref()),
         Command::Security { path, min_severity } => cmd_security(&path, min_severity.as_deref()),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Generate { path } => cmd_generate(&path),
@@ -974,9 +1002,9 @@ fn cmd_update(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_overview(path: &Path) -> anyhow::Result<()> {
+fn cmd_overview(path: &Path, index_file: Option<&Path>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let graph = RepoGraph::build(&index);
     let overview = graph.overview(&index);
 
@@ -1898,9 +1926,9 @@ fn cmd_search(
     Ok(())
 }
 
-fn cmd_deps(file: &Path, path: &Path) -> anyhow::Result<()> {
+fn cmd_deps(file: &Path, path: &Path, index_file: Option<&Path>) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let graph = RepoGraph::build(&index);
 
     let target = if file.is_absolute() {
@@ -1963,9 +1991,14 @@ fn hot_path_files(
         .collect()
 }
 
-fn cmd_health(path: &Path, worst: usize, weights_path: Option<&Path>) -> anyhow::Result<()> {
+fn cmd_health(
+    path: &Path,
+    worst: usize,
+    weights_path: Option<&Path>,
+    index_file: Option<&Path>,
+) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let graph = RepoGraph::build(&index);
     let weights = match weights_path {
         Some(p) => {
@@ -2262,6 +2295,36 @@ fn cmd_export(path: &Path, out: &Path, format: ExportFormat, force: bool) -> any
                 "exported {count} wiki page(s) from {} to {}",
                 wiki_root.display(),
                 out.display()
+            );
+        }
+        ExportFormat::Index => {
+            let index = RepoIndex::load(&root)?;
+            let portable = repowise_core::portable::PortableIndex::from_index(&index);
+            let dest = export::portable_index_dest(out, force)?;
+            portable.save(&dest)?;
+            println!(
+                "exported {} file(s) as a portable index (schema v{}) to {}",
+                portable.index.files.len(),
+                portable.schema_version,
+                dest.display()
+            );
+            match &portable.index.indexed_commit {
+                Some(sha) => println!(
+                    "  built at commit {sha} -- whoever reads this artifact is told when \
+                     it has drifted from their checkout"
+                ),
+                // Not a warning about size or correctness but about
+                // readability: without a commit to compare against,
+                // every consumer's staleness answer is "unknown", which
+                // is honest but useless.
+                None => println!(
+                    "  no indexed commit recorded, so readers cannot tell whether this is \
+                     current -- re-run `repowise init` inside a git repository first"
+                ),
+            }
+            println!(
+                "  safe to commit: paths are repo-relative and records are sorted, so the \
+                 same commit exports identically on any machine."
             );
         }
         ExportFormat::JsonGraph => {
@@ -3350,6 +3413,7 @@ fn cmd_tour(
     from: Option<&Path>,
     max_steps: usize,
     format: &str,
+    index_file: Option<&Path>,
 ) -> anyhow::Result<()> {
     let as_markdown = match format {
         "text" => false,
@@ -3358,7 +3422,7 @@ fn cmd_tour(
     };
 
     let root = path.canonicalize()?;
-    let index = RepoIndex::load(&root)?;
+    let index = load_index(&root, index_file)?;
     let graph = RepoGraph::build(&index);
     let health = repowise_health::analyze(&index, &graph);
 
@@ -4306,6 +4370,56 @@ fn cmd_generate(path: &Path) -> anyhow::Result<()> {
          Every surface that shows them labels them as inferred."
     );
     Ok(())
+}
+
+/// Load the index a read command should work from: the machine-local
+/// `.repowise/index.json` by default, or a committed portable artifact
+/// when `--index` names one (issue #378).
+///
+/// **Staleness is always reported when reading a committed artifact.**
+/// A committed index is routinely behind the working tree — that is the
+/// normal case, not an error — but presenting stale analysis as current
+/// is the one failure mode this format could actively mislead with, so
+/// ADR-0002 makes the report mandatory rather than opt-in. Unknown is
+/// reported as unknown: "no commit recorded" never silently reads as
+/// "up to date".
+fn load_index(root: &Path, index_file: Option<&Path>) -> anyhow::Result<RepoIndex> {
+    let Some(file) = index_file else {
+        return RepoIndex::load(root);
+    };
+    let portable = repowise_core::portable::PortableIndex::load(file)?;
+    let index = portable.into_anchored(root)?;
+
+    match (&index.indexed_commit, repowise_git::head_sha(root)) {
+        (Some(indexed), Some(head)) if indexed == &head => {
+            eprintln!(
+                "note: reading {} (built at {indexed}, matches your checkout)",
+                file.display()
+            );
+        }
+        (Some(indexed), Some(head)) => {
+            eprintln!(
+                "note: reading {} -- STALE: built at {indexed}, your checkout is at {head}. \
+                 Findings may not match your working tree.",
+                file.display()
+            );
+        }
+        (Some(indexed), None) => {
+            eprintln!(
+                "note: reading {} (built at {indexed}); this directory has no git HEAD to \
+                 compare against, so staleness is unknown.",
+                file.display()
+            );
+        }
+        (None, _) => {
+            eprintln!(
+                "note: reading {} -- it records no indexed commit, so whether it matches \
+                 your checkout is unknown.",
+                file.display()
+            );
+        }
+    }
+    Ok(index)
 }
 
 fn display_path(path: &Path, root: &Path) -> String {

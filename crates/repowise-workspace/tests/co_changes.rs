@@ -40,6 +40,7 @@ fn workspace_co_changes_reports_each_repos_own_coupling() {
     let repo = ResolvedWorkspaceRepo {
         name: "test".to_string(),
         path: root.clone(),
+        index: None,
     };
 
     let reports = workspace_co_changes(&[repo], 10);
@@ -60,6 +61,7 @@ fn workspace_co_changes_reports_unavailable_for_a_non_git_repo() {
     let repo = ResolvedWorkspaceRepo {
         name: "not-git".to_string(),
         path: root,
+        index: None,
     };
 
     let reports = workspace_co_changes(&[repo], 10);
@@ -84,6 +86,7 @@ fn workspace_co_changes_respects_the_top_n_limit_per_repo() {
     let repo = ResolvedWorkspaceRepo {
         name: "test".to_string(),
         path: root,
+        index: None,
     };
 
     let reports = workspace_co_changes(&[repo], 1);

@@ -3711,9 +3711,11 @@ fn cmd_workspace_repos(workspace: &Path) -> anyhow::Result<()> {
         let status = repowise_workspace::repo_status(repo);
         match status.file_count {
             Some(file_count) => println!(
-                "  {} — {} ({file_count} file(s) indexed)",
+                "  {} — {} ({file_count} file(s) indexed, {} index{})",
                 status.name,
-                status.path.display()
+                status.path.display(),
+                status.source.map(|s| s.label()).unwrap_or("unknown-source"),
+                staleness_suffix(status.stale),
             ),
             None => println!(
                 "  {} — {} (not indexed; run `repowise init` there)",
@@ -3757,6 +3759,7 @@ fn cmd_workspace_co_changes(workspace: &Path, top: usize) -> anyhow::Result<()> 
 /// See `repowise-workspace`'s own docs for the workspace TOML format.
 fn cmd_workspace_architecture(workspace: &Path) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
+    warn_resolution_blind_spots(&repos);
     if repos.is_empty() {
         println!("No repos configured in {}", workspace.display());
         return Ok(());
@@ -3802,6 +3805,7 @@ fn cmd_workspace_architecture(workspace: &Path) -> anyhow::Result<()> {
 /// See `repowise-workspace`'s own docs for the workspace TOML format.
 fn cmd_workspace_blast_radius(workspace: &Path, repo: &str, file: &Path) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
+    warn_resolution_blind_spots(&repos);
     let Some(target_repo) = repos.iter().find(|r| r.name == repo) else {
         anyhow::bail!("no repo named {repo:?} in {}", workspace.display());
     };
@@ -3979,12 +3983,35 @@ fn cmd_workspace_conformance(
     allow_unverified: bool,
 ) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
+    warn_resolution_blind_spots(&repos);
     if repos.is_empty() {
         println!("No repos configured in {}", workspace.display());
         return Ok(());
     }
     let metrics = repowise_workspace::workspace_metrics(&repos);
     let verdict = conformance_verdict(&metrics);
+
+    // This command gates CI, so "is this answer trustworthy" is
+    // load-bearing rather than cosmetic. A workspace assembled from
+    // committed artifacts can be answering about commits nobody has
+    // checked out, and a clean verdict over stale inputs is exactly the
+    // reassuring-but-wrong result a gate must not produce silently.
+    let drifted: Vec<String> = repos
+        .iter()
+        .filter_map(|r| {
+            let status = repowise_workspace::repo_status(r);
+            (status.stale == Some(true)).then(|| status.name.clone())
+        })
+        .collect();
+    if !json && !drifted.is_empty() {
+        eprintln!(
+            "note: {} of {} repo(s) have an index that has drifted from their checkout: {}. \
+             Findings may not describe the current code -- re-export or re-index those repos.",
+            drifted.len(),
+            repos.len(),
+            drifted.join(", ")
+        );
+    }
 
     if json {
         println!(
@@ -4113,6 +4140,7 @@ fn metrics_json(m: &repowise_workspace::WorkspaceMetrics) -> serde_json::Value {
 
 fn cmd_workspace_metrics(workspace: &Path, json: bool) -> anyhow::Result<()> {
     let repos = repowise_workspace::load_resolved(workspace)?;
+    warn_resolution_blind_spots(&repos);
     if repos.is_empty() {
         println!("No repos configured in {}", workspace.display());
         return Ok(());
@@ -4507,6 +4535,50 @@ fn load_index(root: &Path, index_file: Option<&Path>) -> anyhow::Result<RepoInde
         }
     }
     Ok(index)
+}
+
+/// Warn when a workspace member's cross-repo imports silently cannot
+/// resolve (issue #384).
+///
+/// Printed to stderr by every command that depends on cross-repo
+/// resolution. The failure mode this guards against is specific: a
+/// Rust or Go member backed only by a committed artifact, with no
+/// checkout, contributes nothing to the module map because its crate /
+/// module name lives in a `Cargo.toml` / `go.mod` that isn't there. The
+/// result is not an error -- it is an empty edge list, which is
+/// indistinguishable from "these repos genuinely don't depend on each
+/// other".
+fn warn_resolution_blind_spots(repos: &[repowise_workspace::ResolvedWorkspaceRepo]) {
+    let blind = repowise_workspace::resolution_blind_spots(repos);
+    if blind.is_empty() {
+        return;
+    }
+    for (repo, language) in &blind {
+        eprintln!(
+            "warning: {repo} is backed by a portable index with no checkout at its path, \
+             and contains {language} files. {language}'s cross-repo module map is derived \
+             from a manifest on disk (Cargo.toml / go.mod), so this repo's imports cannot \
+             resolve and will silently contribute no edges."
+        );
+    }
+    eprintln!(
+        "  Check out those repo(s), or treat cross-repo results as incomplete. Python, \
+         Java/Kotlin/Scala, C#, and PHP members are unaffected -- their module paths need \
+         no files on disk."
+    );
+}
+
+/// How to say a workspace repo's index freshness in one clause.
+///
+/// Unknown is spelled out rather than omitted: a reader who sees nothing
+/// will assume "fine", and "we couldn't tell" is a different answer from
+/// "it matches".
+fn staleness_suffix(stale: Option<bool>) -> &'static str {
+    match stale {
+        Some(true) => ", STALE vs its checkout",
+        Some(false) => ", matches its checkout",
+        None => ", freshness unknown",
+    }
 }
 
 fn display_path(path: &Path, root: &Path) -> String {

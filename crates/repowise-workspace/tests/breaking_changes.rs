@@ -68,10 +68,12 @@ fn a_removed_producer_route_is_reported_broken_on_the_next_run() {
         ResolvedWorkspaceRepo {
             name: "server".to_string(),
             path: server_repo.clone(),
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "client".to_string(),
             path: client_repo,
+            index: None,
         },
     ];
 
@@ -127,6 +129,7 @@ fn a_first_run_with_no_prior_snapshot_reports_nothing_broken() {
     let repos = vec![ResolvedWorkspaceRepo {
         name: "solo".to_string(),
         path: repo_path,
+        index: None,
     }];
 
     let (report, broken) = workspace_contract_changes(&repos, &state_dir);

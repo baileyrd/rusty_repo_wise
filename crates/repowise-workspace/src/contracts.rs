@@ -16,7 +16,6 @@
 
 use crate::ResolvedWorkspaceRepo;
 use regex::Regex;
-use repowise_core::RepoIndex;
 use std::path::PathBuf;
 
 /// One HTTP route a repo appears to register (a "producer"), inferred
@@ -220,10 +219,11 @@ fn scan_workspace(repos: &[ResolvedWorkspaceRepo]) -> WorkspaceScan {
     let mut unindexed_repos: Vec<String> = Vec::new();
 
     for repo in repos {
-        let Ok(index) = RepoIndex::load(&repo.path) else {
+        let Ok(loaded) = crate::load_repo_index(repo) else {
             unindexed_repos.push(repo.name.clone());
             continue;
         };
+        let index = loaded.index;
         for file in &index.files {
             for (method, path) in scan_file(&repo.name, &file.path, &producer_regexes) {
                 producers.push(ProducerRoute {

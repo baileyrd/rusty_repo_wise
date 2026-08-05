@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Workspace members may be backed by a committed portable index
+  (`index = "..."` in the workspace TOML), so cross-repo commands no
+  longer require every repo checked out and indexed. Source and
+  staleness are reported per member, and a warning fires when a Rust or
+  Go member without a checkout would silently contribute no edges
+  (#384).
 - `--index <FILE>` now works on every index-derived read command
   (`search`, `dead-code`, `refactor`, `security`, `hotspots`,
   `doc-coverage`, `decisions`, alongside the original four), with
@@ -18,6 +24,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   dependency-ordered reading path through a codebase, with `--from`,
   `--max-steps`, and `--format text|markdown` (#377).
 ### Changed
+- Portable index schema v2: `CallRef.caller` is interned into a table
+  instead of repeated, cutting the artifact 18.3% (7.73 MB -> 6.32 MB on
+  this repo) with no capability loss. v1 artifacts are rejected with an
+  actionable message and must be re-exported (#381).
 ### Fixed
 ### Security
 

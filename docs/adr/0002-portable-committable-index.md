@@ -114,7 +114,23 @@ single conversion choke point on `RepoIndex`.
    that actively misleads, so it is a hard requirement rather than a
    nicety.
 
-6. **Full artifact first; the reduced projection is a follow-up.** The
+6. **Interning before lossy reduction** (added 2026-08-05 with #381,
+   schema v2). `CallRef::caller` measured at 33% of the whole index --
+   2,020 distinct symbol ids across 21,519 references -- so it moves to
+   a table with calls referring to it by index. 18.3% smaller, nothing
+   given up. This supersedes the reflex in point 7 below that `calls`
+   is the obvious thing to drop: it is the biggest field, but dropping
+   it is not the cheapest way to shrink, and it is by far the most
+   expensive way in capability terms.
+
+   The measurement that settled it: with no `calls`, `call_in_degree`
+   is zero for every symbol, so the dead-code list contains
+   *everything* rather than nothing, and every health score collapses.
+   Dropping `field_accesses` fails in the opposite direction -- LCOM4
+   reports "not enough data", `low-cohesion` never fires, scores
+   silently rise. Two quiet, opposite wrong answers.
+
+7. **Full artifact first; the reduced projection is a follow-up.** The
    first cut exports everything, so a committed artifact is a complete
    substitute for a local index and no command silently loses
    capability. The `calls`-dropping projection is deferred to its own

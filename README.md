@@ -1417,14 +1417,30 @@ your checkout is at 51c821224a75. Findings may not match your working tree.
 Unknown is reported as unknown: an artifact with no recorded commit says
 so rather than implying it is current.
 
-**Size is the honest caveat.** The artifact is ~7.7 MB for this
-122-file repo, because `calls` is 51.7% of the index and `symbols` 45.3%
-— rebasing paths reclaims only ~750 KB of that. Teams committing one
-should expect git-lfs territory on a larger repo. A reduced read-only
-projection that drops `calls` would roughly halve it, but it would also
-disable dead-code detection and the call-graph health markers, so that
-is a capability decision deferred to its own issue rather than bundled
-into the format.
+**Callers are interned** (issue #381). `CallRef.caller` was 33% of the
+entire index — the same 2,020 distinct symbol ids written out across
+21,519 call references, about eleven copies each, every one a full
+`path::name@line` string. They now live in one table with the calls
+referring to them by index: **7.73 MB → 6.32 MB, 18.3% smaller, with
+nothing given up.**
+
+**Why not just drop `calls`?** It is 51.7% of the index, so it looks like
+the obvious lever. It isn't. `call_in_degree` would be zero for every
+symbol, which does not produce an *empty* dead-code list — it produces
+one containing **everything**, and collapses every health score with it.
+Dropping `field_accesses` fails the opposite way: LCOM4 reports "not
+enough data", the `low-cohesion` marker never fires, and scores silently
+*rise*. Two fields, two opposite kinds of wrong answer, both quiet. A
+lossy projection therefore stays a capability decision on its own issue,
+not a compression trick folded into the format.
+
+**Size is still the honest caveat.** 6.32 MB for a 122-file repo is
+committable but not small, and teams should expect git-lfs territory on
+a larger one. Most of what remains is JSON's own pretty-printed
+structure: ~55 bytes per call, of which the data is about 15. Compact
+JSON would be 29.5% smaller again, and is deliberately not used —
+canonical ordering exists so the artifact diffs in review, and a
+single-line file diffs not at all.
 
 ## Coverage health markers
 
@@ -3709,6 +3725,50 @@ status, via a `--workspace <path>` flag.
   process's current directory). This file is never inferred from or
   stored inside any member repo's own `.repowise/` — a workspace spans
   repos, so no single member repo is a sensible owner of it.
+
+  **A member may be backed by a committed portable index instead of a
+  local one** (issue #384), so a workspace command doesn't need every
+  repo checked out and indexed:
+  ```toml
+  [[repo]]
+  name = "billing"
+  path = "../billing"
+  index = "artifacts/billing.portable.json"   # optional
+  ```
+  `index` resolves relative to the workspace file, the same rule `path`
+  follows. **Mixed sources are the expected case**, not an edge case:
+  repos publish artifacts on their own schedules, so some members will
+  have one and others won't.
+
+  `path` stays required even with `index` set — it is the anchor root
+  for re-anchoring, and the working directory for commands that shell
+  out to git. It does **not** have to exist for the index-only
+  commands, which is what lets `workspace-architecture`,
+  `workspace-blast-radius`, `workspace-conformance`, and
+  `workspace-metrics` run against repos nobody cloned.
+
+  **One real limitation, found by running it rather than reading it.**
+  Cross-repo resolution builds a module map per language, and two of the
+  six do it by reading a manifest **off disk**: Rust walks up to a
+  `Cargo.toml` for the crate name, Go to a `go.mod`. Python,
+  Java/Kotlin/Scala, C#, and PHP derive theirs from the path alone. So a
+  **Rust or Go member with no checkout contributes no edges** — and that
+  is not an error, it's an empty edge list, indistinguishable from "these
+  repos genuinely don't depend on each other". Every cross-repo command
+  now warns when that combination is present rather than letting it pass
+  as a clean result:
+  ```
+  warning: provider is backed by a portable index with no checkout at its path,
+  and contains Rust files. Rust's cross-repo module map is derived from a
+  manifest on disk (Cargo.toml / go.mod), so this repo's imports cannot
+  resolve and will silently contribute no edges.
+  ```
+
+  **`workspace-repos` reports the source and freshness of each member's
+  index** (`local`/`portable`, and matches / STALE / unknown), and
+  `workspace-conformance` — which gates CI — prints a drift summary
+  before its verdict. A clean verdict over stale inputs is exactly the
+  reassuring-but-wrong result a gate must not produce quietly.
 - `repowise workspace-repos --workspace <path>` lists every configured
   repo with its indexed status and file count if a prior `repowise
   init`/`update` has run there.

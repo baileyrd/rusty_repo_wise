@@ -6,6 +6,113 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## Portable-index-backed workspace members (closes #384)
+**2026-08-05**
+
+- Closes #384. A workspace member can now name a committed portable
+  index (`index = "artifacts/billing.portable.json"`) instead of
+  requiring a local `.repowise/index.json`, so `workspace-architecture`,
+  `workspace-blast-radius`, `workspace-conformance`, and
+  `workspace-metrics` no longer need every member repo checked out and
+  indexed. That was the point: a CI job gating on `workspace-conformance`
+  had to clone and index N repos to answer one question.
+- All five `RepoIndex::load` sites in `repowise-workspace` now route
+  through one `load_repo_index`, which reports **where** the index came
+  from and **whether** it has drifted from that repo's checkout.
+  `workspace-repos` shows both; `workspace-conformance` prints a drift
+  summary before its verdict, because a clean verdict over stale inputs
+  is the reassuring-but-wrong result a CI gate must not produce quietly.
+- Mixed local/portable members are the expected case and are tested as
+  such. `path` stays required even with `index` set -- it is the anchor
+  root and the git working directory -- but it need not *exist* for the
+  index-only commands, since `into_anchored` never touches the
+  filesystem.
+- **Design questions #384 raised, resolved:** paths only, no URLs
+  (same reasoning ADR-0002 used to reject a shared registry -- git
+  already distributes files); mixed sources supported; staleness
+  reported per repo with the CI gate calling it out; and cross-repo
+  resolution correctness *verified* rather than assumed.
+
+### Two findings from running it
+
+- **The correctness test was passing vacuously at first.** The fixture
+  used two Python packages both named `pkg`, and this port's Python
+  resolver walks progressively shorter module prefixes -- so
+  `pkg.core` resolved against the importer's *own* `pkg/__init__.py` and
+  never became a cross-repo candidate. Both local and portable produced
+  zero edges, and "identical" over two empty lists proves nothing. The
+  fixture is now two Rust crates that resolve a real edge, with an
+  explicit non-empty assertion guarding against the same trap.
+- **A real limitation in the "never cloned" promise.** Cross-repo
+  resolution builds a module map per language, and two of the six read a
+  manifest **off disk**: Rust walks up to `Cargo.toml` for the crate
+  name, Go to `go.mod`. Python, Java/Kotlin/Scala, C#, and PHP derive
+  theirs from the path alone. So a Rust or Go member with no checkout
+  contributes **no edges** -- not an error, just an empty list that looks
+  exactly like "these repos are independent". Every cross-repo command
+  now warns on that combination
+  (`resolution_blind_spots`), rather than letting it read as a clean
+  result. Found by running the feature end to end, not by reading the
+  code.
+- 6 new tests; 972 workspace tests green, clippy clean.
+
+---
+
+## Interned caller ids: portable index schema v2 (closes #381)
+**2026-08-05**
+
+- Closes #381, but **not as the issue specified it** -- measuring first
+  reversed the premise, and the issue's own plan would have been the
+  worse change.
+- #381 proposed dropping `calls` (51.7% of the index) and
+  `field_accesses` for a ~53% reduction, with machinery to make affected
+  commands refuse. Measuring the field instead found `CallRef::caller`
+  alone is **33% of the entire index** -- 2,020 distinct symbol ids
+  written out across 21,519 references, about eleven copies each, every
+  one a full `path::name@line` string.
+- Interning them into a table is lossless: **7.73 MB -> 6.32 MB, 18.3%
+  smaller, no capability given up.** Schema v2.
+- **The audit corrected the issue's stated failure direction, which was
+  backwards.** #381 said a reduced artifact "must never silently return
+  0 dead-code candidates". The opposite is true: with no `calls`,
+  `call_in_degree` is zero for *every* symbol, so the dead-code list
+  contains everything and every health score collapses. And
+  `field_accesses` fails the other way -- LCOM4 reports "not enough
+  data", `low-cohesion` never fires, scores silently *rise*. Two fields,
+  two opposite quiet wrong answers, skewing health in both directions at
+  once.
+- Verified dependency map, derived from the code rather than guessed
+  (the issue flagged its own list as unverified): `calls` feeds
+  `Calls` edges -> `call_in_degree` -> `repowise dead-code`, the
+  `possibly-dead-code` health marker, dashboard search ranking, and
+  `overview`'s edge counts. `field_accesses` feeds LCOM4 only -> the
+  `low-cohesion` marker and `repowise refactor`'s `split-by-cohesion`.
+- **A bug caught by testing the failure path, not the happy path.** A v1
+  artifact read by the v2 binary failed with `missing field caller_ids
+  at line 220729` -- a serde shape error that pre-empted the version
+  check, so the whole point of having `schema_version` (an actionable
+  message) never fired. The new fields are `serde(default)` so a
+  foreign-version artifact parses far enough to be rejected *by
+  version*: "portable index is schema version 1, this repowise
+  understands 2 -- re-export it". Pinned by
+  `an_older_schema_artifact_reports_the_version_not_a_serde_error`.
+- Corruption is reported, never papered over: an out-of-range caller
+  index errors rather than degrading to a module-scope call, since
+  silently dropping a caller understates `call_in_degree` and makes live
+  code look dead. Calls naming an unknown file error too. Keyed by path
+  rather than position, so a reordered file list cannot mis-attach.
+- Remaining size is JSON's own pretty-printed structure: ~55 bytes per
+  call, of which the data is ~15. Compact JSON would be 29.5% smaller
+  again and is deliberately not used -- canonical ordering exists so the
+  artifact diffs in review, and a single-line file diffs not at all.
+- Breaking for v1 artifacts, which must be re-exported. Nothing external
+  consumes them (v1 shipped hours earlier, same day), and the rejection
+  is loud and actionable.
+- 5 new tests in `repowise-core`; 966 workspace tests green, clippy
+  clean.
+
+---
+
 ## `--index` on every index-derived read command (closes #382)
 **2026-08-05**
 

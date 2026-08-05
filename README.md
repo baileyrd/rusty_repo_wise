@@ -3747,22 +3747,31 @@ status, via a `--workspace <path>` flag.
   `workspace-blast-radius`, `workspace-conformance`, and
   `workspace-metrics` run against repos nobody cloned.
 
-  **One real limitation, found by running it rather than reading it.**
+  **Rust and Go need their module paths recorded** (issue #388).
   Cross-repo resolution builds a module map per language, and two of the
-  six do it by reading a manifest **off disk**: Rust walks up to a
+  six derive it by reading a manifest **off disk**: Rust walks up to a
   `Cargo.toml` for the crate name, Go to a `go.mod`. Python,
-  Java/Kotlin/Scala, C#, and PHP derive theirs from the path alone. So a
-  **Rust or Go member with no checkout contributes no edges** — and that
-  is not an error, it's an empty edge list, indistinguishable from "these
-  repos genuinely don't depend on each other". Every cross-repo command
-  now warns when that combination is present rather than letting it pass
-  as a clean result:
+  Java/Kotlin/Scala, C#, and PHP derive theirs from the path alone.
+
+  So a Rust or Go member with no checkout *used to* contribute no edges
+  — not an error, just an empty edge list indistinguishable from "these
+  repos genuinely don't depend on each other". `export --format index`
+  now records those module paths at export time, when the checkout is
+  present, and says so:
+  ```
+  recorded 122 Rust/Go module path(s), so cross-repo resolution works for a
+  workspace member backed by this artifact with no checkout.
+  ```
+  Artifacts exported before #388 carry none, and those members are still
+  blind — so the warning remains for exactly that case, now scoped to
+  files that have no recorded path rather than to the language:
   ```
   warning: provider is backed by a portable index with no checkout at its path,
   and contains Rust files. Rust's cross-repo module map is derived from a
   manifest on disk (Cargo.toml / go.mod), so this repo's imports cannot
   resolve and will silently contribute no edges.
   ```
+  Re-exporting the artifact clears it.
 
   **`workspace-repos` reports the source and freshness of each member's
   index** (`local`/`portable`, and matches / STALE / unknown), and

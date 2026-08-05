@@ -49,6 +49,52 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## Rust/Go module paths in the portable index (closes #388)
+**2026-08-05**
+
+- Closes #388, which existed because #384 shipped with a limitation
+  rather than a fix: a Rust or Go workspace member backed only by a
+  committed artifact contributed **no cross-repo edges**, since its
+  crate/module name lives in a `Cargo.toml`/`go.mod` that a
+  never-cloned member doesn't have. Not an error -- an empty edge list,
+  indistinguishable from "these repos are independent", and
+  `workspace-conformance` gates CI on exactly that shape.
+- `export --format index` now records those module paths at export time,
+  when the checkout is present. Verified end to end: a two-crate
+  workspace with the provider at a path that does not exist resolves
+  `consumer -> provider (1 edge)`, where before it resolved nothing.
+- **Stores the computed module path, not the crate name.** The name
+  alone is insufficient: the remaining segments are measured from the
+  manifest's own directory, which is equally absent. Getting this wrong
+  would have produced a fix that still resolved nothing.
+- **Layering decided by ADR-0002, not convenience.** The obvious home for
+  this is a field on `RepoIndex` -- cleanest consumer story, `module_map`
+  just reads it. Rejected for two reasons: it costs **93 construction-site
+  edits** (88 of them test fixtures), and more importantly it violates
+  ADR-0002's own principle of keeping the working index untouched and
+  confining the portable concern to one module. Every locally-built index
+  would carry an empty map forever for a problem only the portable path
+  has. The data lives in `PortableIndex`, and reaches resolution through
+  new additive `module_map_with` / `cross_repo_import_edges_with_modules`
+  entry points -- existing callers unchanged.
+- `repowise-core` still computes none of it: the per-language module-path
+  logic is in `repowise-graph`, and core depending on no other
+  `repowise-*` crate is load-bearing. The CLI supplies the values via
+  `with_module_paths`, the same "data comes in, caller owns the
+  dependency" split `analyze_with_hotspots` and `build_tour` already use.
+- **The warning survives, narrowed.** Artifacts exported before #388
+  carry no module paths and those members are still blind, so
+  `resolution_blind_spots` now keys on *files with no recorded path*
+  rather than on the language. Re-exporting clears it. Pinned by
+  `a_pre_388_artifact_without_module_paths_is_still_a_blind_spot`.
+- A module path naming a file the artifact doesn't contain is an error,
+  not a silent drop -- dropping it would reproduce the exact
+  missing-edges symptom the field exists to prevent.
+- 4 new tests; 976 workspace tests green, clippy clean under CI's own
+  flags (`--all-features -- -D warnings`).
+
+---
+
 ## Portable-index-backed workspace members (closes #384)
 **2026-08-05**
 

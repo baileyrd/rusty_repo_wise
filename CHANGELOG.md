@@ -24,6 +24,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   dependency-ordered reading path through a codebase, with `--from`,
   `--max-steps`, and `--format text|markdown` (#377).
 ### Changed
+- Portable index records Rust/Go module paths at export time, so a
+  workspace member backed by an artifact with no checkout now resolves
+  cross-repo imports instead of silently contributing none (#388).
 - Portable index schema v2: `CallRef.caller` is interned into a table
   instead of repeated, cutting the artifact 18.3% (7.73 MB -> 6.32 MB on
   this repo) with no capability loss. v1 artifacts are rejected with an

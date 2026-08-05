@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use repowise_core::{RepoIndex, Symbol, SymbolKind};
 use repowise_graph::RepoGraph;
 use repowise_health::{DeadCodeCandidate, DeadCodeConfidence};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// A Rust-native, self-hosted codebase intelligence CLI, inspired by
@@ -467,6 +468,31 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// A guided tour: an ordered reading path through the codebase
+    /// (issue #377). Ordered so nothing is introduced before what it is
+    /// built out of -- foundations first, entry points last -- and
+    /// selected down to the most depended-on files, since ordering every
+    /// file is just the repo, shuffled.
+    ///
+    /// Deterministic: the ordering comes from resolved `Imports` edges
+    /// and the ranking from counts already in the index, so the same
+    /// commit always produces the same tour. No LLM involved.
+    Tour {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Tour only this file and everything it transitively imports:
+        /// "what do I have to read to understand this one file".
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Max stops, 0 for unlimited. Defaults to something walkable in
+        /// one sitting rather than to repo coverage.
+        #[arg(long, default_value_t = repowise_tour::DEFAULT_MAX_STEPS)]
+        max_steps: usize,
+        /// `text` (default) or `markdown`, for pasting into an
+        /// onboarding doc.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// List signature-based security findings (issue #360):
     /// hardcoded/leaked-secret patterns (AWS access key IDs, GitHub/
     /// Slack tokens, PEM private-key blocks, credential-shaped literal
@@ -828,6 +854,12 @@ fn main() -> anyhow::Result<()> {
         Command::Terraform { path } => cmd_terraform(&path),
         Command::ExternalDeps { path } => cmd_external_deps(&path),
         Command::Refactor { path, kind, limit } => cmd_refactor(&path, kind.as_deref(), limit),
+        Command::Tour {
+            path,
+            from,
+            max_steps,
+            format,
+        } => cmd_tour(&path, from.as_deref(), max_steps, &format),
         Command::Security { path, min_severity } => cmd_security(&path, min_severity.as_deref()),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Generate { path } => cmd_generate(&path),
@@ -3308,6 +3340,107 @@ fn cmd_refactor(path: &Path, kind: Option<&str>, limit: usize) -> anyhow::Result
         }
         if !c.symbols.is_empty() {
             println!("    symbols: {}", c.symbols.join(", "));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_tour(
+    path: &Path,
+    from: Option<&Path>,
+    max_steps: usize,
+    format: &str,
+) -> anyhow::Result<()> {
+    let as_markdown = match format {
+        "text" => false,
+        "markdown" => true,
+        other => anyhow::bail!("--format must be text or markdown, got {other:?}"),
+    };
+
+    let root = path.canonicalize()?;
+    let index = RepoIndex::load(&root)?;
+    let graph = RepoGraph::build(&index);
+    let health = repowise_health::analyze(&index, &graph);
+
+    // Hotspot data is a ranking tie-break, not a requirement: an
+    // un-versioned checkout still gets a tour, the same way `get_risk`
+    // and `/api/hotspots` degrade rather than erroring.
+    let hotspots: HashMap<PathBuf, usize> = match repowise_git::GitAnalytics::collect(&root) {
+        Ok(analytics) => repowise_git::hotspots(&index, &analytics)
+            .into_iter()
+            .map(|h| (h.file, h.score))
+            .collect(),
+        Err(_) => HashMap::new(),
+    };
+
+    let opts = repowise_tour::TourOptions {
+        max_steps,
+        from: from.map(|p| p.to_path_buf()),
+    };
+    let tour = repowise_tour::build_tour(&index, &graph, Some(&health), &hotspots, &opts)?;
+
+    if tour.steps.is_empty() {
+        println!(
+            "No tour: nothing in this index has extracted symbols to read. \
+             Structural-tier languages and empty files are indexed but make no tour stops."
+        );
+        return Ok(());
+    }
+
+    let scope = match &tour.rooted_at {
+        Some(f) => format!(" rooted at {}", display_path(f, &index.root)),
+        None => String::new(),
+    };
+    let shown = tour.steps.len();
+    let heading = format!(
+        "Repowise tour of {}{scope} -- {shown} of {} file(s) considered",
+        index.root.display(),
+        tour.considered
+    );
+
+    if as_markdown {
+        println!("# {heading}\n");
+        println!(
+            "Read in this order: nothing is introduced before what it is built out of. \
+             Foundations first, entry points last.\n"
+        );
+    } else {
+        println!("{heading}");
+        println!(
+            "  Read in order -- foundations first, entry points last. \
+             Nothing appears before what it is built out of."
+        );
+        if shown < tour.considered {
+            println!(
+                "  Showing the {shown} most depended-on; --max-steps 0 for every file, \
+                 --from <FILE> to scope to one file's dependency closure."
+            );
+        }
+    }
+
+    for step in &tour.steps {
+        let file = display_path(&step.file, &index.root);
+        if as_markdown {
+            println!("## {}. {file}\n", step.position);
+            println!("{}\n", step.why());
+            println!(
+                "- role: `{}` | {} symbol(s), {} line(s)",
+                step.role.label(),
+                step.symbols,
+                step.lines
+            );
+            println!(
+                "- imported by {} file(s), imports {} file(s)",
+                step.dependents, step.dependencies
+            );
+            match step.health {
+                Some(h) => println!("- health: {h:.1}/10"),
+                None => println!("- health: not measured"),
+            }
+            println!();
+        } else {
+            println!("  {:>2}. {:<14} {file}", step.position, step.role.label());
+            println!("      {}", step.why());
         }
     }
     Ok(())

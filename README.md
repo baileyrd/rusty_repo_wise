@@ -286,6 +286,11 @@ see "Dashboard" below.
   the parsed metrics and the call graph, including LCOM4 low-cohesion
   detection over per-class field-access data and Rabin-Karp near-duplicate
   detection over source text re-read from disk.
+- `repowise-tour` — guided tours (issue #377): a dependency-ordered
+  reading path over the files that matter most, built from
+  `repowise-graph`'s resolved `Imports` edges with `repowise-health`
+  scores and git hotspot data as ranking tie-breaks. Deterministic, no
+  LLM — see "Guided tours" below.
 - `repowise-git` — git-history analytics (churn, hotspots, bug-fix
   frequency, co-change coupling, ownership), computed fresh from `git
   log`/`git blame` each time it's queried rather than cached in the index.
@@ -376,6 +381,11 @@ repowise refactor [PATH]           # deterministic refactor candidates: import c
                                     #   classes, low-cohesion classes, duplicate functions --
                                     #   read-only, never generates a diff (see issue #304)
                                     #   --kind <...>, --limit <N> (default 20, 0 for unlimited)
+repowise tour [PATH]               # a guided reading path: what to read first, and next
+                                    #   (see issue #377) -- dependency-ordered, deterministic
+                                    #   --from <FILE> to scope to one file's dependency closure,
+                                    #   --max-steps <N> (default 15, 0 for every file),
+                                    #   --format <text|markdown> (default text)
 repowise external-deps [PATH]      # third-party deps declared in Cargo.toml/package.json/
                                     #   composer.json/requirements.txt/pyproject.toml/go.mod
                                     #   (declared, not lockfile-resolved; see issue #353)
@@ -1598,6 +1608,85 @@ runtime safety** — and in particular the analysis does not exclude
 dominate the `high` tier on a well-tested codebase. Treat the output as a
 list to review, not a list to delete. Excluding test functions would
 change `get_dead_code`'s results too, so it's deliberately not done here.
+
+## Guided tours
+
+`repowise tour [PATH]` (`crates/repowise-tour`, issue #377) answers the
+one question everything else here could not: **where do I start, and
+what do I read next?**
+
+Every other command reports on a file you already named (`deps`,
+`health`, the wiki pages) or ranks files by one metric (`hotspots`,
+`overview`'s most-depended-on list). A ranking is not a reading order —
+it tells you which file matters most, not what to read second so that
+the third makes sense.
+
+```
+repowise tour .
+Repowise tour of /path/to/repo -- 15 of 122 file(s) considered
+  Read in order -- foundations first, entry points last. Nothing appears before what it is built out of.
+   1. foundation     crates/repowise-core/src/deps.rs
+      foundation — 7 files depend on it, it depends on nothing indexed
+   ...
+   9. connector      crates/repowise-core/src/lib.rs
+      connector — 72 files depend on it, it pulls in 10 files; health 4.6/10, budget extra time
+   ...
+  13. entry-point    crates/repowise-cli/src/main.rs
+      entry point — nothing imports it; it pulls in 12 files
+```
+
+**Ordering: dependencies first.** For a resolved `Imports` edge `A -> B`
+(A imports B), B is read before A — nothing is introduced before what it
+is built out of. A tour therefore opens on the foundations and closes on
+the entry points. The opposite reading (start at `main`, descend) is a
+legitimate and genuinely different preference, not an oversight; only
+one direction ships first, and the other is tracked on #377.
+
+**Import cycles are collapsed, not stumbled over.** A cycle has no
+internal reading order to offer and would make a plain topological sort
+fail outright. Members of a cycle are emitted together and flagged
+(`in an import cycle with N other files — read the group together`),
+reusing the same strongly-connected-component technique as
+`repowise refactor`'s `break-import-cycle`.
+
+**Selection, not coverage.** Ordering every file is just the repo,
+shuffled. Files are ranked by how many other files import them (the same
+signal `overview` leads with), with git hotspot score and health score
+as tie-breaks *within* an equal dependent count — structure decides what
+you read, cost only breaks ties. Up to a fifth of the stops are reserved
+for entry points, because ranking purely by dependent count produced a
+tour of this port's own workspace that was all foundations and
+connectors and never reached anything you could actually run. The header
+always reports `N of M file(s) considered`: a tour showing 15 of 900
+files must not read as though the repo has 15 files.
+
+**Deterministic.** Ordering comes from resolved `Imports` edges, ranking
+from counts already in the index; every tie-break chain ends at the file
+path, so the same commit always produces the same tour. Upstream prior
+art (Understand-Anything's `tour-builder` agent) generates walkthroughs
+with an LLM — that buys prose, not ordering, and prose can be layered on
+later by `repowise-llm` the same opt-in way it already layers summaries
+onto wiki pages.
+
+Options:
+
+- `--from <FILE>` — tour only that file and everything it transitively
+  imports: "what do I have to read to understand this one file". Errors
+  on a path that isn't indexed rather than returning an empty tour ("no
+  dependencies" and "I never indexed that" are different answers), and
+  on an ambiguous suffix rather than picking one.
+- `--max-steps <N>` — default 15, `0` for every eligible file.
+- `--format text|markdown` — markdown for pasting into an onboarding doc.
+
+Files with no extracted symbols are never tour stops — Structural-tier
+languages (no grammar, so no symbols) and empty files are still indexed
+and still counted in git analytics, they just make pointless stops.
+Hotspot data degrades to absent rather than erroring when the indexed
+root isn't a git repository, the same tradeoff `get_risk` and
+`/api/hotspots` already make.
+
+Not yet built, deliberately: a `get_tour` MCP tool and a dashboard tour
+view. Both are follow-ons to #377 rather than part of it.
 
 ## Refactoring candidates
 

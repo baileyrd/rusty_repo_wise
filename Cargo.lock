@@ -1334,6 +1334,7 @@ dependencies = [
  "repowise-server",
  "repowise-sql",
  "repowise-terraform",
+ "repowise-tour",
  "repowise-workspace",
  "serde_json",
  "tokio",
@@ -1586,6 +1587,19 @@ dependencies = [
  "anyhow",
  "hcl-rs",
  "repowise-core",
+ "tempfile",
+]
+
+[[package]]
+name = "repowise-tour"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "petgraph",
+ "repowise-core",
+ "repowise-graph",
+ "repowise-health",
+ "repowise-parser",
  "tempfile",
 ]
 

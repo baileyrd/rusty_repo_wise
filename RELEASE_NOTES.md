@@ -6,6 +6,73 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## Guided tours: a dependency-ordered reading path (closes #377)
+**2026-08-05**
+
+- Closes #377, the first of two capability gaps found by comparing this
+  port against [Understand-Anything](https://github.com/Egonex-AI/Understand-Anything)
+  (TypeScript, LLM-agent-first). **Not a parity gap against upstream
+  repowise** — it carries no `parity-gap` label and does not appear in
+  `ParityGaps.md`, since the idea comes from a different project.
+- New `crates/repowise-tour` + `repowise tour [PATH]`. It answers the
+  question nothing else here could: *where do I start, and what do I
+  read next?* Every other command reports on a file you already named
+  (`deps`, `health`, the wiki pages) or ranks files by one metric
+  (`hotspots`, `overview`'s most-depended-on list) — a ranking is not a
+  reading order.
+- **Ordering: dependencies first.** For a resolved `Imports` edge
+  `A -> B`, B is read before A, so nothing is introduced before what it
+  is built out of. Tours open on foundations and close on entry points.
+  The opposite reading (start at `main`, descend) is a real and
+  different preference, not an oversight; only one direction ships
+  first, and the other stays on #377.
+- **Import cycles are collapsed, not stumbled over**, reusing the same
+  strongly-connected-component technique as `repowise refactor`'s
+  `break-import-cycle`. A plain topological sort fails outright on a
+  cycle; here the members are emitted together and flagged as having no
+  internal order.
+- **Selection is ranked by dependent count**, with git hotspot score and
+  health score as tie-breaks *within* an equal count — structure decides
+  what you read, cost only breaks ties. Unmeasured health sorts as
+  10.0 (the healthy end) so a file that was never scored can't outrank a
+  measured-unhealthy one on a signal that was never computed for it.
+- **An entry-point reservation, found by running it.** Ranked purely by
+  dependent count, the first real run against this port's own workspace
+  produced 15 stops that were all `foundation`/`connector` and never
+  reached anything runnable — an entry point has zero dependents by
+  definition, so it can never rank in. Up to a fifth of the stops are
+  now reserved for the highest-ranked entry points. It is a ceiling, not
+  a quota: a repo with no entry points loses no slots to it. Both
+  behaviours are pinned by regression tests
+  (`a_capped_tour_still_reaches_an_entry_point`,
+  `the_entry_point_reservation_costs_nothing_when_there_are_none`).
+- **Deterministic end to end.** Ordering comes from resolved `Imports`
+  edges, ranking from index counts, and every tie-break chain ends at
+  the file path — including the order *within* a collapsed cycle, since
+  `kosaraju_scc` gives no intra-component guarantee. The topological
+  sort is a hand-written Kahn pass over the condensation rather than
+  petgraph's ordering, so the tie-break is ours and stays stable.
+  `the_same_input_always_produces_the_same_tour` pins it.
+- **Honest denominators and honest absences.** The header always reports
+  `N of M file(s) considered`, so a 15-of-900 tour can't read as a
+  900-file repo. `--from` on an unindexed path errors rather than
+  returning an empty tour ("no dependencies" and "I never indexed that"
+  are different answers), and an ambiguous suffix says so rather than
+  picking one. Hotspot data degrades to absent rather than erroring when
+  the root isn't a git repository, matching `get_risk` and
+  `/api/hotspots`.
+- `repowise-tour` depends on core/graph/health but deliberately **not**
+  on `repowise-git`: hotspot data arrives as a caller-supplied
+  `HashMap<PathBuf, usize>`, the same split
+  `repowise_health::analyze_with_hotspots` already uses, keeping a tour
+  computable and unit-testable without a git checkout.
+- 16 new tests, all green; `cargo clippy --workspace --all-targets`
+  clean. Verified by running against this repo itself.
+- Deliberately **not** in scope, both follow-ons to #377: a `get_tour`
+  MCP tool and a dashboard tour view.
+
+---
+
 ## PR #376 — Zed extension: repowise as an MCP context server (partial #332)
 **2026-08-01**
 

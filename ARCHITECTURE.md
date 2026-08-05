@@ -23,7 +23,9 @@ today:
 | Index persistence (`RepoIndex::save`/`load`) | JSON on disk (`.repowise/index.json`) | the one and only backing store so far |
 
 ## Structure
-Modular monolith: one Cargo workspace, thirteen crates. Most are a layer over
+Modular monolith: one Cargo workspace, twenty-two crates (plus
+`crates/repowise-web`, which is its own standalone workspace since it
+only ever targets `wasm32-unknown-unknown`). Most are a layer over
 the one below it — `repowise-core` (data model, file discovery, index
 persistence) → `repowise-parser` (tree-sitter extraction) → `repowise-graph`
 (dependency graph + queries) → `repowise-health` (deterministic scoring on
@@ -103,6 +105,19 @@ workspace-level state to disk on its own initiative
 repo's already-written `.repowise/index.json` — every other
 `workspace-*` command/endpoint still recomputes everything fresh from
 member indexes on each call.
+
+`repowise-tour` (issue #377's guided tours) is a pure synthesis crate in
+the same mould as `repowise-refactor`: it depends on `repowise-core`,
+`repowise-graph`, and `repowise-health`, adds no detection of its own,
+and computes a *reading order* over signals every one of those already
+produces. It deliberately does **not** depend on `repowise-git`, even
+though hotspot score is one of its ranking tie-breaks — hotspot data
+arrives as a plain `HashMap<PathBuf, usize>` parameter supplied by the
+caller, the same "the analysis crate takes the data in, the CLI owns
+the git dependency" split `repowise_health::analyze_with_hotspots`
+already uses. That keeps a tour computable (and unit-testable) without
+a git checkout at all, which matters because an un-versioned tree still
+deserves a tour.
 
 ## Data flow
 `init`/`update` → `discover_files` walks the tree → `repowise_parser::parse_file`

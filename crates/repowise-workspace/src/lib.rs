@@ -155,6 +155,11 @@ impl IndexSource {
 pub struct LoadedRepoIndex {
     pub index: RepoIndex,
     pub source: IndexSource,
+    /// Module paths recorded in the artifact for the languages that
+    /// can't recompute one without a checkout (issue #388). Empty for a
+    /// local index, and for artifacts exported before #388 -- in both
+    /// cases resolution falls back to recomputing from disk.
+    pub module_paths: HashMap<PathBuf, String>,
     /// `None` when there is nothing to compare against — no git in the
     /// repo path, or no commit recorded in the artifact. Reported as
     /// unknown, never as "up to date".
@@ -169,18 +174,28 @@ pub struct LoadedRepoIndex {
 /// release on their own schedules, so some members will publish an
 /// artifact while others are checked out locally.
 pub fn load_repo_index(repo: &ResolvedWorkspaceRepo) -> anyhow::Result<LoadedRepoIndex> {
-    let (index, source) = match &repo.index {
+    let (index, source, module_paths) = match &repo.index {
         Some(artifact) => {
             let portable = repowise_core::portable::PortableIndex::load(artifact)?;
-            (portable.into_anchored(&repo.path)?, IndexSource::Portable)
+            let module_paths = portable.anchored_module_paths(&repo.path);
+            (
+                portable.into_anchored(&repo.path)?,
+                IndexSource::Portable,
+                module_paths,
+            )
         }
-        None => (RepoIndex::load(&repo.path)?, IndexSource::Local),
+        None => (
+            RepoIndex::load(&repo.path)?,
+            IndexSource::Local,
+            HashMap::new(),
+        ),
     };
     let stale = staleness_of(&index, &repo.path);
     Ok(LoadedRepoIndex {
         index,
         source,
         stale,
+        module_paths,
     })
 }
 
@@ -218,7 +233,16 @@ pub fn resolution_blind_spots(repos: &[ResolvedWorkspaceRepo]) -> Vec<(String, &
             continue;
         };
         for lang in DISK_DERIVED_MODULE_MAP_LANGUAGES {
-            if loaded.index.files.iter().any(|f| f.language == lang) {
+            // A file with a recorded module path (issue #388) resolves
+            // fine without a checkout -- that is the whole point of
+            // recording it -- so only files still relying on
+            // recomputation count as blind.
+            if loaded
+                .index
+                .files
+                .iter()
+                .any(|f| f.language == lang && !loaded.module_paths.contains_key(&f.path))
+            {
                 out.push((repo.name.clone(), lang.label()));
                 break;
             }
@@ -430,6 +454,7 @@ pub struct ArchitectureReport {
 pub fn workspace_architecture(repos: &[ResolvedWorkspaceRepo]) -> ArchitectureReport {
     let mut statuses = Vec::with_capacity(repos.len());
     let mut indices: Vec<(String, RepoIndex)> = Vec::new();
+    let mut module_overrides: Vec<HashMap<PathBuf, String>> = Vec::new();
     for repo in repos {
         match load_repo_index(repo) {
             Ok(loaded) => {
@@ -442,6 +467,7 @@ pub fn workspace_architecture(repos: &[ResolvedWorkspaceRepo]) -> ArchitectureRe
                     source: Some(loaded.source),
                     stale: loaded.stale,
                 });
+                module_overrides.push(loaded.module_paths);
                 indices.push((repo.name.clone(), loaded.index));
             }
             Err(_) => statuses.push(RepoStatus {
@@ -456,7 +482,12 @@ pub fn workspace_architecture(repos: &[ResolvedWorkspaceRepo]) -> ArchitectureRe
         }
     }
 
-    let edges = repowise_graph::cross_repo_import_edges(&indices);
+    let with_modules: Vec<(String, RepoIndex, &HashMap<PathBuf, String>)> = indices
+        .iter()
+        .zip(&module_overrides)
+        .map(|((name, index), overrides)| (name.clone(), index.clone(), overrides))
+        .collect();
+    let edges = repowise_graph::cross_repo_import_edges_with_modules(&with_modules);
 
     let mut counts: HashMap<(String, String), usize> = HashMap::new();
     for e in &edges {
@@ -495,15 +526,19 @@ pub fn workspace_blast_radius(
     repo_name: &str,
     file: &Path,
 ) -> Vec<CrossRepoImportEdge> {
-    let indices: Vec<(String, RepoIndex)> = repos
+    let loaded: Vec<(String, RepoIndex, HashMap<PathBuf, String>)> = repos
         .iter()
         .filter_map(|r| {
             load_repo_index(r)
                 .ok()
-                .map(|loaded| (r.name.clone(), loaded.index))
+                .map(|l| (r.name.clone(), l.index, l.module_paths))
         })
         .collect();
-    repowise_graph::cross_repo_import_edges(&indices)
+    let indices: Vec<(String, RepoIndex, &HashMap<PathBuf, String>)> = loaded
+        .iter()
+        .map(|(name, index, overrides)| (name.clone(), index.clone(), overrides))
+        .collect();
+    repowise_graph::cross_repo_import_edges_with_modules(&indices)
         .into_iter()
         .filter(|e| e.to_repo == repo_name && e.to_file == file)
         .collect()
@@ -714,6 +749,94 @@ mod tests {
             loaded.stale, None,
             "no git to compare against must read as unknown, never as fresh"
         );
+    }
+
+    /// The regression #388 closes: a Rust member with no checkout used
+    /// to contribute zero cross-repo edges, because its crate name lives
+    /// in a `Cargo.toml` that isn't there. With the module path recorded
+    /// at export time, it resolves.
+    #[test]
+    fn a_never_cloned_rust_member_still_resolves_cross_repo_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        two_repo_fixture(&root);
+
+        let provider_path = root.join("provider");
+        let provider_index = index_of(&provider_path);
+        let module_paths: Vec<(PathBuf, String)> =
+            repowise_graph::module_map(&provider_index, repowise_core::Language::Rust)
+                .into_iter()
+                .map(|(mp, file)| (file, mp))
+                .collect();
+        assert!(!module_paths.is_empty(), "fixture must have Rust modules");
+
+        let artifact = root.join("provider.portable.json");
+        repowise_core::portable::PortableIndex::from_index(&provider_index)
+            .with_module_paths(&provider_path, module_paths)
+            .unwrap()
+            .save(&artifact)
+            .unwrap();
+        index_of(&root.join("consumer"))
+            .save(&root.join("consumer"))
+            .unwrap();
+
+        let repos = [
+            ResolvedWorkspaceRepo {
+                name: "provider".to_string(),
+                // Deliberately somewhere that does not exist.
+                path: root.join("provider-never-cloned"),
+                index: Some(artifact),
+            },
+            ResolvedWorkspaceRepo {
+                name: "consumer".to_string(),
+                path: root.join("consumer"),
+                index: None,
+            },
+        ];
+
+        let report = workspace_architecture(&repos);
+        assert!(
+            !report.edges.is_empty(),
+            "a never-cloned Rust member must still resolve: {:?}",
+            report.edges
+        );
+        assert_eq!(report.edges[0].from_repo, "consumer");
+        assert_eq!(report.edges[0].to_repo, "provider");
+
+        // And it is no longer reported as a blind spot.
+        assert!(
+            resolution_blind_spots(&repos).is_empty(),
+            "recorded module paths mean this is no longer blind"
+        );
+    }
+
+    /// The warning must still fire for an artifact exported before #388,
+    /// which carries no module paths -- those repos are still blind, and
+    /// silently so.
+    #[test]
+    fn a_pre_388_artifact_without_module_paths_is_still_a_blind_spot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        two_repo_fixture(&root);
+
+        let artifact = root.join("provider.portable.json");
+        // No `with_module_paths` -- exactly what a pre-#388 export wrote.
+        repowise_core::portable::PortableIndex::from_index(&index_of(&root.join("provider")))
+            .save(&artifact)
+            .unwrap();
+
+        let repos = [ResolvedWorkspaceRepo {
+            name: "provider".to_string(),
+            path: root.join("never-cloned"),
+            index: Some(artifact),
+        }];
+        let blind = resolution_blind_spots(&repos);
+        assert_eq!(
+            blind.len(),
+            1,
+            "an artifact with no module paths is still blind"
+        );
+        assert_eq!(blind[0].1, "Rust");
     }
 
     /// The limitation that makes `resolution_blind_spots` necessary,

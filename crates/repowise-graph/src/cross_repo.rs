@@ -69,9 +69,36 @@ fn separator(language: Language) -> &'static str {
 /// a full `RepoGraph` per other repo just to read one field back out.
 /// Empty for any language outside `MODULE_MAP_LANGUAGES`.
 pub fn module_map(index: &RepoIndex, language: Language) -> HashMap<String, PathBuf> {
+    module_map_with(index, language, &HashMap::new())
+}
+
+/// [`module_map`], but preferring a caller-supplied module path for any
+/// file that has one (issue #388).
+///
+/// Exists because Rust's and Go's module paths are derived by reading a
+/// manifest off disk -- `Cargo.toml`'s `[package] name`, `go.mod`'s
+/// `module` line -- and the directory those paths are measured from is
+/// the manifest's own. A repo backed only by a committed portable index,
+/// with no checkout, has neither, so recomputation silently yields
+/// nothing and the repo contributes no edges at all. Overrides are the
+/// values recorded at export time, when the checkout *was* present.
+///
+/// An override wins over recomputation rather than merely filling gaps:
+/// if the artifact says what a file's module path is, that is the
+/// authoritative answer for the tree that artifact describes, and the
+/// local filesystem may be describing a different one.
+pub fn module_map_with(
+    index: &RepoIndex,
+    language: Language,
+    overrides: &HashMap<PathBuf, String>,
+) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     for file in &index.files {
         if file.language != language {
+            continue;
+        }
+        if let Some(mp) = overrides.get(&file.path) {
+            map.insert(mp.clone(), file.path.clone());
             continue;
         }
         let mp = match language {
@@ -131,18 +158,39 @@ pub struct CrossRepoImportEdge {
 /// once per file, since multiple files in one repo share the same
 /// language's map.
 pub fn cross_repo_import_edges(repos: &[(String, RepoIndex)]) -> Vec<CrossRepoImportEdge> {
+    let empty = HashMap::new();
+    let with_modules: Vec<(String, RepoIndex, &HashMap<PathBuf, String>)> = repos
+        .iter()
+        .map(|(name, index)| (name.clone(), index.clone(), &empty))
+        .collect();
+    cross_repo_import_edges_with_modules(&with_modules)
+}
+
+/// [`cross_repo_import_edges`], with per-repo module-path overrides
+/// (issue #388).
+///
+/// Needed because a workspace member backed by a committed artifact and
+/// no checkout cannot recompute Rust or Go module paths -- see
+/// [`module_map_with`]. Without the overrides such a repo contributes no
+/// module-map entries, which produces an empty edge list rather than an
+/// error: indistinguishable from "these repos genuinely don't depend on
+/// each other", and `workspace-conformance` gates CI on exactly that
+/// shape of result.
+pub fn cross_repo_import_edges_with_modules(
+    repos: &[(String, RepoIndex, &HashMap<PathBuf, String>)],
+) -> Vec<CrossRepoImportEdge> {
     let per_language_maps: Vec<HashMap<Language, HashMap<String, PathBuf>>> = repos
         .iter()
-        .map(|(_, index)| {
+        .map(|(_, index, overrides)| {
             MODULE_MAP_LANGUAGES
                 .iter()
-                .map(|&lang| (lang, module_map(index, lang)))
+                .map(|&lang| (lang, module_map_with(index, lang, overrides)))
                 .collect()
         })
         .collect();
 
     let mut edges = Vec::new();
-    for (i, (from_repo, index)) in repos.iter().enumerate() {
+    for (i, (from_repo, index, _)) in repos.iter().enumerate() {
         for file in &index.files {
             if !MODULE_MAP_LANGUAGES.contains(&file.language) {
                 continue;
@@ -156,7 +204,7 @@ pub fn cross_repo_import_edges(repos: &[(String, RepoIndex)]) -> Vec<CrossRepoIm
                 if modpath::resolve_import(&imp.path, sep, own_map).is_some() {
                     continue; // resolves within its own repo -- not a cross-repo candidate
                 }
-                for (j, (other_repo, _)) in repos.iter().enumerate() {
+                for (j, (other_repo, _, _)) in repos.iter().enumerate() {
                     if other_repo == from_repo {
                         continue;
                     }

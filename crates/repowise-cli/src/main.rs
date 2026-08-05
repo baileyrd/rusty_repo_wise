@@ -2373,7 +2373,15 @@ fn cmd_export(path: &Path, out: &Path, format: ExportFormat, force: bool) -> any
         }
         ExportFormat::Index => {
             let index = RepoIndex::load(&root)?;
-            let portable = repowise_core::portable::PortableIndex::from_index(&index);
+            // Record module paths for the languages that can't recompute
+            // one without the repo on disk (issue #388). Computed here,
+            // where the checkout exists and `repowise-graph` is already a
+            // dependency -- `repowise-core` deliberately depends on no
+            // other `repowise-*` crate, so it cannot derive these itself.
+            let module_paths = disk_derived_module_paths(&index);
+            let recorded = module_paths.len();
+            let portable = repowise_core::portable::PortableIndex::from_index(&index)
+                .with_module_paths(&index.root, module_paths)?;
             let dest = export::portable_index_dest(out, force)?;
             portable.save(&dest)?;
             println!(
@@ -2395,6 +2403,12 @@ fn cmd_export(path: &Path, out: &Path, format: ExportFormat, force: bool) -> any
                     "  no indexed commit recorded, so readers cannot tell whether this is \
                      current -- re-run `repowise init` inside a git repository first"
                 ),
+            }
+            if recorded > 0 {
+                println!(
+                    "  recorded {recorded} Rust/Go module path(s), so cross-repo resolution \
+                     works for a workspace member backed by this artifact with no checkout."
+                );
             }
             println!(
                 "  safe to commit: paths are repo-relative and records are sorted, so the \
@@ -4548,6 +4562,23 @@ fn load_index(root: &Path, index_file: Option<&Path>) -> anyhow::Result<RepoInde
 /// result is not an error -- it is an empty edge list, which is
 /// indistinguishable from "these repos genuinely don't depend on each
 /// other".
+/// Module paths for the files whose language derives one by reading a
+/// manifest off disk -- Rust (`Cargo.toml`) and Go (`go.mod`), issue
+/// #388.
+///
+/// The other four cross-repo languages (Python, JVM, C#, PHP) derive
+/// theirs from `(file, root)` by string manipulation, so a reader can
+/// always recompute them and recording them would be dead weight.
+fn disk_derived_module_paths(index: &RepoIndex) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    for lang in [repowise_core::Language::Rust, repowise_core::Language::Go] {
+        for (module_path, file) in repowise_graph::module_map(index, lang) {
+            out.push((file, module_path));
+        }
+    }
+    out
+}
+
 fn warn_resolution_blind_spots(repos: &[repowise_workspace::ResolvedWorkspaceRepo]) {
     let blind = repowise_workspace::resolution_blind_spots(repos);
     if blind.is_empty() {

@@ -54,7 +54,7 @@
 
 use crate::{FileRecord, RepoIndex, SymbolId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Schema version of the portable artifact.
@@ -97,6 +97,30 @@ pub struct PortableIndex {
     /// `serde(default)` for the same reason as `caller_ids` above.
     #[serde(default)]
     calls: Vec<FileCalls>,
+    /// Repo-relative file path -> that file's module path, for the
+    /// languages whose module path **cannot be recomputed without the
+    /// repo on disk** (issue #388).
+    ///
+    /// Four of the six cross-repo languages derive their module path
+    /// from `(file, root)` by string manipulation — Python, JVM, C#,
+    /// PHP — and need nothing stored. Rust and Go don't: `Cargo.toml`'s
+    /// `[package] name` and `go.mod`'s `module` line live on disk, and
+    /// so does the crate/module root the remaining path segments are
+    /// measured from. A member backed only by a committed artifact has
+    /// neither, so without this its files contribute no module-map
+    /// entries and therefore no cross-repo edges — an empty result
+    /// indistinguishable from "these repos are independent".
+    ///
+    /// Deliberately holds the *computed module path* rather than the
+    /// crate name: the name alone is not enough, since the segment path
+    /// is measured from the manifest's directory, which is equally
+    /// absent.
+    ///
+    /// Empty for every artifact exported before #388, and empty for the
+    /// path-derived languages always. Consumers must treat "absent" as
+    /// "recompute it", never as "this file has no module path".
+    #[serde(default)]
+    module_paths: BTreeMap<PathBuf, String>,
     /// The index itself. Its `root` is always `"."`: the real root is
     /// supplied by whoever loads it, since only they know where the repo
     /// lives on their machine. Its `files[*].calls` are always empty on
@@ -189,8 +213,59 @@ impl PortableIndex {
             schema_version: PORTABLE_SCHEMA_VERSION,
             caller_ids,
             calls,
+            module_paths: BTreeMap::new(),
             index: out,
         }
+    }
+
+    /// Record module paths for the files whose language can't recompute
+    /// one without the repo on disk (issue #388).
+    ///
+    /// Supplied by the caller rather than computed here, because the
+    /// per-language module-path logic lives in `repowise-graph` and
+    /// `repowise-core` deliberately depends on no other `repowise-*`
+    /// crate — a load-bearing invariant (see `ARCHITECTURE.md`). Same
+    /// "the data comes in, the caller owns the dependency" split
+    /// `repowise_health::analyze_with_hotspots` already uses.
+    ///
+    /// Keys are matched against the artifact's own repo-relative paths,
+    /// so absolute keys are rebased here rather than silently failing to
+    /// match. Keys naming a file the artifact doesn't contain are an
+    /// error: they mean the caller and the artifact disagree about what
+    /// this repo is, and quietly dropping them would produce exactly the
+    /// missing-edges symptom this whole field exists to prevent.
+    pub fn with_module_paths(
+        mut self,
+        root: &Path,
+        paths: impl IntoIterator<Item = (PathBuf, String)>,
+    ) -> anyhow::Result<Self> {
+        let known: std::collections::HashSet<&Path> =
+            self.index.files.iter().map(|f| f.path.as_path()).collect();
+        let mut out = BTreeMap::new();
+        for (file, module_path) in paths {
+            let rel = to_relative(&file, root);
+            if !known.contains(rel.as_path()) {
+                anyhow::bail!(
+                    "module path recorded for {}, which is not one of this index's files",
+                    file.display()
+                );
+            }
+            out.insert(rel, module_path);
+        }
+        self.module_paths = out;
+        Ok(self)
+    }
+
+    /// The recorded module paths, re-anchored onto `root`.
+    ///
+    /// Separate from [`PortableIndex::into_anchored`] because only
+    /// cross-repo resolution needs them; every other consumer of an
+    /// anchored index would just be carrying an unused map.
+    pub fn anchored_module_paths(&self, root: &Path) -> HashMap<PathBuf, String> {
+        self.module_paths
+            .iter()
+            .map(|(file, mp)| (root.join(file), mp.clone()))
+            .collect()
     }
 
     /// Re-anchor onto `root`, producing an index indistinguishable from
@@ -559,6 +634,41 @@ mod tests {
         portable.calls[0].file = PathBuf::from("src/ghost.rs");
 
         let err = portable.into_anchored(root).unwrap_err();
+        assert!(err.to_string().contains("ghost.rs"), "{err}");
+    }
+
+    #[test]
+    fn module_paths_round_trip_and_rebase() {
+        let root = Path::new("/home/someone/myrepo");
+        let portable = PortableIndex::from_index(&fixture(root))
+            .with_module_paths(root, [(root.join("src/a.rs"), "mycrate::a".to_string())])
+            .unwrap();
+
+        // Stored repo-relative, so the artifact stays machine-neutral.
+        let json = serde_json::to_string(&portable).unwrap();
+        assert!(!json.contains("/home/someone"), "{json}");
+
+        // And re-anchored onto whatever root the reader has.
+        let elsewhere = Path::new("/other/place");
+        let anchored = portable.anchored_module_paths(elsewhere);
+        assert_eq!(
+            anchored
+                .get(&elsewhere.join("src/a.rs"))
+                .map(String::as_str),
+            Some("mycrate::a")
+        );
+    }
+
+    /// A module path for a file the artifact doesn't contain means the
+    /// caller and the artifact disagree about what this repo is.
+    /// Reported, not dropped -- dropping it would reproduce the exact
+    /// missing-edges symptom the field exists to prevent.
+    #[test]
+    fn a_module_path_for_an_unknown_file_is_rejected() {
+        let root = Path::new("/repo");
+        let err = PortableIndex::from_index(&fixture(root))
+            .with_module_paths(root, [(root.join("src/ghost.rs"), "x".to_string())])
+            .unwrap_err();
         assert!(err.to_string().contains("ghost.rs"), "{err}");
     }
 

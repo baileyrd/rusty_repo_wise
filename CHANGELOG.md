@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- MCP: `get_overview` and `get_health` gained the `repo` parameter,
+  federating **per repo** (a `repos` list) rather than merging —
+  overview's flat counts become workspace totals; health synthesises no
+  workspace average, since a mean of means is not a mean (partial #337).
 - MCP: `get_dead_code`, `get_refactor_candidates`, and
   `get_security_findings` gained the `repo` parameter (a named workspace
   repo, or `"all"` to federate across the workspace), matching

@@ -20,7 +20,8 @@ today:
 | ---- | ------------------ | ----- |
 | Per-language extraction (`repowise_parser::parse_file`) | `rust::extract`, `python::extract`, `javascript::extract_typescript`, `javascript::extract_javascript`, `java::extract`, `kotlin::extract`, `go::extract`, `cpp::extract`, `csharp::extract`, `scala::extract`, `ruby::extract`, `c::extract`, `swift::extract`, `php::extract`, `dart::extract`, `shell::extract`, `luau::extract` (issue #341 — sourced from the community `tree-sitter-grammars` org rather than a language's own canonical maintainers, but the same "Full tier" extraction depth as every language listed before it), plus `structural_only` (a shared, no-grammar bare-`FileRecord` builder for issue #70's 9 "Structural tier" languages) | callers match on `Language` and never touch per-language internals directly; adding a language means adding a match arm, not implementing a trait |
 | File discovery (`repowise_core::discover_files`) | wraps the `ignore` crate | `.gitignore`-aware; the walker itself isn't swappable yet |
-| Index persistence (`RepoIndex::save`/`load`) | JSON on disk (`.repowise/index.json`) | the one and only backing store so far |
+| Index persistence (`RepoIndex::save`/`load`) | JSON on disk (`.repowise/index.json`) | the one and only backing store so far — machine-local and absolute-path |
+| Portable index (`portable::PortableIndex::from_index`/`into_anchored`) | JSON on disk, repo-relative + sorted + schema-versioned | ADR-0002; a second *form* of the same store, not a second store — the only place that knows paths have two representations |
 
 ## Structure
 Modular monolith: one Cargo workspace, twenty-two crates (plus
@@ -105,6 +106,22 @@ workspace-level state to disk on its own initiative
 repo's already-written `.repowise/index.json` — every other
 `workspace-*` command/endpoint still recomputes everything fresh from
 member indexes on each call.
+
+`repowise-core`'s `portable` module (issue #378, ADR-0002) is the one
+place in the workspace that knows paths have two forms. A working
+`RepoIndex` stays absolute-path everywhere, exactly as before; a
+`PortableIndex` is the same data rebased onto repo-relative paths,
+sorted canonically, and stamped with a schema version, so it can be
+committed and read on another machine. Seven fields carry a path --
+`RepoIndex::root`, `FileRecord::path`, `Symbol::file`, `Symbol::id`,
+`ImportRef::resolved_file`, `CallRef::caller`, and
+`FieldAccessRef::method` -- and the last three are `SymbolId` strings
+with the path embedded inside them, which is why the conversion lives in
+one module with a round-trip test rather than being open-coded at each
+call site. ADR-0002 records why the deeper fix (rewriting all ~215
+absolute-path sites to relative) was rejected on risk rather than on
+principle, and confining the conversion here is what keeps that
+rejection cheap to revisit.
 
 `repowise-tour` (issue #377's guided tours) is a pure synthesis crate in
 the same mould as `repowise-refactor`: it depends on `repowise-core`,

@@ -6,6 +6,94 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## Portable, committable index (closes #378)
+**2026-08-05**
+
+- Implements ADR-0002 (accepted in this same branch). Second of the two
+  gaps found by comparing this port against Understand-Anything; like
+  #377, **not** a parity gap against upstream repowise and carrying no
+  `parity-gap` label.
+- New `repowise_core::portable` -- `PortableIndex::from_index` /
+  `into_anchored`, the single choke point that knows paths have two
+  forms. The working index stays absolute-path everywhere; nothing else
+  in the workspace changed representation.
+- **Seven fields carry a path, not two**: `RepoIndex::root`,
+  `FileRecord::path`, `Symbol::file`, `Symbol::id`,
+  `ImportRef::resolved_file`, `CallRef::caller`,
+  `FieldAccessRef::method`. The last three are `SymbolId` strings with
+  the path embedded (`{file}::{name}@{line}`) -- the easy ones to miss,
+  and missing any one produces an artifact that looks portable and
+  silently isn't. Verified by asserting the producing machine's path
+  appears nowhere in the serialized output.
+- **Canonical ordering**, because `readdir` order is not portable.
+  Measured: exporting the same tree from two different roots produces
+  byte-identical records for all 123 files. Without sorting, every
+  re-export would reorder itself between machines and become an
+  unreviewable diff.
+- **Schema version that fails loudly** rather than misparsing, forward
+  slashes on every platform, and a round-trip test asserting
+  `from_index` then `into_anchored` restores every field exactly.
+- `repowise export --format index --out <DIR>` writes
+  `index.portable.json`; `--index <FILE>` on `overview`, `health`,
+  `deps`, and `tour` reads one. The remaining read commands still need a
+  local index -- mechanical follow-up, not a design question, and stated
+  as such rather than left to be discovered.
+- **Staleness is reported on every read**, per the ADR's hard
+  requirement: matches / STALE with both SHAs / unknown-because-no-git /
+  unknown-because-no-recorded-commit. A committed index is routinely
+  behind the working tree, so the failure mode to prevent is presenting
+  stale analysis as current.
+- Verified end to end against a *different* root: exported here, read
+  from a fresh clone in `/tmp`, identical results, staleness reported.
+- Honest caveat, measured and documented rather than buried: the
+  artifact is ~7.7 MB for this 122-file repo. Rebasing paths reclaims
+  only ~750 KB; `calls` is 51.7% of the index. A `calls`-dropping
+  projection would roughly halve it but disable dead-code detection and
+  the call-graph health markers, so it is deferred to its own issue.
+- `Symbol`/`SymbolKind` gained `Default` **only in test builds**
+  (`cfg_attr(test, ...)`), purely so fixtures can skip twenty-odd
+  health-marker fields. No public API change: there is no meaningful
+  default kind for real extracted code, so production builds still
+  don't get one to reach for.
+- 8 new tests in `repowise-core`; 960 workspace tests green, clippy
+  clean.
+
+---
+
+## ADR-0002: a portable, committable index artifact (design for #378)
+**2026-08-05**
+
+- Design-only. No behaviour change; `docs/adr/0002-portable-committable-index.md`
+  is the ADR that #378 (scoped Large) is gated on, and the first real
+  ADR in `docs/adr/` — 0001 is the template.
+- Measured first, decided second. On this repo (122 parsed files, 2,861
+  symbols): the index is **8.0 MB**, and the absolute root path appears
+  **27,884 times** in it. By share of JSON bytes, `calls` is 51.7% and
+  `symbols` 45.3%; `path` is 0.1%.
+- Three findings drove the decision:
+  - Rebasing paths to repo-relative reclaims only ~750 KB. Necessary for
+    portability, nowhere near sufficient for size.
+  - `calls` is the only size lever of the right order of magnitude, but
+    dropping it disables dead-code detection and the call-graph health
+    markers — a capability decision, so it is deferred to its own issue
+    rather than bundled into the format.
+  - `index.files` ordering is **not portable**. `discover_files` uses
+    `ignore::WalkBuilder`, whose order follows filesystem `readdir`.
+    Consecutive runs here are byte-identical, but that is incidental; a
+    committed artifact must sort canonically or it reorders itself
+    between machines and every re-export becomes an unreviewable diff.
+- Decided: a two-form design with one conversion choke point
+  (`RepoIndex::to_portable` / `anchor_to`, rewriting `Symbol.id` and not
+  just `Symbol.file`), an explicit `schema_version` that fails loudly,
+  canonical sorting, and mandatory staleness reporting against
+  `indexed_commit` on every read of a committed artifact.
+- Rejected, with reasons recorded: rewriting all ~215 absolute-path
+  sites to relative (the deeper fix — rejected on risk, explicitly not
+  foreclosed); committing `.repowise/index.json` as-is; a shared
+  index server; reusing `--format json-graph`.
+
+---
+
 ## Guided tours: a dependency-ordered reading path (closes #377)
 **2026-08-05**
 

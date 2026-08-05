@@ -195,9 +195,10 @@ fn transitive_closure(
 /// never had anything to work with" -- see [`Confidence`].
 fn has_resolvable_language_files(repos: &[ResolvedWorkspaceRepo]) -> bool {
     repos.iter().any(|repo| {
-        RepoIndex::load(&repo.path)
-            .map(|index| {
-                index
+        crate::load_repo_index(repo)
+            .map(|loaded| {
+                loaded
+                    .index
                     .files
                     .iter()
                     .any(|f| repowise_graph::MODULE_MAP_LANGUAGES.contains(&f.language))

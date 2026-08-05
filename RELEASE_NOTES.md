@@ -6,6 +6,58 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## Portable-index-backed workspace members (closes #384)
+**2026-08-05**
+
+- Closes #384. A workspace member can now name a committed portable
+  index (`index = "artifacts/billing.portable.json"`) instead of
+  requiring a local `.repowise/index.json`, so `workspace-architecture`,
+  `workspace-blast-radius`, `workspace-conformance`, and
+  `workspace-metrics` no longer need every member repo checked out and
+  indexed. That was the point: a CI job gating on `workspace-conformance`
+  had to clone and index N repos to answer one question.
+- All five `RepoIndex::load` sites in `repowise-workspace` now route
+  through one `load_repo_index`, which reports **where** the index came
+  from and **whether** it has drifted from that repo's checkout.
+  `workspace-repos` shows both; `workspace-conformance` prints a drift
+  summary before its verdict, because a clean verdict over stale inputs
+  is the reassuring-but-wrong result a CI gate must not produce quietly.
+- Mixed local/portable members are the expected case and are tested as
+  such. `path` stays required even with `index` set -- it is the anchor
+  root and the git working directory -- but it need not *exist* for the
+  index-only commands, since `into_anchored` never touches the
+  filesystem.
+- **Design questions #384 raised, resolved:** paths only, no URLs
+  (same reasoning ADR-0002 used to reject a shared registry -- git
+  already distributes files); mixed sources supported; staleness
+  reported per repo with the CI gate calling it out; and cross-repo
+  resolution correctness *verified* rather than assumed.
+
+### Two findings from running it
+
+- **The correctness test was passing vacuously at first.** The fixture
+  used two Python packages both named `pkg`, and this port's Python
+  resolver walks progressively shorter module prefixes -- so
+  `pkg.core` resolved against the importer's *own* `pkg/__init__.py` and
+  never became a cross-repo candidate. Both local and portable produced
+  zero edges, and "identical" over two empty lists proves nothing. The
+  fixture is now two Rust crates that resolve a real edge, with an
+  explicit non-empty assertion guarding against the same trap.
+- **A real limitation in the "never cloned" promise.** Cross-repo
+  resolution builds a module map per language, and two of the six read a
+  manifest **off disk**: Rust walks up to `Cargo.toml` for the crate
+  name, Go to `go.mod`. Python, Java/Kotlin/Scala, C#, and PHP derive
+  theirs from the path alone. So a Rust or Go member with no checkout
+  contributes **no edges** -- not an error, just an empty list that looks
+  exactly like "these repos are independent". Every cross-repo command
+  now warns on that combination
+  (`resolution_blind_spots`), rather than letting it read as a clean
+  result. Found by running the feature end to end, not by reading the
+  code.
+- 6 new tests; 972 workspace tests green, clippy clean.
+
+---
+
 ## Interned caller ids: portable index schema v2 (closes #381)
 **2026-08-05**
 

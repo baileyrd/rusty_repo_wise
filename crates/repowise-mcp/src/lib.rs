@@ -3958,10 +3958,12 @@ mod tests {
                 repowise_workspace::ResolvedWorkspaceRepo {
                     name: "indexed".to_string(),
                     path: indexed_repo,
+                    index: None,
                 },
                 repowise_workspace::ResolvedWorkspaceRepo {
                     name: "unindexed".to_string(),
                     path: unindexed_repo,
+                    index: None,
                 },
             ]),
         );
@@ -4010,10 +4012,12 @@ mod tests {
             repowise_workspace::ResolvedWorkspaceRepo {
                 name: "repo-a".to_string(),
                 path: repo_a,
+                index: None,
             },
             repowise_workspace::ResolvedWorkspaceRepo {
                 name: "repo-b".to_string(),
                 path: repo_b,
+                index: None,
             },
         ]
     }
@@ -4542,10 +4546,12 @@ mod tests {
             repowise_workspace::ResolvedWorkspaceRepo {
                 name: "repo-a".to_string(),
                 path: repo_a,
+                index: None,
             },
             repowise_workspace::ResolvedWorkspaceRepo {
                 name: "repo-b".to_string(),
                 path: repo_b,
+                index: None,
             },
         ]
     }

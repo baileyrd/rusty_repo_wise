@@ -47,6 +47,7 @@ fn rust_repo(root: &Path, name: &str, source: &str) -> ResolvedWorkspaceRepo {
     ResolvedWorkspaceRepo {
         name: name.to_string(),
         path,
+        index: None,
     }
 }
 
@@ -90,6 +91,7 @@ fn a_dependency_raises_propagation_cost_above_the_floor() {
     let lib = ResolvedWorkspaceRepo {
         name: "corelib".to_string(),
         path: root.join("corelib"),
+        index: None,
     };
 
     let m = workspace_metrics(&[app, lib]);
@@ -154,10 +156,12 @@ fn a_workspace_with_no_resolvable_language_withholds_the_score() {
         ResolvedWorkspaceRepo {
             name: "svc-a".to_string(),
             path: root.join("svc-a"),
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "svc-b".to_string(),
             path: root.join("svc-b"),
+            index: None,
         },
     ];
 
@@ -183,6 +187,7 @@ fn unindexed_repos_are_named() {
         ResolvedWorkspaceRepo {
             name: "never".to_string(),
             path: never,
+            index: None,
         },
     ]);
 

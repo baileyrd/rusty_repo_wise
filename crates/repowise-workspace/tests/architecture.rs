@@ -87,10 +87,12 @@ fn workspace_architecture_resolves_a_cross_repo_use_import() {
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 
@@ -174,10 +176,12 @@ fn workspace_architecture_resolves_same_repo_imports_first_even_with_a_naming_co
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 
@@ -214,10 +218,12 @@ fn workspace_architecture_ignores_relative_import_languages() {
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 
@@ -248,10 +254,12 @@ fn workspace_architecture_resolves_a_cross_repo_python_import() {
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 
@@ -319,10 +327,12 @@ fn workspace_architecture_resolves_a_cross_repo_go_import() {
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 
@@ -351,10 +361,12 @@ fn workspace_architecture_reports_an_unindexed_repo_without_crashing() {
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 
@@ -392,10 +404,12 @@ fn workspace_blast_radius_filters_to_a_specific_repo_and_file() {
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path.clone(),
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 
@@ -438,10 +452,12 @@ fn detect_workspace_cycles_finds_a_mutual_cross_repo_dependency() {
         ResolvedWorkspaceRepo {
             name: "repo-a".to_string(),
             path: repo_a_path,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "repo-b".to_string(),
             path: repo_b_path,
+            index: None,
         },
     ];
 

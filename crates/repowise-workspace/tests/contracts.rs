@@ -66,10 +66,12 @@ fn workspace_contracts_matches_a_producer_and_a_cross_repo_consumer() {
         ResolvedWorkspaceRepo {
             name: "server".to_string(),
             path: server_repo,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "client".to_string(),
             path: client_repo,
+            index: None,
         },
     ];
 
@@ -100,6 +102,7 @@ fn workspace_contracts_reports_an_unmatched_consumer() {
     let repos = vec![ResolvedWorkspaceRepo {
         name: "client".to_string(),
         path: client_repo,
+        index: None,
     }];
 
     let report = workspace_contracts(&repos);
@@ -136,10 +139,12 @@ fn workspace_contracts_matches_route_templates_against_a_literal_path() {
         ResolvedWorkspaceRepo {
             name: "server".to_string(),
             path: server_repo,
+            index: None,
         },
         ResolvedWorkspaceRepo {
             name: "client".to_string(),
             path: client_repo,
+            index: None,
         },
     ];
 
@@ -160,6 +165,7 @@ fn repo_with(root: &Path, name: &str, files: &[(&str, &str)]) -> ResolvedWorkspa
     ResolvedWorkspaceRepo {
         name: name.to_string(),
         path,
+        index: None,
     }
 }
 
@@ -280,6 +286,7 @@ fn diagnostics_names_repos_it_could_not_read() {
         ResolvedWorkspaceRepo {
             name: "never".to_string(),
             path: never,
+            index: None,
         },
     ]);
 

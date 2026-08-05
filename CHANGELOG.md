@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Workspace members may be backed by a committed portable index
+  (`index = "..."` in the workspace TOML), so cross-repo commands no
+  longer require every repo checked out and indexed. Source and
+  staleness are reported per member, and a warning fires when a Rust or
+  Go member without a checkout would silently contribute no edges
+  (#384).
 - `--index <FILE>` now works on every index-derived read command
   (`search`, `dead-code`, `refactor`, `security`, `hotspots`,
   `doc-coverage`, `decisions`, alongside the original four), with

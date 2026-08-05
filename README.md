@@ -3725,6 +3725,50 @@ status, via a `--workspace <path>` flag.
   process's current directory). This file is never inferred from or
   stored inside any member repo's own `.repowise/` — a workspace spans
   repos, so no single member repo is a sensible owner of it.
+
+  **A member may be backed by a committed portable index instead of a
+  local one** (issue #384), so a workspace command doesn't need every
+  repo checked out and indexed:
+  ```toml
+  [[repo]]
+  name = "billing"
+  path = "../billing"
+  index = "artifacts/billing.portable.json"   # optional
+  ```
+  `index` resolves relative to the workspace file, the same rule `path`
+  follows. **Mixed sources are the expected case**, not an edge case:
+  repos publish artifacts on their own schedules, so some members will
+  have one and others won't.
+
+  `path` stays required even with `index` set — it is the anchor root
+  for re-anchoring, and the working directory for commands that shell
+  out to git. It does **not** have to exist for the index-only
+  commands, which is what lets `workspace-architecture`,
+  `workspace-blast-radius`, `workspace-conformance`, and
+  `workspace-metrics` run against repos nobody cloned.
+
+  **One real limitation, found by running it rather than reading it.**
+  Cross-repo resolution builds a module map per language, and two of the
+  six do it by reading a manifest **off disk**: Rust walks up to a
+  `Cargo.toml` for the crate name, Go to a `go.mod`. Python,
+  Java/Kotlin/Scala, C#, and PHP derive theirs from the path alone. So a
+  **Rust or Go member with no checkout contributes no edges** — and that
+  is not an error, it's an empty edge list, indistinguishable from "these
+  repos genuinely don't depend on each other". Every cross-repo command
+  now warns when that combination is present rather than letting it pass
+  as a clean result:
+  ```
+  warning: provider is backed by a portable index with no checkout at its path,
+  and contains Rust files. Rust's cross-repo module map is derived from a
+  manifest on disk (Cargo.toml / go.mod), so this repo's imports cannot
+  resolve and will silently contribute no edges.
+  ```
+
+  **`workspace-repos` reports the source and freshness of each member's
+  index** (`local`/`portable`, and matches / STALE / unknown), and
+  `workspace-conformance` — which gates CI — prints a drift summary
+  before its verdict. A clean verdict over stale inputs is exactly the
+  reassuring-but-wrong result a gate must not produce quietly.
 - `repowise workspace-repos --workspace <path>` lists every configured
   repo with its indexed status and file count if a prior `repowise
   init`/`update` has run there.

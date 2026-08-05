@@ -88,6 +88,26 @@ pub struct WorkspaceConfig {
 pub struct WorkspaceRepoConfig {
     pub name: String,
     pub path: PathBuf,
+    /// Optional path to a committed portable index
+    /// (`repowise export --format index`), issue #384. When set, this
+    /// repo's index is read from that artifact instead of from a local
+    /// `.repowise/index.json` under `path`.
+    ///
+    /// Resolved relative to the workspace file, the same rule `path`
+    /// already follows — a workspace file is meant to be checked in and
+    /// shared, so nothing in it may depend on the invoking process's
+    /// current directory.
+    ///
+    /// `path` stays **required** even with `index` set: it is the repo's
+    /// anchor root (re-anchoring a portable index needs somewhere to
+    /// anchor to) and the working directory for the commands that shell
+    /// out to git. It does **not** have to exist for the index-only
+    /// commands — `into_anchored` never touches the filesystem — which
+    /// is what lets `workspace-architecture`, `workspace-blast-radius`,
+    /// `workspace-conformance`, and `workspace-metrics` run against
+    /// repos that were never cloned.
+    #[serde(default)]
+    pub index: Option<PathBuf>,
 }
 
 impl WorkspaceConfig {
@@ -105,6 +125,136 @@ impl WorkspaceConfig {
 pub struct ResolvedWorkspaceRepo {
     pub name: String,
     pub path: PathBuf,
+    /// Absolute path to this repo's committed portable index, when the
+    /// workspace file names one. See [`load_repo_index`].
+    pub index: Option<PathBuf>,
+}
+
+/// Where a repo's index came from — reported so a workspace answer built
+/// from committed artifacts can't be mistaken for one built from live
+/// local indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexSource {
+    /// A local `.repowise/index.json` under the repo's own path.
+    Local,
+    /// A committed portable artifact named by the workspace file.
+    Portable,
+}
+
+impl IndexSource {
+    pub fn label(&self) -> &'static str {
+        match self {
+            IndexSource::Local => "local",
+            IndexSource::Portable => "portable",
+        }
+    }
+}
+
+/// A repo's index plus where it came from and whether it still matches
+/// that repo's checkout.
+pub struct LoadedRepoIndex {
+    pub index: RepoIndex,
+    pub source: IndexSource,
+    /// `None` when there is nothing to compare against — no git in the
+    /// repo path, or no commit recorded in the artifact. Reported as
+    /// unknown, never as "up to date".
+    pub stale: Option<bool>,
+}
+
+/// Load one repo's index, from its committed portable artifact when the
+/// workspace file names one and from its local `.repowise/index.json`
+/// otherwise (issue #384).
+///
+/// Mixed sources across a workspace are expected, not exceptional: repos
+/// release on their own schedules, so some members will publish an
+/// artifact while others are checked out locally.
+pub fn load_repo_index(repo: &ResolvedWorkspaceRepo) -> anyhow::Result<LoadedRepoIndex> {
+    let (index, source) = match &repo.index {
+        Some(artifact) => {
+            let portable = repowise_core::portable::PortableIndex::load(artifact)?;
+            (portable.into_anchored(&repo.path)?, IndexSource::Portable)
+        }
+        None => (RepoIndex::load(&repo.path)?, IndexSource::Local),
+    };
+    let stale = staleness_of(&index, &repo.path);
+    Ok(LoadedRepoIndex {
+        index,
+        source,
+        stale,
+    })
+}
+
+/// Languages whose cross-repo module map is derived by **reading the
+/// filesystem**, not from the index alone.
+///
+/// `repowise_graph::modpath::rust_module_path` walks up to a
+/// `Cargo.toml` and reads the package name out of it; `go_module_path`
+/// does the same with `go.mod`. Python, Java/Kotlin/Scala, C#, and PHP
+/// derive their module paths from `(file, root)` by string manipulation
+/// and need nothing on disk.
+///
+/// That difference decides whether a workspace member backed only by a
+/// committed artifact can participate in cross-repo resolution at all.
+const DISK_DERIVED_MODULE_MAP_LANGUAGES: [repowise_core::Language; 2] =
+    [repowise_core::Language::Rust, repowise_core::Language::Go];
+
+/// Repos whose cross-repo imports **cannot** resolve, because their
+/// index came from an artifact, their path isn't on disk, and their
+/// language needs a manifest file to derive module names (issue #384).
+///
+/// This exists because the failure is otherwise invisible: resolution
+/// simply finds nothing, and "no cross-repo dependencies" is a perfectly
+/// plausible-looking answer. `workspace-conformance` gates CI on exactly
+/// that shape of result, so a silent blind spot there reads as a pass.
+///
+/// Returns `(repo name, language label)` pairs.
+pub fn resolution_blind_spots(repos: &[ResolvedWorkspaceRepo]) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for repo in repos {
+        if repo.index.is_none() || repo.path.exists() {
+            continue;
+        }
+        let Ok(loaded) = load_repo_index(repo) else {
+            continue;
+        };
+        for lang in DISK_DERIVED_MODULE_MAP_LANGUAGES {
+            if loaded.index.files.iter().any(|f| f.language == lang) {
+                out.push((repo.name.clone(), lang.label()));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Whether `index` describes something other than what `root` currently
+/// has checked out. `None` means unanswerable, which is a third answer
+/// and not a synonym for "fresh".
+fn staleness_of(index: &RepoIndex, root: &Path) -> Option<bool> {
+    let indexed = index.indexed_commit.as_deref()?;
+    let head = repo_head_sha(root)?;
+    Some(indexed != head)
+}
+
+/// `HEAD`'s short SHA for `root`, or `None` if it isn't a git repo.
+///
+/// Shelled out here rather than taken from `repowise-git` on purpose:
+/// this crate deliberately depends on `repowise-git` only for
+/// co-change reporting, and a workspace made entirely of committed
+/// artifacts should not need that dependency to answer "is this
+/// current".
+fn repo_head_sha(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 /// Load and parse the workspace file at `config_path`, resolving every
@@ -119,13 +269,19 @@ pub fn load_resolved(config_path: &Path) -> anyhow::Result<Vec<ResolvedWorkspace
         .repos
         .into_iter()
         .map(|r| {
-            let joined = if r.path.is_absolute() {
-                r.path
-            } else {
-                config_dir.join(&r.path)
+            let resolve = |p: PathBuf| {
+                let joined = if p.is_absolute() {
+                    p
+                } else {
+                    config_dir.join(p)
+                };
+                joined.canonicalize().unwrap_or(joined)
             };
-            let path = joined.canonicalize().unwrap_or(joined);
-            ResolvedWorkspaceRepo { name: r.name, path }
+            ResolvedWorkspaceRepo {
+                name: r.name,
+                path: resolve(r.path),
+                index: r.index.map(resolve),
+            }
         })
         .collect())
 }
@@ -158,6 +314,12 @@ pub struct RepoStatus {
     pub indexed: bool,
     pub file_count: Option<usize>,
     pub other_file_count: Option<usize>,
+    /// Where the index came from, when one loaded (issue #384).
+    pub source: Option<IndexSource>,
+    /// Whether that index has drifted from this repo's checkout.
+    /// `None` = unanswerable (no git, or no commit recorded), which is
+    /// a distinct answer from "fresh".
+    pub stale: Option<bool>,
 }
 
 /// Reports whether `repo` has a prior `repowise init`/`update` (a
@@ -165,13 +327,15 @@ pub struct RepoStatus {
 /// as-is by the CLI/MCP/dashboard frontends -- none of them re-derive
 /// this signal themselves.
 pub fn repo_status(repo: &ResolvedWorkspaceRepo) -> RepoStatus {
-    match RepoIndex::load(&repo.path) {
-        Ok(index) => RepoStatus {
+    match load_repo_index(repo) {
+        Ok(loaded) => RepoStatus {
             name: repo.name.clone(),
             path: repo.path.clone(),
             indexed: true,
-            file_count: Some(index.files.len()),
-            other_file_count: Some(index.other_files),
+            file_count: Some(loaded.index.files.len()),
+            other_file_count: Some(loaded.index.other_files),
+            source: Some(loaded.source),
+            stale: loaded.stale,
         },
         Err(_) => RepoStatus {
             name: repo.name.clone(),
@@ -179,6 +343,8 @@ pub fn repo_status(repo: &ResolvedWorkspaceRepo) -> RepoStatus {
             indexed: false,
             file_count: None,
             other_file_count: None,
+            source: None,
+            stale: None,
         },
     }
 }
@@ -265,16 +431,18 @@ pub fn workspace_architecture(repos: &[ResolvedWorkspaceRepo]) -> ArchitectureRe
     let mut statuses = Vec::with_capacity(repos.len());
     let mut indices: Vec<(String, RepoIndex)> = Vec::new();
     for repo in repos {
-        match RepoIndex::load(&repo.path) {
-            Ok(index) => {
+        match load_repo_index(repo) {
+            Ok(loaded) => {
                 statuses.push(RepoStatus {
                     name: repo.name.clone(),
                     path: repo.path.clone(),
                     indexed: true,
-                    file_count: Some(index.files.len()),
-                    other_file_count: Some(index.other_files),
+                    file_count: Some(loaded.index.files.len()),
+                    other_file_count: Some(loaded.index.other_files),
+                    source: Some(loaded.source),
+                    stale: loaded.stale,
                 });
-                indices.push((repo.name.clone(), index));
+                indices.push((repo.name.clone(), loaded.index));
             }
             Err(_) => statuses.push(RepoStatus {
                 name: repo.name.clone(),
@@ -282,6 +450,8 @@ pub fn workspace_architecture(repos: &[ResolvedWorkspaceRepo]) -> ArchitectureRe
                 indexed: false,
                 file_count: None,
                 other_file_count: None,
+                source: None,
+                stale: None,
             }),
         }
     }
@@ -328,9 +498,9 @@ pub fn workspace_blast_radius(
     let indices: Vec<(String, RepoIndex)> = repos
         .iter()
         .filter_map(|r| {
-            RepoIndex::load(&r.path)
+            load_repo_index(r)
                 .ok()
-                .map(|idx| (r.name.clone(), idx))
+                .map(|loaded| (r.name.clone(), loaded.index))
         })
         .collect();
     repowise_graph::cross_repo_import_edges(&indices)
@@ -359,6 +529,266 @@ pub fn detect_workspace_cycles(repos: &[ResolvedWorkspaceRepo]) -> Vec<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::fs;
+
+    /// Two Rust crates where `consumer` genuinely imports across the
+    /// repo boundary.
+    ///
+    /// Rust rather than Python on purpose: this port's Python resolver
+    /// walks progressively shorter module prefixes, so a `pkg/` package
+    /// present in both repos makes `pkg.core` resolve against the
+    /// importer's *own* `pkg/__init__.py` and never become a cross-repo
+    /// candidate at all. A fixture like that yields zero edges from both
+    /// sources, and an "identical results" assertion over two empty
+    /// lists proves nothing. Crate-name module maps produce a real edge.
+    fn two_repo_fixture(dir: &Path) {
+        for (name, rel, body) in [
+            ("provider", "src/thing.rs", "pub fn thing() -> i32 { 1 }\n"),
+            (
+                "consumer",
+                "src/lib.rs",
+                "use provider::thing::thing;\n\npub fn use_it() -> i32 { thing() }\n",
+            ),
+        ] {
+            let repo = dir.join(name);
+            fs::create_dir_all(repo.join("src")).unwrap();
+            fs::write(
+                repo.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            )
+            .unwrap();
+            let path = repo.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    fn index_of(root: &Path) -> RepoIndex {
+        let discovered = repowise_core::discover_files(root).unwrap();
+        let mut files = Vec::new();
+        let mut other_files = 0;
+        for entry in discovered {
+            if matches!(entry.language, repowise_core::Language::Other) {
+                other_files += 1;
+                continue;
+            }
+            let source = fs::read_to_string(&entry.path).unwrap();
+            match repowise_parser::parse_file(&entry.path, entry.language, &source).unwrap() {
+                Some(record) => files.push(record),
+                None => other_files += 1,
+            }
+        }
+        RepoIndex {
+            root: root.to_path_buf(),
+            files,
+            other_files,
+            indexed_commit: None,
+        }
+    }
+
+    /// The correctness question #384 flagged as needing verification
+    /// rather than assumption: cross-repo import resolution spans repos,
+    /// but anchoring is per-repo, so a workspace built from portable
+    /// artifacts must resolve exactly what local indexes would.
+    #[test]
+    fn cross_repo_resolution_is_identical_from_portable_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        two_repo_fixture(&root);
+
+        let repos: Vec<ResolvedWorkspaceRepo> = ["provider", "consumer"]
+            .iter()
+            .map(|name| ResolvedWorkspaceRepo {
+                name: name.to_string(),
+                path: root.join(name),
+                index: None,
+            })
+            .collect();
+
+        // Baseline: resolve from indexes built in place.
+        let local: Vec<(String, RepoIndex)> = repos
+            .iter()
+            .map(|r| (r.name.clone(), index_of(&r.path)))
+            .collect();
+        let from_local = repowise_graph::cross_repo_import_edges(&local);
+
+        // Same repos, but each index round-tripped through the portable
+        // form and re-anchored.
+        let portable: Vec<(String, RepoIndex)> = repos
+            .iter()
+            .map(|r| {
+                let idx = index_of(&r.path);
+                let restored = repowise_core::portable::PortableIndex::from_index(&idx)
+                    .into_anchored(&r.path)
+                    .unwrap();
+                (r.name.clone(), restored)
+            })
+            .collect();
+        let from_portable = repowise_graph::cross_repo_import_edges(&portable);
+
+        // Guard against a vacuous pass: two empty lists are trivially
+        // "identical" and would prove nothing about anchoring.
+        assert!(
+            !from_local.is_empty(),
+            "fixture must actually resolve a cross-repo edge, or this test proves nothing"
+        );
+        assert_eq!(
+            from_local.len(),
+            from_portable.len(),
+            "portable indexes resolved a different number of cross-repo edges"
+        );
+        for (a, b) in from_local.iter().zip(&from_portable) {
+            assert_eq!((&a.from_repo, &a.to_repo), (&b.from_repo, &b.to_repo));
+            assert_eq!((&a.from_file, &a.to_file), (&b.from_file, &b.to_file));
+        }
+    }
+
+    /// Mixed sources in one workspace are the expected case, not an
+    /// edge case: repos publish artifacts on their own schedules.
+    #[test]
+    fn a_workspace_can_mix_local_and_portable_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        two_repo_fixture(&root);
+
+        // `provider` gets a committed artifact; `consumer` stays local.
+        let artifact = root.join("provider.portable.json");
+        repowise_core::portable::PortableIndex::from_index(&index_of(&root.join("provider")))
+            .save(&artifact)
+            .unwrap();
+        index_of(&root.join("consumer"))
+            .save(&root.join("consumer"))
+            .unwrap();
+
+        let repos = vec![
+            ResolvedWorkspaceRepo {
+                name: "provider".to_string(),
+                path: root.join("provider"),
+                index: Some(artifact),
+            },
+            ResolvedWorkspaceRepo {
+                name: "consumer".to_string(),
+                path: root.join("consumer"),
+                index: None,
+            },
+        ];
+
+        let provider = load_repo_index(&repos[0]).unwrap();
+        let consumer = load_repo_index(&repos[1]).unwrap();
+        assert_eq!(provider.source, IndexSource::Portable);
+        assert_eq!(consumer.source, IndexSource::Local);
+        assert_eq!(provider.index.files.len(), consumer.index.files.len());
+
+        // And both report through the shared status path.
+        assert_eq!(
+            repo_status(&repos[0]).source,
+            Some(IndexSource::Portable),
+            "the source must be visible to callers, not just internal"
+        );
+    }
+
+    /// An index-only workspace member never has to be cloned. This is
+    /// the whole point of #384 -- `into_anchored` doesn't touch the
+    /// filesystem, so a path that doesn't exist still anchors.
+    #[test]
+    fn a_member_backed_by_an_artifact_needs_no_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        two_repo_fixture(&root);
+
+        let artifact = root.join("provider.portable.json");
+        repowise_core::portable::PortableIndex::from_index(&index_of(&root.join("provider")))
+            .save(&artifact)
+            .unwrap();
+
+        let never_cloned = ResolvedWorkspaceRepo {
+            name: "provider".to_string(),
+            path: root.join("not-checked-out-anywhere"),
+            index: Some(artifact),
+        };
+        let loaded = load_repo_index(&never_cloned).expect("no checkout required");
+        assert_eq!(loaded.source, IndexSource::Portable);
+        assert!(!loaded.index.files.is_empty());
+        assert_eq!(
+            loaded.stale, None,
+            "no git to compare against must read as unknown, never as fresh"
+        );
+    }
+
+    /// The limitation that makes `resolution_blind_spots` necessary,
+    /// found by running the feature rather than reading it: Rust's
+    /// module map comes from a `Cargo.toml` on disk, so a Rust member
+    /// with no checkout contributes no edges -- and an empty edge list
+    /// is indistinguishable from "these repos are independent".
+    #[test]
+    fn a_rust_member_without_a_checkout_is_flagged_as_a_blind_spot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        two_repo_fixture(&root);
+
+        let artifact = root.join("provider.portable.json");
+        repowise_core::portable::PortableIndex::from_index(&index_of(&root.join("provider")))
+            .save(&artifact)
+            .unwrap();
+
+        let repos = vec![ResolvedWorkspaceRepo {
+            name: "provider".to_string(),
+            path: root.join("never-cloned"),
+            index: Some(artifact),
+        }];
+
+        let blind = resolution_blind_spots(&repos);
+        assert_eq!(
+            blind.len(),
+            1,
+            "a Rust member with no checkout must be flagged"
+        );
+        assert_eq!(blind[0].0, "provider");
+        assert_eq!(blind[0].1, "Rust");
+    }
+
+    /// The flag is about the *combination*, not about portability: a
+    /// member with a real checkout resolves fine however its index was
+    /// loaded, so flagging it would be noise.
+    #[test]
+    fn a_portable_member_that_is_checked_out_is_not_a_blind_spot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        two_repo_fixture(&root);
+
+        let artifact = root.join("provider.portable.json");
+        repowise_core::portable::PortableIndex::from_index(&index_of(&root.join("provider")))
+            .save(&artifact)
+            .unwrap();
+
+        let repos = vec![ResolvedWorkspaceRepo {
+            name: "provider".to_string(),
+            path: root.join("provider"), // really there
+            index: Some(artifact),
+        }];
+        assert!(resolution_blind_spots(&repos).is_empty());
+    }
+
+    #[test]
+    fn from_toml_str_parses_an_optional_index_path() {
+        let toml = r#"
+            [[repo]]
+            name = "a"
+            path = "/a"
+            index = "artifacts/a.portable.json"
+
+            [[repo]]
+            name = "b"
+            path = "/b"
+        "#;
+        let config = WorkspaceConfig::from_toml_str(toml).unwrap();
+        assert_eq!(
+            config.repos[0].index,
+            Some(PathBuf::from("artifacts/a.portable.json"))
+        );
+        assert_eq!(config.repos[1].index, None, "index stays optional");
+    }
 
     #[test]
     fn from_toml_str_parses_repo_entries() {

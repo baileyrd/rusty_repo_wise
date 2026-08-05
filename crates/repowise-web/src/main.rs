@@ -815,12 +815,50 @@ where
     fetch_json_with_query(path, &[]).await
 }
 
+thread_local! {
+    /// The workspace repo every API call is currently scoped to
+    /// (issue #337), or `None` for the server's own root.
+    ///
+    /// A thread-local rather than a Leptos signal because
+    /// [`fetch_json_with_query`] is a plain async fn, not a component,
+    /// and every one of the ~90 call sites goes through it. WASM is
+    /// single-threaded, so this is a plain global in practice.
+    ///
+    /// **The URL hash is the source of truth**, not this. It is
+    /// re-synced from the hash on every route change, which is what
+    /// makes the selection survive navigation *and* travel in a shared
+    /// link -- one mechanism for both, rather than a separate store that
+    /// could disagree with the address bar.
+    static SELECTED_REPO: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Point every subsequent API call at `repo` (`None` = the server's own
+/// root). Called from the hash sync, never directly by a view.
+fn set_fetch_repo(repo: Option<String>) {
+    SELECTED_REPO.with(|r| *r.borrow_mut() = repo);
+}
+
+fn fetch_repo() -> Option<String> {
+    SELECTED_REPO.with(|r| r.borrow().clone())
+}
+
 async fn fetch_json_with_query<T>(path: &str, params: &[(&str, &str)]) -> Result<T, String>
 where
     T: for<'de> Deserialize<'de>,
 {
+    // Injected here rather than at each call site: one choke point means
+    // a new view can't forget to stay in the selected repo.
+    let repo = fetch_repo();
+    let mut all: Vec<(String, String)> = params
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    if let Some(repo) = repo {
+        all.push(("repo".to_string(), repo));
+    }
     let response = gloo_net::http::Request::get(path)
-        .query(params.iter().map(|(k, v)| (*k, *v)))
+        .query(all.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1922,6 +1960,89 @@ fn FileDetailPanel(wiki_pages: WikiPages, selected: RwSignal<Option<String>>) ->
     }
 }
 
+/// Header control choosing which workspace repo every view reads from
+/// (issue #337).
+///
+/// Renders **nothing at all** unless the server was started with
+/// `--workspace` and knows about more than one repo: a selector with a
+/// single option is noise, and one that can't change anything is worse
+/// than absent.
+///
+/// Writes its choice into the URL hash rather than into local state.
+/// That is what makes the selection survive navigation and travel in a
+/// shared link, with no separate store that could disagree with the
+/// address bar.
+#[component]
+fn RepoSelector() -> impl IntoView {
+    let workspace = LocalResource::new(|| fetch_json::<WorkspaceRepos>("/api/workspace-repos"));
+    let current = RwSignal::new(repo_from_hash(&location_hash()));
+
+    let on_change = move |ev: leptos::ev::Event| {
+        let value = event_target_value(&ev);
+        let chosen = (!value.is_empty()).then_some(value);
+        // Update the URL first, then the fetch scope, so the two can
+        // never be observed disagreeing.
+        let (route, file, _) = parse_hash_full(&location_hash());
+        let mut hash = format!("#/{}", route_slug(route));
+        if let Some(f) = file.filter(|f| !f.is_empty()) {
+            hash.push_str("?file=");
+            hash.push_str(&percent_encode(&f));
+        }
+        if let Some(repo) = &chosen {
+            hash.push(if hash.contains('?') { '&' } else { '?' });
+            hash.push_str("repo=");
+            hash.push_str(&percent_encode(repo));
+        }
+        replace_hash(&hash);
+        set_fetch_repo(chosen.clone());
+        current.set(chosen);
+        // Force every view's resource to refetch against the new repo.
+        if let Some(w) = web_sys::window() {
+            let _ = w.location().reload();
+        }
+    };
+
+    view! {
+        <Suspense fallback=|| view! { <span /> }>
+            {move || {
+                let repos = workspace
+                    .get()
+                    .and_then(|w| w.as_ref().ok().cloned())
+                    .filter(|w| w.available && w.repos.len() > 1);
+                match repos {
+                    None => view! { <span /> }.into_any(),
+                    Some(w) => {
+                        let selected = current.get();
+                        view! {
+                            <label class="repo-selector">
+                                "Repo: "
+                                <select on:change=on_change>
+                                    <option
+                                        value=""
+                                        selected=selected.is_none()
+                                    >"(this server's repo)"</option>
+                                    {w.repos.iter().map(|r| {
+                                        let name = r.name.clone();
+                                        let label = r.name.clone();
+                                        let is_sel = selected.as_deref() == Some(name.as_str());
+                                        view! {
+                                            <option value=name selected=is_sel>{label}</option>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                    <option
+                                        value="all"
+                                        selected=selected.as_deref() == Some("all")
+                                    >"All repos"</option>
+                                </select>
+                            </label>
+                        }.into_any()
+                    }
+                }
+            }}
+        </Suspense>
+    }
+}
+
 /// Current location hash, or empty when unavailable.
 fn location_hash() -> String {
     web_sys::window()
@@ -2078,9 +2199,43 @@ fn parse_hash_full(hash: &str) -> (Route, Option<String>, Option<String>) {
     (route, param("file="), param("id="))
 }
 
+/// The `repo=` currently in the hash (issue #337), or `None` for the
+/// server's own root.
+///
+/// Read straight from the URL rather than from a cached signal: the hash
+/// is the source of truth, so a pasted deep link and a click in the
+/// header take exactly the same path.
+fn repo_from_hash(hash: &str) -> Option<String> {
+    let raw = hash.trim().trim_start_matches('#').trim_start_matches('/');
+    let (_, query) = raw.split_once('?')?;
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("repo="))
+        .map(percent_decode)
+        .filter(|v| !v.is_empty())
+}
+
+/// Append the current `repo=` to a freshly-built hash, so navigating
+/// between views keeps the selection instead of silently dropping back
+/// to the server's own root.
+///
+/// Reads the process-wide scope rather than the live location: this runs
+/// inside `format_hash`, which host-side tests call directly, and
+/// `web_sys::window()` panics off-wasm. The scope is seeded from the URL
+/// at startup and rewritten by the selector, so the two agree -- and
+/// this way the formatter has no reason to touch the DOM at all.
+fn with_repo(mut hash: String) -> String {
+    if let Some(repo) = fetch_repo() {
+        hash.push(if hash.contains('?') { '&' } else { '?' });
+        hash.push_str("repo=");
+        hash.push_str(&percent_encode(&repo));
+    }
+    hash
+}
+
 /// Format a route with an addressed detail `id` (issue #263).
 fn format_detail_hash(route: Route, id: &str) -> String {
-    format!("#/{}?id={}", route_slug(route), percent_encode(id))
+    with_repo(format!("#/{}?id={}", route_slug(route), percent_encode(id)))
 }
 
 /// Format a view and selection back into a hash.
@@ -2090,7 +2245,7 @@ fn format_hash(route: Route, selected: Option<&str>) -> String {
         out.push_str("?file=");
         out.push_str(&percent_encode(file));
     }
-    out
+    with_repo(out)
 }
 
 /// Minimal percent-encoding for the characters that would otherwise
@@ -4621,6 +4776,7 @@ fn App() -> impl IntoView {
     view! {
         <h1>"repowise dashboard"</h1>
         <p class="subtitle">"live server"</p>
+        <RepoSelector />
         <JobBanner />
         <button on:click=move |_| {
             present_step.set(Some(0));
@@ -4694,12 +4850,47 @@ fn App() -> impl IntoView {
 
 fn main() {
     console_error_panic_hook::set_once();
+    // Seed the fetch scope from the URL before mounting, so a deep link
+    // like `#/health?repo=billing` loads that repo's data on the first
+    // render rather than loading the server's own repo and swapping
+    // after (issue #337).
+    set_fetch_repo(repo_from_hash(&location_hash()));
     leptos::mount::mount_to_body(App);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mechanism that makes a shared link carry the repo: the hash
+    /// is the source of truth, so parsing it is the whole contract.
+    #[test]
+    fn repo_from_hash_reads_the_repo_parameter() {
+        assert_eq!(
+            repo_from_hash("#/health?repo=billing").as_deref(),
+            Some("billing")
+        );
+        assert_eq!(
+            repo_from_hash("#/symbols?id=x&repo=billing").as_deref(),
+            Some("billing")
+        );
+        assert_eq!(repo_from_hash("#/health").as_deref(), None);
+        assert_eq!(repo_from_hash("").as_deref(), None);
+    }
+
+    /// An empty `repo=` is absence, not a repo named "" -- otherwise a
+    /// stale link would scope every call to a repo that can't exist and
+    /// the server would 400 on every view.
+    #[test]
+    fn an_empty_repo_parameter_reads_as_unscoped() {
+        assert_eq!(repo_from_hash("#/health?repo=").as_deref(), None);
+    }
+
+    /// `all` is a legal value, not a special case to filter out.
+    #[test]
+    fn repo_from_hash_accepts_all() {
+        assert_eq!(repo_from_hash("#/health?repo=all").as_deref(), Some("all"));
+    }
 
     #[test]
     fn format_timestamp_renders_the_unix_epoch() {

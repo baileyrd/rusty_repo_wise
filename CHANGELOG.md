@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Dashboard: a repo selector in the header, for servers started with
+  `--workspace` and more than one repo. The choice lives in the URL
+  hash, so it survives navigation and travels in a shared link
+  (partial #337).
 - Dashboard API: `/api/health`, `/api/dead-code`,
   `/api/refactor-candidates`, and `/api/security` gained `?repo=` too —
   every federatable endpoint now honours it. `/api/search` is

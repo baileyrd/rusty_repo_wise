@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `--index <FILE>` now works on every index-derived read command
+  (`search`, `dead-code`, `refactor`, `security`, `hotspots`,
+  `doc-coverage`, `decisions`, alongside the original four), with
+  commands that cannot honour it rejecting the flag rather than ignoring
+  it (#382).
 - Portable, committable index: `repowise export --format index` writes a
   repo-relative, canonically-sorted, schema-versioned artifact, and
   `--index <FILE>` on `overview`/`health`/`deps`/`tour` reads one with

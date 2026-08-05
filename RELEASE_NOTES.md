@@ -6,6 +6,44 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## `--index` on every index-derived read command (closes #382)
+**2026-08-05**
+
+- Closes #382, the first follow-up to #378. `--index` shipped wired to
+  four commands; it now covers all eleven that are index-derived, so the
+  "one person indexes, the team reads" promise holds for the whole read
+  surface rather than a sample of it.
+- Newly supported: `search` (lexical modes), `dead-code`, `refactor`,
+  `security`, `hotspots`, `doc-coverage`, `decisions` -- alongside the
+  original `overview`, `health`, `deps`, `tour`.
+- **`hotspots` turned out to belong on the supported side**, contrary to
+  the issue's own initial guess that git-reading commands should be
+  excluded. The relevant question isn't "does it read git" but "does it
+  load the index" -- `--index` means *no index build*, not *no
+  checkout*, so git is present either way. `hotspots` needs both (churn ×
+  complexity), and a shared index removes the only missing piece.
+  `ownership`/`coupled`/`risk`/`commits` never load an index at all, so
+  there was nothing to wire and the question answered itself.
+- **Exclusions are stated, not implicit**: `update` builds the index;
+  `docs`/`generate` write output derived from it, where staleness stops
+  being cosmetic; `status`/`doctor` report on the *local* index, which is
+  their whole subject; `export` reading an export is circular.
+- **`search --mode semantic` errors rather than ignoring the flag.**
+  Embeddings live in the local `.repowise/` and are tied to the root that
+  built them, so a portable artifact carries none. Accepting `--index`
+  and quietly answering from a different source is exactly the failure
+  this feature exists to prevent -- and it's the rule semantic mode
+  already applies to filters it can't honour.
+- Every excluded command **rejects** `--index` at the parser rather than
+  accepting and ignoring it, verified by running each one.
+- Two tests pin both halves of the list, so a future command that lands
+  in neither fails here rather than shipping. That matters more than the
+  wiring: the list is a decision, and decisions rot silently.
+- 962 workspace tests green, clippy clean. All eleven verified end to end
+  against a shared artifact read from a fresh clone at a different root.
+
+---
+
 ## Portable, committable index (closes #378)
 **2026-08-05**
 

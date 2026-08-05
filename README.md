@@ -2840,7 +2840,7 @@ below):
     in `unknown` as its own bucket rather than defaulting into
     `implementation` and being wrongly included or excluded.
   - `symbol_kind`: restrict symbol hits to one kind.
-  - `repo` (issue #337's first federated-query slice): omit to search this
+  - `repo` (issue #337's federated-query slices): omit to search this
     server's own indexed root only, the unchanged default; name a specific
     workspace repo (as configured via `--workspace`) to search just that
     repo instead; or pass `"all"` to federate the same search across
@@ -2857,6 +2857,33 @@ below):
     server — the query volume this tool actually sees doesn't justify
     holding every workspace repo's index in memory at once, and every
     other MCP tool already re-loads its index fresh per call the same way.
+
+    **Six more tools now take the same `repo` parameter**, with the same
+    three meanings and the same `--workspace` requirement:
+
+    - `get_dead_code`, `get_refactor_candidates`, `get_security_findings`
+      — list-shaped, so federating concatenates and labels each result
+      with the repo it came from (omitted on an unscoped call).
+    - `get_overview`, `get_health` — summary-shaped, so these federate
+      **per repo**: a `repo="all"` call adds a `repos` list with one
+      entry each, and the flat fields keep the single-repo shape. What
+      those flat fields *mean* on a federated call differs between the
+      two, deliberately. `get_overview`'s counts become **workspace
+      totals** (file/line/edge counts are additive and `by_language`/
+      `symbol_counts` merge by key), so a caller ignoring `repos` still
+      reads a true number — except `most_depended_on`, which is **empty**
+      on a federated call, since a dependent count is a within-repo
+      number and ranking those across repos compares different scales.
+      `get_health` synthesises **no workspace-wide average at all**: a
+      mean of means is not a mean, and a merged score would look
+      authoritative while being wrong, so its flat fields describe the
+      first repo and `repos` carries the real answer.
+
+    `get_health` also **rejects `repo` combined with `targets`** rather
+    than ignoring one — a target path names a file in one repo, so
+    "score these files across a whole workspace" isn't a question it can
+    answer.
+
   - The response echoes back the `filters` it applied, so an empty result
     is readable — "nothing matches" and "your filters excluded
     everything" are otherwise indistinguishable.

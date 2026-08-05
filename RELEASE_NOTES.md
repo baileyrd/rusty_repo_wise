@@ -6,6 +6,40 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## ADR-0002: a portable, committable index artifact (design for #378)
+**2026-08-05**
+
+- Design-only. No behaviour change; `docs/adr/0002-portable-committable-index.md`
+  is the ADR that #378 (scoped Large) is gated on, and the first real
+  ADR in `docs/adr/` — 0001 is the template.
+- Measured first, decided second. On this repo (122 parsed files, 2,861
+  symbols): the index is **8.0 MB**, and the absolute root path appears
+  **27,884 times** in it. By share of JSON bytes, `calls` is 51.7% and
+  `symbols` 45.3%; `path` is 0.1%.
+- Three findings drove the decision:
+  - Rebasing paths to repo-relative reclaims only ~750 KB. Necessary for
+    portability, nowhere near sufficient for size.
+  - `calls` is the only size lever of the right order of magnitude, but
+    dropping it disables dead-code detection and the call-graph health
+    markers — a capability decision, so it is deferred to its own issue
+    rather than bundled into the format.
+  - `index.files` ordering is **not portable**. `discover_files` uses
+    `ignore::WalkBuilder`, whose order follows filesystem `readdir`.
+    Consecutive runs here are byte-identical, but that is incidental; a
+    committed artifact must sort canonically or it reorders itself
+    between machines and every re-export becomes an unreviewable diff.
+- Decided: a two-form design with one conversion choke point
+  (`RepoIndex::to_portable` / `anchor_to`, rewriting `Symbol.id` and not
+  just `Symbol.file`), an explicit `schema_version` that fails loudly,
+  canonical sorting, and mandatory staleness reporting against
+  `indexed_commit` on every read of a committed artifact.
+- Rejected, with reasons recorded: rewriting all ~215 absolute-path
+  sites to relative (the deeper fix — rejected on risk, explicitly not
+  foreclosed); committing `.repowise/index.json` as-is; a shared
+  index server; reusing `--format json-graph`.
+
+---
+
 ## Guided tours: a dependency-ordered reading path (closes #377)
 **2026-08-05**
 

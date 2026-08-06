@@ -98,8 +98,7 @@ pub fn write_dependents(root: &Path, index: &RepoIndex, graph: &RepoGraph) -> st
     let dir = root.join(RepoIndex::INDEX_DIR);
     std::fs::create_dir_all(&dir)?;
     let file = std::fs::File::create(dir.join(DEPENDENTS_FILE))?;
-    serde_json::to_writer(file, &payload)
-        .map_err(std::io::Error::other)
+    serde_json::to_writer(file, &payload).map_err(std::io::Error::other)
 }
 
 /// Read the sidecar, or `None` when it is absent, unreadable, of an

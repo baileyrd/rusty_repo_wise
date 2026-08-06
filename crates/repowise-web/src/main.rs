@@ -395,9 +395,25 @@ struct WikiPage {
     content: String,
 }
 
+/// A matching file plus the repo it came from (issue #337).
+///
+/// `SearchResults::files` is a flat `Vec<String>`, and under
+/// `?repo=all` two repos can both return `src/lib.rs` -- the same
+/// string twice, with nothing to tell them apart. `matches` carries
+/// the label, so this is what gets rendered.
+#[derive(Deserialize, Clone, Debug)]
+struct FileMatch {
+    /// Absent on an unscoped search.
+    #[serde(default)]
+    repo: Option<String>,
+    file: String,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 struct SearchResults {
     files: Vec<String>,
+    #[serde(default)]
+    matches: Vec<FileMatch>,
     symbols: Vec<Symbol>,
 }
 
@@ -2364,6 +2380,7 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
                 return Ok::<CombinedSearchResults, String>(CombinedSearchResults {
                     substring: SearchResults {
                         files: Vec::new(),
+                        matches: Vec::new(),
                         symbols: Vec::new(),
                     },
                     semantic: None,
@@ -2449,18 +2466,28 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
                             <p class="empty">
                                 {format!(
                                     "{} file(s), {} symbol(s).",
-                                    res.files.len(), res.symbols.len(),
+                                    res.matches.len(), res.symbols.len(),
                                 )}
                             </p>
                             <ul class="search-results">
-                                {res.files.into_iter().map(|f| {
-                                    let target = f.clone();
+                                {res.matches.into_iter().map(|m| {
+                                    let target = m.file.clone();
+                                    let label = m.file.clone();
+                                    // Under `repo=all` the same path can
+                                    // come back from several repos; the
+                                    // badge is the only thing that tells
+                                    // two identical rows apart.
+                                    let repo = m.repo.clone();
                                     view! {
                                         <li>
+                                            {repo.map(|r| view! {
+                                                <span class="badge">{r}</span>
+                                                " "
+                                            })}
                                             <a href="#" on:click=move |ev| {
                                                 ev.prevent_default();
                                                 selected.set(Some(target.clone()));
-                                            }>{f}</a>
+                                            }>{label}</a>
                                         </li>
                                     }
                                 }).collect::<Vec<_>>()}

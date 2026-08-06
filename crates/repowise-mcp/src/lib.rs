@@ -450,6 +450,13 @@ impl Default for SearchParams {
 struct ContextParams {
     /// Path to the file, absolute or relative to the indexed root.
     file: String,
+    /// Which repo to read the file from (issue #337). Omit for this
+    /// server's own indexed root. Name a configured workspace repo to
+    /// read it from there instead; requires `--workspace`. `"all"` is
+    /// rejected -- this tool answers about one file, so there is
+    /// nothing to federate.
+    #[serde(default)]
+    repo: Option<String>,
     /// Max symbols and max health findings returned. Default 50, capped
     /// at 500. `symbols_total`/`health_findings_total` always report the
     /// true counts, so a truncated answer can't be read as a complete
@@ -469,8 +476,17 @@ struct RiskParams {
     /// instead (ranked by hotspot score).
     #[serde(default)]
     file: Option<String>,
+    /// Which repo(s) to assess (issue #337). Omit for this server's own
+    /// indexed root. Name a configured workspace repo for just that
+    /// one. `"all"` federates, but **only** in repo-wide mode (`file`
+    /// omitted) -- with `file` set this tool answers about one file, so
+    /// there is nothing to federate and `"all"` is rejected. Anything
+    /// other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
     /// How many files to return when `file` is omitted. Ignored when
-    /// `file` is set (exactly one result either way).
+    /// `file` is set (exactly one result either way). Applied **per
+    /// repo** under `repo="all"`, not across the federated total.
     #[serde(default = "default_top_n")]
     top_n: usize,
 }
@@ -479,6 +495,7 @@ impl Default for RiskParams {
     fn default() -> Self {
         RiskParams {
             file: None,
+            repo: None,
             top_n: default_top_n(),
         }
     }
@@ -488,11 +505,34 @@ impl Default for RiskParams {
 struct GetSymbolParams {
     /// A symbol's `id`, as returned by `search_codebase`/`get_context`.
     symbol_id: String,
+    /// Which repo to resolve the id in (issue #337). Omit for this
+    /// server's own indexed root. Name a configured workspace repo to
+    /// resolve it there instead; requires `--workspace`. `"all"` is
+    /// rejected: ids are repo-relative, so the same id can exist in
+    /// several repos and there would be no non-arbitrary way to pick
+    /// one.
+    #[serde(default)]
+    repo: Option<String>,
     /// Extra lines of surrounding source to include on each side of the
     /// symbol's own line span, clamped to the file's bounds. Defaults to
     /// `0` (just the symbol's own span).
     #[serde(default)]
     context_lines: usize,
+}
+
+/// `repo` alone, for federatable tools that take no other parameter
+/// (issue #337). Same three meanings as everywhere else: omitted is
+/// this server's own root, a name is one workspace repo, `"all"`
+/// federates.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+struct RepoOnlyParams {
+    /// Which repo(s) to report on. Omit for this server's own indexed
+    /// root -- the unscoped default, whose results carry no `repo`
+    /// label. Name a configured workspace repo for just that one, or
+    /// pass `"all"` to federate across every configured repo in one
+    /// call. Anything other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
@@ -739,7 +779,7 @@ struct SearchOutput {
     filters: String,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct HealthFindingOutput {
     kind: String,
     symbol: Option<String>,
@@ -749,6 +789,10 @@ struct HealthFindingOutput {
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct ContextOutput {
+    /// Which repo this came from. Absent on an unscoped call, so
+    /// existing callers see no shape change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     symbols: Vec<SymbolMatch>,
     /// Symbols in this file before `limit` truncated the list. Lets a
@@ -763,8 +807,12 @@ struct ContextOutput {
     health_findings_total: usize,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct FileRisk {
+    /// Which repo this came from. Absent on an unscoped call, so
+    /// existing callers see no shape change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     /// churn × total cyclomatic complexity of the file's symbols (see
     /// `repowise_git::Hotspot`) — 0 for a file with no git history
@@ -809,6 +857,10 @@ struct ChangeRiskOutput {
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct GetSymbolOutput {
+    /// Which repo this came from. Absent on an unscoped call, so
+    /// existing callers see no shape change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     id: String,
     name: String,
     kind: String,
@@ -999,6 +1051,10 @@ struct SecurityOutput {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct DocCoverageEntryOutput {
+    /// Which repo this came from. Absent on an unscoped call, so
+    /// existing callers see no shape change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     file: String,
     /// `"missing"` (no wiki page yet), `"fresh"` (the page's embedded
     /// content hash matches the file's current content), or `"stale"`
@@ -1093,6 +1149,10 @@ struct CommitsOutput {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct ExternalDependencyOutput {
+    /// Which repo this came from. Absent on an unscoped call, so
+    /// existing callers see no shape change (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     name: String,
     version: Option<String>,
     /// `"direct"`, `"dev"`, or `"build"`.
@@ -1860,17 +1920,46 @@ impl RepowiseServer {
         }])
     }
 
+    /// Resolve `repo` for a tool whose answer is about **one** subject
+    /// -- a single file, or a single symbol id (issue #337).
+    ///
+    /// A name still works, and is the useful half: it picks which repo
+    /// to look in. `"all"` is refused rather than quietly reinterpreted,
+    /// because there is nothing to federate. Merging N single-subject
+    /// answers would mean either silently picking a winner or changing
+    /// the output shape into a list, and both are worse than saying so.
+    fn resolve_single_target(&self, repo: Option<&str>) -> Result<SearchTarget, ErrorData> {
+        if repo == Some("all") {
+            return Err(ErrorData::invalid_params(
+                "repo=\"all\" is not supported by this tool: it answers about a single \
+                 file or symbol, so there is nothing to federate across repos. Name one \
+                 configured workspace repo instead."
+                    .to_string(),
+                None,
+            ));
+        }
+        let mut targets = self.resolve_search_targets(repo)?;
+        if targets.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "the configured workspace has no repos".to_string(),
+                None,
+            ));
+        }
+        Ok(targets.remove(0))
+    }
+
     #[tool(
         name = "get_context",
-        description = "Complete context for one file in a single call: its symbols, resolved dependencies/dependents, and health findings/score. Built to replace the several separate reads (search, deps, health) an agent would otherwise need to piece this together itself."
+        description = "Complete context for one file in a single call: its symbols, resolved dependencies/dependents, and health findings/score. Built to replace the several separate reads (search, deps, health) an agent would otherwise need to piece this together itself. Set `repo` to read the file from a configured workspace repo instead of this server's own root; `\"all\"` is rejected, since this answers about a single file."
     )]
     fn get_context(
         &self,
-        Parameters(ContextParams { file, limit }): Parameters<ContextParams>,
+        Parameters(ContextParams { file, repo, limit }): Parameters<ContextParams>,
     ) -> Result<Json<Envelope<ContextOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, graph, cached) = self.load()?;
-        let target = self.resolve_file(&file);
+        let scope = self.resolve_single_target(repo.as_deref())?;
+        let (index, graph, cached) = self.load_at(&scope.root)?;
+        let target = self.resolve_file_in_repo(&file, &scope.root);
 
         let Some(record) = index.files.iter().find(|f| f.path == target) else {
             return Err(ErrorData::resource_not_found(
@@ -1903,9 +1992,7 @@ impl RepowiseServer {
                 kind: sym.kind.label().to_string(),
                 file: display_rel(&sym.file, &index.root),
                 line: sym.start_line,
-                // `get_context` is scoped to this server's own root only
-                // -- no `repo` parameter, so no repo label to attach.
-                repo: None,
+                repo: scope.repo.clone(),
             })
             .collect();
 
@@ -1945,6 +2032,7 @@ impl RepowiseServer {
             .collect();
 
         let output = ContextOutput {
+            repo: scope.repo.clone(),
             file: display_rel(&target, &index.root),
             symbols,
             symbols_total,
@@ -1962,23 +2050,26 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_risk",
-        description = "Risk assessment from git-history analytics and health findings, essentially `get_context` plus hotspot data. Given `file`, returns that file's hotspot score, churn, bug-fix-commit count, and health findings. Given no `file`, returns the `top_n` riskiest files repo-wide, ranked by (recency-weighted) hotspot score. Git data degrades to zero/empty when the indexed root isn't a git repository, rather than erroring."
+        description = "Risk assessment from git-history analytics and health findings, essentially `get_context` plus hotspot data. Given `file`, returns that file's hotspot score, churn, bug-fix-commit count, and health findings. Given no `file`, returns the `top_n` riskiest files repo-wide, ranked by (recency-weighted) hotspot score. Git data degrades to zero/empty when the indexed root isn't a git repository, rather than erroring. Set `repo` to a configured workspace repo to assess that one; `\"all\"` federates in repo-wide mode only (rejected alongside `file`), applying `top_n` per repo and grouping the result by repo rather than re-ranking across repos, because a hotspot score reflects a repo's own age and commit rate."
     )]
     fn get_risk(
         &self,
-        Parameters(RiskParams { file, top_n }): Parameters<RiskParams>,
+        Parameters(RiskParams { file, repo, top_n }): Parameters<RiskParams>,
     ) -> Result<Json<Envelope<RiskOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, graph, cached) = self.load()?;
-        let health = repowise_health::analyze(&index, &graph);
-        // Not every indexed root is a git repository (or has git
-        // available at all) — degrade to "no git data" rather than
-        // failing the whole call, same tradeoff `repowise-server`'s
-        // `/api/hotspots` endpoint already makes.
-        let analytics = repowise_git::GitAnalytics::collect(&self.root).ok();
 
+        // File mode answers about one file, so `"all"` is refused here
+        // even though repo-wide mode below accepts it (issue #337).
         if let Some(file) = file {
-            let target = self.resolve_file(&file);
+            let scope = self.resolve_single_target(repo.as_deref())?;
+            let (index, graph, cached) = self.load_at(&scope.root)?;
+            let health = repowise_health::analyze(&index, &graph);
+            // Git analytics must come from the repo being assessed, not
+            // from this server's own root -- before #337 those were
+            // always the same path, so the distinction never showed.
+            let analytics = repowise_git::GitAnalytics::collect(&scope.root).ok();
+
+            let target = self.resolve_file_in_repo(&file, &scope.root);
             if !index.files.iter().any(|f| f.path == target) {
                 return Err(ErrorData::resource_not_found(
                     format!(
@@ -1988,19 +2079,54 @@ impl RepowiseServer {
                     None,
                 ));
             }
-            let risk = file_risk(&target, &index, analytics.as_ref(), &health);
+            let mut risk = file_risk(&target, &index, analytics.as_ref(), &health);
+            risk.repo = scope.repo.clone();
             return Ok(self.indexed(RiskOutput { files: vec![risk] }, &index, started, cached));
         }
 
-        let files = analytics
-            .as_ref()
-            .map(|a| repowise_git::hotspots(&index, a))
-            .unwrap_or_default()
-            .into_iter()
-            .take(top_n)
-            .map(|h| file_risk(&h.file, &index, analytics.as_ref(), &health))
-            .collect();
-        Ok(self.indexed(RiskOutput { files }, &index, started, cached))
+        // Repo-wide mode federates, but `top_n` applies **per repo** and
+        // the federated list is grouped by repo rather than re-ranked
+        // globally. A hotspot score is churn x complexity, and churn is
+        // a function of a repo's own age and commit rate -- ranking
+        // those against each other would let the oldest, busiest repo
+        // fill the whole list. Same reasoning that keeps `get_overview`
+        // from merging `most_depended_on` (issue #337).
+        let targets = self.resolve_search_targets(repo.as_deref())?;
+        let mut files = Vec::new();
+        let mut meta_index = None;
+        let mut meta_cached = false;
+        for target in &targets {
+            let (index, graph, cached) = self.load_at(&target.root)?;
+            let health = repowise_health::analyze(&index, &graph);
+            // Not every indexed root is a git repository (or has git
+            // available at all) — degrade to "no git data" rather than
+            // failing the whole call, same tradeoff `repowise-server`'s
+            // `/api/hotspots` endpoint already makes.
+            let analytics = repowise_git::GitAnalytics::collect(&target.root).ok();
+            files.extend(
+                analytics
+                    .as_ref()
+                    .map(|a| repowise_git::hotspots(&index, a))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(top_n)
+                    .map(|h| {
+                        let mut risk = file_risk(&h.file, &index, analytics.as_ref(), &health);
+                        risk.repo = target.repo.clone();
+                        risk
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if meta_index.is_none() {
+                meta_cached = cached;
+                meta_index = Some(index);
+            }
+        }
+
+        let index = meta_index.ok_or_else(|| {
+            ErrorData::invalid_params("the configured workspace has no repos".to_string(), None)
+        })?;
+        Ok(self.indexed(RiskOutput { files }, &index, started, meta_cached))
     }
 
     #[tool(
@@ -2033,17 +2159,19 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_symbol",
-        description = "Raw source text for one indexed symbol by id (as returned by `search_codebase`/`get_context`), sliced from the symbol's own file at its `start_line..end_line` span. `context_lines` (default 0) pads that span by the same number of lines on each side, clamped to the file's actual bounds. Re-reads the file fresh from disk rather than trusting the index, so edits since the last `repowise init`/`update` are reflected (the returned span may then be off if line numbers have shifted)."
+        description = "Raw source text for one indexed symbol by id (as returned by `search_codebase`/`get_context`), sliced from the symbol's own file at its `start_line..end_line` span. `context_lines` (default 0) pads that span by the same number of lines on each side, clamped to the file's actual bounds. Re-reads the file fresh from disk rather than trusting the index, so edits since the last `repowise init`/`update` are reflected (the returned span may then be off if line numbers have shifted). Set `repo` to resolve the id in a configured workspace repo; `\"all\"` is rejected, since ids are repo-relative and the same id can exist in several repos."
     )]
     fn get_symbol(
         &self,
         Parameters(GetSymbolParams {
             symbol_id,
+            repo,
             context_lines,
         }): Parameters<GetSymbolParams>,
     ) -> Result<Json<Envelope<GetSymbolOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, _graph, cached) = self.load()?;
+        let scope = self.resolve_single_target(repo.as_deref())?;
+        let (index, _graph, cached) = self.load_at(&scope.root)?;
 
         let Some(sym) = find_symbol(&index, &symbol_id) else {
             return Err(ErrorData::resource_not_found(
@@ -2069,6 +2197,7 @@ impl RepowiseServer {
 
         let file = sym.file.clone();
         let output = GetSymbolOutput {
+            repo: scope.repo.clone(),
             // The same portable form `get_context` hands out, so an id
             // taken from one tool and passed to the other round-trips.
             id: portable_symbol_id(sym, &index.root),
@@ -2685,26 +2814,49 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_doc_coverage",
-        description = "Every indexed file's wiki-page freshness, without generating anything: `missing` (no wiki page yet), `fresh` (the page's embedded content hash matches the file's current content), or `stale` (the file changed since `repowise docs` last generated its page). Read-only -- never writes a page; run `repowise docs`/`repowise generate` to update one."
+        description = "Every indexed file's wiki-page freshness, without generating anything: `missing` (no wiki page yet), `fresh` (the page's embedded content hash matches the file's current content), or `stale` (the file changed since `repowise docs` last generated its page). Read-only -- never writes a page; run `repowise docs`/`repowise generate` to update one. Set `repo` to a configured workspace repo, or `\"all\"` to report on every repo in the workspace at once -- the three counts sum across repos (each file lands in exactly one status), and each entry carries the repo it came from."
     )]
-    fn get_doc_coverage(&self) -> Result<Json<Envelope<DocCoverageOutput>>, ErrorData> {
+    fn get_doc_coverage(
+        &self,
+        Parameters(RepoOnlyParams { repo }): Parameters<RepoOnlyParams>,
+    ) -> Result<Json<Envelope<DocCoverageOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, _graph, cached) = self.load()?;
+        let targets = self.resolve_search_targets(repo.as_deref())?;
 
-        let report = repowise_docs::check_freshness(&index);
-        let (missing, fresh, stale) = report.counts();
-        let entries = report
-            .entries
-            .into_iter()
-            .map(|e| DocCoverageEntryOutput {
+        // The three counts are safe to sum across repos: every indexed
+        // file lands in exactly one of missing/fresh/stale, so the
+        // federated triple is a workspace-wide file count, not an
+        // average of averages (the reason `get_health` refuses to merge
+        // its score -- issue #337).
+        let mut entries = Vec::new();
+        let (mut missing, mut fresh, mut stale) = (0usize, 0usize, 0usize);
+        let mut meta_index = None;
+        let mut meta_cached = false;
+        for target in &targets {
+            let (index, _graph, cached) = self.load_at(&target.root)?;
+            let report = repowise_docs::check_freshness(&index);
+            let (m, f, s) = report.counts();
+            missing += m;
+            fresh += f;
+            stale += s;
+            entries.extend(report.entries.into_iter().map(|e| DocCoverageEntryOutput {
+                repo: target.repo.clone(),
                 file: display_rel(&e.file, &index.root),
                 status: match e.status {
                     repowise_docs::FreshnessStatus::Missing => "missing",
                     repowise_docs::FreshnessStatus::Fresh => "fresh",
                     repowise_docs::FreshnessStatus::Stale => "stale",
                 },
-            })
-            .collect();
+            }));
+            if meta_index.is_none() {
+                meta_cached = cached;
+                meta_index = Some(index);
+            }
+        }
+
+        let index = meta_index.ok_or_else(|| {
+            ErrorData::invalid_params("the configured workspace has no repos".to_string(), None)
+        })?;
 
         Ok(self.indexed(
             DocCoverageOutput {
@@ -2715,7 +2867,7 @@ impl RepowiseServer {
             },
             &index,
             started,
-            cached,
+            meta_cached,
         ))
     }
 
@@ -2775,25 +2927,42 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_external_deps",
-        description = "Third-party (package-manager) dependencies declared across every manifest this port recognizes: Cargo.toml, package.json, composer.json, requirements.txt, pyproject.toml, and go.mod. Declared, not resolved -- the version constraint exactly as written in the manifest, not a lockfile-resolved version; this doesn't walk a lockfile or resolve transitive dependencies. Workspace-internal path dependencies (e.g. a monorepo's own sibling packages) are excluded. Java/Kotlin/Scala's pom.xml/Gradle build scripts and C#'s .csproj aren't recognized yet."
+        description = "Third-party (package-manager) dependencies declared across every manifest this port recognizes: Cargo.toml, package.json, composer.json, requirements.txt, pyproject.toml, and go.mod. Declared, not resolved -- the version constraint exactly as written in the manifest, not a lockfile-resolved version; this doesn't walk a lockfile or resolve transitive dependencies. Workspace-internal path dependencies (e.g. a monorepo's own sibling packages) are excluded. Java/Kotlin/Scala's pom.xml/Gradle build scripts and C#'s .csproj aren't recognized yet. Set `repo` to a configured workspace repo, or `\"all\"` to collect across the whole workspace -- entries are labeled with their repo and deliberately NOT de-duplicated, since two repos pinning different versions of the same package is exactly what a workspace-wide dependency question is looking for."
     )]
-    fn get_external_deps(&self) -> Result<Json<Envelope<ExternalDepsOutput>>, ErrorData> {
+    fn get_external_deps(
+        &self,
+        Parameters(RepoOnlyParams { repo }): Parameters<RepoOnlyParams>,
+    ) -> Result<Json<Envelope<ExternalDepsOutput>>, ErrorData> {
         let started = Instant::now();
-        let deps = repowise_external_deps::collect_dependencies(&self.root).map_err(|e| {
-            ErrorData::invalid_params(format!("failed to collect dependencies: {e}"), None)
-        })?;
+        let targets = self.resolve_search_targets(repo.as_deref())?;
 
-        let dependencies = deps
-            .into_iter()
-            .map(|d| ExternalDependencyOutput {
+        // Deliberately not de-duplicated across repos: two repos
+        // declaring the same crate is two declarations, and they can
+        // pin different versions. Collapsing them would hide exactly
+        // the drift a workspace-wide dependency question is asked to
+        // find (issue #337).
+        let mut dependencies = Vec::new();
+        for target in &targets {
+            let deps =
+                repowise_external_deps::collect_dependencies(&target.root).map_err(|e| {
+                    ErrorData::invalid_params(
+                        format!(
+                            "failed to collect dependencies at {}: {e}",
+                            target.root.display()
+                        ),
+                        None,
+                    )
+                })?;
+            dependencies.extend(deps.into_iter().map(|d| ExternalDependencyOutput {
+                repo: target.repo.clone(),
                 name: d.name,
                 version: d.version,
                 kind: d.kind.label(),
                 ecosystem: d.ecosystem,
-                file: display_rel(&d.file, &self.root),
+                file: display_rel(&d.file, &target.root),
                 line: d.line,
-            })
-            .collect();
+            }));
+        }
 
         Ok(self.untracked(ExternalDepsOutput { dependencies }, started))
     }
@@ -2943,6 +3112,9 @@ fn file_risk(
         .collect();
 
     FileRisk {
+        // Callers overwrite this with the target's repo; the builder
+        // has no workspace context of its own.
+        repo: None,
         file: display_rel(file, &index.root),
         hotspot_score: churn * total_complexity,
         churn,
@@ -3355,6 +3527,7 @@ mod tests {
         let Json(Envelope { data: ctx, .. }) = server
             .get_context(Parameters(ContextParams {
                 file: "lib.rs".to_string(),
+                repo: None,
                 limit: CONTEXT_DEFAULT_LIMIT,
             }))
             .unwrap();
@@ -3377,6 +3550,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_context(Parameters(ContextParams {
             file: "missing.rs".to_string(),
+            repo: None,
             limit: CONTEXT_DEFAULT_LIMIT,
         }));
         let Err(err) = result else {
@@ -3434,6 +3608,7 @@ mod tests {
         let Json(Envelope { data: risk, .. }) = server
             .get_risk(Parameters(RiskParams {
                 file: Some("lib.rs".to_string()),
+                repo: None,
                 top_n: 10,
             }))
             .unwrap();
@@ -3469,6 +3644,7 @@ mod tests {
         let Json(Envelope { data: risk, .. }) = server
             .get_risk(Parameters(RiskParams {
                 file: None,
+                repo: None,
                 top_n: 1,
             }))
             .unwrap();
@@ -3489,6 +3665,7 @@ mod tests {
         let Json(Envelope { data: risk, .. }) = server
             .get_risk(Parameters(RiskParams {
                 file: Some("lib.rs".to_string()),
+                repo: None,
                 top_n: 10,
             }))
             .unwrap();
@@ -3507,6 +3684,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_risk(Parameters(RiskParams {
             file: Some("missing.rs".to_string()),
+            repo: None,
             top_n: 10,
         }));
         let Err(err) = result else {
@@ -3693,7 +3871,7 @@ mod tests {
         .unwrap();
 
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_external_deps().unwrap();
+        let Json(Envelope { data, .. }) = server.get_external_deps(Parameters(RepoOnlyParams::default())).unwrap();
 
         assert_eq!(data.dependencies.len(), 1);
         assert_eq!(data.dependencies[0].name, "serde");
@@ -3708,7 +3886,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
 
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_external_deps().unwrap();
+        let Json(Envelope { data, .. }) = server.get_external_deps(Parameters(RepoOnlyParams::default())).unwrap();
 
         assert!(data.dependencies.is_empty());
     }
@@ -3736,6 +3914,7 @@ mod tests {
         let Json(Envelope { data: sym, .. }) = server
             .get_symbol(Parameters(GetSymbolParams {
                 symbol_id,
+                repo: None,
                 context_lines: 0,
             }))
             .unwrap();
@@ -3773,6 +3952,7 @@ mod tests {
         let Json(Envelope { data: sym, .. }) = server
             .get_symbol(Parameters(GetSymbolParams {
                 symbol_id,
+                repo: None,
                 context_lines: 100,
             }))
             .unwrap();
@@ -3794,6 +3974,7 @@ mod tests {
         let server = RepowiseServer::new(root, None);
         let result = server.get_symbol(Parameters(GetSymbolParams {
             symbol_id: "nonexistent".to_string(),
+            repo: None,
             context_lines: 0,
         }));
         let Err(err) = result else {
@@ -4283,7 +4464,7 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_doc_coverage().unwrap();
+        let Json(Envelope { data, .. }) = server.get_doc_coverage(Parameters(RepoOnlyParams::default())).unwrap();
 
         assert_eq!(data.missing, 1);
         assert_eq!(data.fresh, 0);
@@ -4304,13 +4485,13 @@ mod tests {
         repowise_docs::generate(&index, &graph, &health).unwrap();
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(Envelope { data, .. }) = server.get_doc_coverage().unwrap();
+        let Json(Envelope { data, .. }) = server.get_doc_coverage(Parameters(RepoOnlyParams::default())).unwrap();
         assert_eq!(data.fresh, 1);
         assert_eq!(data.entries[0].status, "fresh");
 
         std::fs::write(root.join("solo.py"), "def solo():\n    return 2\n").unwrap();
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_doc_coverage().unwrap();
+        let Json(Envelope { data, .. }) = server.get_doc_coverage(Parameters(RepoOnlyParams::default())).unwrap();
         assert_eq!(data.stale, 1);
         assert_eq!(data.entries[0].status, "stale");
     }
@@ -4971,6 +5152,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_context(Parameters(ContextParams {
                 file: "lib.rs".to_string(),
+                repo: None,
                 limit: CONTEXT_DEFAULT_LIMIT,
             }))
             .unwrap();
@@ -4993,6 +5175,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_context(Parameters(ContextParams {
                 file: "lib.rs".to_string(),
+                repo: None,
                 limit: 100_000,
             }))
             .unwrap();
@@ -5014,6 +5197,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_context(Parameters(ContextParams {
                 file: "lib.rs".to_string(),
+                repo: None,
                 limit: CONTEXT_DEFAULT_LIMIT,
             }))
             .unwrap();
@@ -5046,6 +5230,7 @@ mod tests {
             let Json(Envelope { data, .. }) = server
                 .get_symbol(Parameters(GetSymbolParams {
                     symbol_id: id.to_string(),
+                    repo: None,
                     context_lines: 0,
                 }))
                 .unwrap_or_else(|e| panic!("id {id:?} should resolve: {}", e.message));
@@ -5069,6 +5254,7 @@ mod tests {
             let Json(env) = server
                 .get_context(Parameters(ContextParams {
                     file: "lib.rs".to_string(),
+                    repo: None,
                     limit,
                 }))
                 .unwrap();
@@ -5292,5 +5478,377 @@ mod tests {
         };
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("repo"), "{}", err.message);
+    }
+
+    // ---- issue #337: the last five tools ----
+
+    #[test]
+    fn get_doc_coverage_federates_and_sums_the_status_counts() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data: all, .. }) = server
+            .get_doc_coverage(Parameters(RepoOnlyParams {
+                repo: Some("all".to_string()),
+            }))
+            .expect("repo=all federates");
+
+        // Each repo has exactly one indexed source file and no wiki
+        // pages, so the federated triple must be the sum: 2 missing.
+        assert_eq!(all.missing, 2, "counts sum across repos: {all:?}");
+        assert_eq!(all.entries.len(), 2);
+        let mut repos: Vec<_> = all
+            .entries
+            .iter()
+            .map(|e| e.repo.clone().expect("federated entries are labeled"))
+            .collect();
+        repos.sort();
+        assert_eq!(repos, vec!["repo-a".to_string(), "repo-b".to_string()]);
+
+        // A single named repo is half of it, and still labeled.
+        let Json(Envelope { data: one, .. }) = server
+            .get_doc_coverage(Parameters(RepoOnlyParams {
+                repo: Some("repo-a".to_string()),
+            }))
+            .expect("a named repo resolves");
+        assert_eq!(one.missing, 1);
+        assert_eq!(one.entries.len(), 1);
+        assert_eq!(one.entries[0].repo.as_deref(), Some("repo-a"));
+    }
+
+    #[test]
+    fn get_doc_coverage_unscoped_stays_on_this_servers_own_root_and_is_unlabeled() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("own.rs"), "pub fn own() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data, .. }) = server
+            .get_doc_coverage(Parameters(RepoOnlyParams::default()))
+            .expect("the unscoped default still works");
+
+        assert_eq!(data.entries.len(), 1, "only this server's own file");
+        assert_eq!(data.entries[0].file, "own.rs");
+        assert!(
+            data.entries[0].repo.is_none(),
+            "an unscoped answer carries no repo label"
+        );
+    }
+
+    #[test]
+    fn get_external_deps_federates_without_deduplicating_across_repos() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+
+        // Both repos depend on `serde`, at *different* versions. The
+        // point of not de-duplicating is that this drift stays visible.
+        let repo_a = workspace_root.join("repo-a");
+        std::fs::create_dir_all(repo_a.join("src")).unwrap();
+        std::fs::write(
+            repo_a.join("Cargo.toml"),
+            "[package]\nname = \"repo-a\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo_a.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        build_and_save_index(&repo_a);
+
+        let repo_b = workspace_root.join("repo-b");
+        std::fs::create_dir_all(repo_b.join("src")).unwrap();
+        std::fs::write(
+            repo_b.join("Cargo.toml"),
+            "[package]\nname = \"repo-b\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"0.9\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo_b.join("src/lib.rs"), "pub fn b() {}\n").unwrap();
+        build_and_save_index(&repo_b);
+
+        let workspace_repos = vec![
+            repowise_workspace::ResolvedWorkspaceRepo {
+                name: "repo-a".to_string(),
+                path: repo_a,
+                index: None,
+            },
+            repowise_workspace::ResolvedWorkspaceRepo {
+                name: "repo-b".to_string(),
+                path: repo_b,
+                index: None,
+            },
+        ];
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data, .. }) = server
+            .get_external_deps(Parameters(RepoOnlyParams {
+                repo: Some("all".to_string()),
+            }))
+            .expect("repo=all federates");
+
+        let mut serde_rows: Vec<(String, Option<String>)> = data
+            .dependencies
+            .iter()
+            .filter(|d| d.name == "serde")
+            .map(|d| (d.repo.clone().unwrap_or_default(), d.version.clone()))
+            .collect();
+        serde_rows.sort();
+        assert_eq!(
+            serde_rows,
+            vec![
+                ("repo-a".to_string(), Some("1.0".to_string())),
+                ("repo-b".to_string(), Some("0.9".to_string())),
+            ],
+            "both declarations survive, labeled and un-merged: {:?}",
+            data.dependencies
+        );
+    }
+
+    #[test]
+    fn get_context_reads_from_the_named_repo_not_this_servers_own_root() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data, .. }) = server
+            .get_context(Parameters(ContextParams {
+                file: "src/foo.rs".to_string(),
+                repo: Some("repo-a".to_string()),
+                limit: default_context_limit(),
+            }))
+            .expect("a named repo resolves the file there");
+
+        assert_eq!(data.repo.as_deref(), Some("repo-a"));
+        assert_eq!(data.file, "src/foo.rs");
+        assert!(
+            data.symbols.iter().any(|s| s.name == "helper_alpha"),
+            "read repo-a's own file: {:?}",
+            data.symbols
+        );
+    }
+
+    #[test]
+    fn get_context_rejects_repo_all_rather_than_picking_a_file_arbitrarily() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let err = server
+            .get_context(Parameters(ContextParams {
+                file: "src/lib.rs".to_string(),
+                repo: Some("all".to_string()),
+                limit: default_context_limit(),
+            }))
+            .err()
+            .expect("repo=all is refused for a single-file tool");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("single file or symbol"),
+            "the refusal says why: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn get_symbol_resolves_the_id_in_the_named_repo() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data: ctx, .. }) = server
+            .get_context(Parameters(ContextParams {
+                file: "src/lib.rs".to_string(),
+                repo: Some("repo-b".to_string()),
+                limit: default_context_limit(),
+            }))
+            .expect("context from repo-b");
+        let id = ctx.symbols[0].id.clone();
+
+        let Json(Envelope { data, .. }) = server
+            .get_symbol(Parameters(GetSymbolParams {
+                symbol_id: id,
+                repo: Some("repo-b".to_string()),
+                context_lines: 0,
+            }))
+            .expect("the same repo resolves the id it just handed out");
+
+        assert_eq!(data.repo.as_deref(), Some("repo-b"));
+        assert!(
+            data.source.contains("helper_beta"),
+            "sliced repo-b's own source: {:?}",
+            data.source
+        );
+    }
+
+    #[test]
+    fn get_symbol_rejects_repo_all_because_ids_are_repo_relative() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let err = server
+            .get_symbol(Parameters(GetSymbolParams {
+                symbol_id: "src/lib.rs:1:helper_beta".to_string(),
+                repo: Some("all".to_string()),
+                context_lines: 0,
+            }))
+            .err()
+            .expect("repo=all is refused for a single-symbol tool");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn get_risk_repo_wide_federates_and_labels_every_entry() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+        let Json(Envelope { data, .. }) = server
+            .get_risk(Parameters(RiskParams {
+                file: None,
+                repo: Some("all".to_string()),
+                top_n: default_top_n(),
+            }))
+            .expect("repo-wide mode federates");
+
+        // Neither fixture repo is a git repository, so hotspots degrade
+        // to empty rather than erroring -- the call still succeeds,
+        // which is the contract this tool documents.
+        for entry in &data.files {
+            assert!(
+                entry.repo.is_some(),
+                "every federated entry is labeled: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_risk_file_mode_rejects_repo_all_but_accepts_a_name() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+
+        let err = server
+            .get_risk(Parameters(RiskParams {
+                file: Some("src/foo.rs".to_string()),
+                repo: Some("all".to_string()),
+                top_n: default_top_n(),
+            }))
+            .err()
+            .expect("file mode refuses repo=all");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+
+        let Json(Envelope { data, .. }) = server
+            .get_risk(Parameters(RiskParams {
+                file: Some("src/foo.rs".to_string()),
+                repo: Some("repo-a".to_string()),
+                top_n: default_top_n(),
+            }))
+            .expect("a named repo is the useful half and still works");
+        assert_eq!(data.files.len(), 1);
+        assert_eq!(data.files[0].repo.as_deref(), Some("repo-a"));
+        assert_eq!(data.files[0].file, "src/foo.rs");
+    }
+
+    #[test]
+    fn the_last_five_tools_require_a_workspace_for_any_repo_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("lib.rs"), "pub fn own() {}\n").unwrap();
+        build_and_save_index(&root);
+
+        // No workspace configured at all.
+        let server = RepowiseServer::new(root, None);
+
+        let errs = [
+            server
+                .get_doc_coverage(Parameters(RepoOnlyParams {
+                    repo: Some("nope".to_string()),
+                }))
+                .err()
+                .map(|e| e.message.to_string()),
+            server
+                .get_external_deps(Parameters(RepoOnlyParams {
+                    repo: Some("nope".to_string()),
+                }))
+                .err()
+                .map(|e| e.message.to_string()),
+            server
+                .get_context(Parameters(ContextParams {
+                    file: "lib.rs".to_string(),
+                    repo: Some("nope".to_string()),
+                    limit: default_context_limit(),
+                }))
+                .err()
+                .map(|e| e.message.to_string()),
+            server
+                .get_symbol(Parameters(GetSymbolParams {
+                    symbol_id: "lib.rs:1:own".to_string(),
+                    repo: Some("nope".to_string()),
+                    context_lines: 0,
+                }))
+                .err()
+                .map(|e| e.message.to_string()),
+            server
+                .get_risk(Parameters(RiskParams {
+                    file: None,
+                    repo: Some("nope".to_string()),
+                    top_n: default_top_n(),
+                }))
+                .err()
+                .map(|e| e.message.to_string()),
+        ];
+
+        for (i, err) in errs.iter().enumerate() {
+            let msg = err
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool {i} must refuse a repo param with no workspace"));
+            assert!(
+                msg.contains("--workspace"),
+                "tool {i} names the missing flag: {msg}"
+            );
+        }
     }
 }

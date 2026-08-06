@@ -519,6 +519,10 @@ fn source_label(root: &Path, source: &repowise_adr::DecisionSource) -> String {
 
 #[derive(Serialize, Clone)]
 struct SymbolDto {
+    /// Which repo this symbol came from (issue #337). Absent on an
+    /// unscoped call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
     name: String,
     kind: String,
     file: String,
@@ -555,11 +559,35 @@ struct WikiDto {
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
+    /// Which repo(s) to search (issue #337). Same three meanings as
+    /// every other `?repo=` on this API.
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+/// A matching file, with the repo it came from.
+///
+/// This exists because `files` below is a bare `Vec<String>`, and a
+/// federated search can return the same relative path from two repos --
+/// `src/lib.rs` twice, indistinguishable, both linking somewhere wrong.
+/// `files` is kept as-is so nothing that already reads it breaks; new
+/// callers (including this repo's own frontend) read `matches`, which
+/// is always populated and carries the label.
+#[derive(Serialize)]
+struct FileMatchDto {
+    /// Absent on an unscoped search, so an unscoped response is shaped
+    /// exactly as it was before #337.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    file: String,
 }
 
 #[derive(Serialize)]
 struct SearchDto {
+    /// Repo-relative paths. Ambiguous across repos under `?repo=all`;
+    /// prefer `matches`.
     files: Vec<String>,
+    matches: Vec<FileMatchDto>,
     symbols: Vec<SymbolDto>,
 }
 
@@ -1578,6 +1606,9 @@ async fn get_symbols(State(state): State<AppState>) -> Result<Json<Vec<SymbolDto
         .iter()
         .flat_map(|f| f.symbols.iter())
         .map(|s| SymbolDto {
+            // `/api/symbols` takes no `?repo=`, so there is no label to
+            // attach and the field stays absent from the response.
+            repo: None,
             name: s.name.clone(),
             kind: s.kind.label().to_string(),
             file: relative(&state.root, &s.file),
@@ -1624,11 +1655,12 @@ async fn get_search(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+    let targets = resolve_repo_targets(&state, query.repo.as_deref())?;
     let needle = query.q.trim().to_lowercase();
     if needle.is_empty() {
         return Ok(Json(SearchDto {
             files: Vec::new(),
+            matches: Vec::new(),
             symbols: Vec::new(),
         }));
     }
@@ -1640,43 +1672,63 @@ async fn get_search(
     // depended-on ones. No network call, so instant search stays
     // instant; real embeddings-based retrieval is `/api/chat`'s job
     // (see this module's own doc comment).
-    let graph = repowise_graph::RepoGraph::build(&index);
+    // `SEARCH_LIMIT` applies per repo, and the federated list is
+    // concatenated in workspace order rather than re-ranked globally
+    // (issue #337). Dependent and caller counts are within-repo
+    // numbers, so a single merged ranking would let the largest repo
+    // fill the list -- the same reason `/api/overview` refuses to merge
+    // `most_depended_on`.
+    let mut all_matches: Vec<FileMatchDto> = Vec::new();
+    let mut all_symbols: Vec<SymbolDto> = Vec::new();
+    for target in &targets {
+        let index = RepoIndex::load(&target.root)?;
+        let graph = repowise_graph::RepoGraph::build(&index);
 
-    let mut files: Vec<(usize, String)> = index
-        .files
-        .iter()
-        .filter_map(|f| {
-            let rel = relative(&state.root, &f.path);
-            rel.to_lowercase()
-                .contains(&needle)
-                .then(|| (graph.dependents_of(&f.path).len(), rel))
-        })
-        .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    files.truncate(SEARCH_LIMIT);
-    let files: Vec<String> = files.into_iter().map(|(_, rel)| rel).collect();
+        let mut files: Vec<(usize, String)> = index
+            .files
+            .iter()
+            .filter_map(|f| {
+                let rel = relative(&target.root, &f.path);
+                rel.to_lowercase()
+                    .contains(&needle)
+                    .then(|| (graph.dependents_of(&f.path).len(), rel))
+            })
+            .collect();
+        files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        files.truncate(SEARCH_LIMIT);
+        all_matches.extend(files.into_iter().map(|(_, file)| FileMatchDto {
+            repo: target.repo.clone(),
+            file,
+        }));
 
-    let mut symbols: Vec<(usize, SymbolDto)> = index
-        .files
-        .iter()
-        .flat_map(|f| f.symbols.iter())
-        .filter(|s| s.name.to_lowercase().contains(&needle))
-        .map(|s| {
-            let dto = SymbolDto {
-                name: s.name.clone(),
-                kind: s.kind.label().to_string(),
-                file: relative(&state.root, &s.file),
-                start_line: s.start_line,
-                end_line: s.end_line,
-            };
-            (graph.call_in_degree(&s.id), dto)
-        })
-        .collect();
-    symbols.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
-    symbols.truncate(SEARCH_LIMIT);
-    let symbols: Vec<SymbolDto> = symbols.into_iter().map(|(_, dto)| dto).collect();
+        let mut symbols: Vec<(usize, SymbolDto)> = index
+            .files
+            .iter()
+            .flat_map(|f| f.symbols.iter())
+            .filter(|s| s.name.to_lowercase().contains(&needle))
+            .map(|s| {
+                let dto = SymbolDto {
+                    repo: target.repo.clone(),
+                    name: s.name.clone(),
+                    kind: s.kind.label().to_string(),
+                    file: relative(&target.root, &s.file),
+                    start_line: s.start_line,
+                    end_line: s.end_line,
+                };
+                (graph.call_in_degree(&s.id), dto)
+            })
+            .collect();
+        symbols.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        symbols.truncate(SEARCH_LIMIT);
+        all_symbols.extend(symbols.into_iter().map(|(_, dto)| dto));
+    }
 
-    Ok(Json(SearchDto { files, symbols }))
+    let files = all_matches.iter().map(|m| m.file.clone()).collect();
+    Ok(Json(SearchDto {
+        files,
+        matches: all_matches,
+        symbols: all_symbols,
+    }))
 }
 
 async fn get_search_semantic(
@@ -3672,6 +3724,111 @@ mod tests {
             json["most_depended_on"].as_array().unwrap().is_empty(),
             "within-repo dependent counts must not be ranked across repos"
         );
+    }
+
+    /// `/api/search` federates too (issue #337). The fixture has
+    /// `src/f0.rs` in **both** repos, which is the whole reason
+    /// `matches` exists: `files` alone would show the same string
+    /// twice with nothing to tell them apart.
+    #[tokio::test]
+    async fn search_federates_and_labels_otherwise_identical_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/search?q=f0&repo=all").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let files: Vec<&str> = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            vec!["src/f0.rs", "src/f0.rs"],
+            "the legacy flat list is genuinely ambiguous here"
+        );
+
+        let matches: Vec<(&str, &str)> = json["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["repo"].as_str().unwrap(), m["file"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            matches,
+            vec![("repo-a", "src/f0.rs"), ("repo-b", "src/f0.rs")],
+            "`matches` disambiguates what `files` cannot"
+        );
+
+        // Symbols carry the label too.
+        let repos: Vec<&str> = json["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["repo"].as_str().unwrap())
+            .collect();
+        assert_eq!(repos, vec!["repo-a", "repo-b"]);
+    }
+
+    /// A named repo searches only that repo.
+    #[tokio::test]
+    async fn search_with_a_named_repo_stays_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/search?q=f1&repo=repo-b").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(json["matches"][0]["repo"], "repo-b");
+        assert_eq!(json["matches"][0]["file"], "src/f1.rs");
+
+        // repo-a has no `f1`, so scoping to it finds nothing -- proof
+        // the scope is doing the filtering, not the query.
+        let (status, json) = get_ws(
+            dir.path().canonicalize().unwrap().join("repo-a"),
+            root.join("ws.toml"),
+            "/api/search?q=f1&repo=repo-a",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["matches"].as_array().unwrap().is_empty());
+    }
+
+    /// An unscoped search keeps its exact pre-#337 response shape: no
+    /// `repo` key anywhere, so nothing already reading it breaks.
+    #[tokio::test]
+    async fn an_unscoped_search_carries_no_repo_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/search?q=f0").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["files"], serde_json::json!(["src/f0.rs"]));
+        assert!(
+            json["matches"][0].get("repo").is_none(),
+            "unscoped matches must not gain a repo key: {json}"
+        );
+        assert!(
+            json["symbols"][0].get("repo").is_none(),
+            "unscoped symbols must not gain a repo key: {json}"
+        );
+    }
+
+    /// Naming a repo with no `--workspace` is a 400, same as every
+    /// other `?repo=` endpoint.
+    #[tokio::test]
+    async fn search_with_a_repo_but_no_workspace_is_a_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_dir_at(&root);
+
+        let (status, _) = get(root, "/api/search?q=f0&repo=all").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// An unscoped call keeps its exact pre-#337 shape.

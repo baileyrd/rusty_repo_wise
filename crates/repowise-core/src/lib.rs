@@ -756,6 +756,35 @@ pub struct FileRecord {
     pub field_accesses: Vec<FieldAccessRef>,
 }
 
+/// What `repowise status` and the Claude Code `SessionStart` hook need,
+/// and nothing else (issue #333).
+///
+/// Answering "is the index stale?" needs only each indexed file's path,
+/// to stat against the index's own mtime. Getting those out of the full
+/// index means parsing every symbol and call edge to reach them: on this
+/// repo that is **8.4 MB read to use 8.1 KB of it**, about 2s in a
+/// release build -- paid on every session start, where a person is
+/// waiting.
+///
+/// So the paths are written standalone as well. Readers that want the
+/// summary read this; readers that want symbols still read the index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexStatus {
+    pub schema_version: u32,
+    pub file_count: usize,
+    pub other_files: usize,
+    pub indexed_commit: Option<String>,
+    /// Indexed file paths, in index order.
+    pub files: Vec<PathBuf>,
+}
+
+impl IndexStatus {
+    /// Bumped when the shape changes. A reader that doesn't recognize
+    /// the version falls back to the full index rather than guessing --
+    /// the same stance `PortableIndex` takes (ADR-0002).
+    pub const SCHEMA_VERSION: u32 = 1;
+}
+
 /// The full index for a repository: one record per parsed file, plus
 /// unparsed files counted only for stats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -784,9 +813,15 @@ pub struct RepoIndex {
 impl RepoIndex {
     pub const INDEX_DIR: &'static str = ".repowise";
     pub const INDEX_FILE: &'static str = "index.json";
+    /// Slim companion to `INDEX_FILE`; see [`IndexStatus`].
+    pub const STATUS_FILE: &'static str = "status.json";
 
     pub fn index_path(root: &Path) -> PathBuf {
         root.join(Self::INDEX_DIR).join(Self::INDEX_FILE)
+    }
+
+    pub fn status_path(root: &Path) -> PathBuf {
+        root.join(Self::INDEX_DIR).join(Self::STATUS_FILE)
     }
 
     pub fn save(&self, root: &Path) -> anyhow::Result<PathBuf> {
@@ -795,7 +830,44 @@ impl RepoIndex {
         let path = dir.join(Self::INDEX_FILE);
         let file = std::fs::File::create(&path)?;
         serde_json::to_writer_pretty(file, self)?;
+
+        // Written after the index, so the sidecar is never newer than
+        // the data it summarizes -- `load_status` uses exactly that
+        // ordering to detect one left behind by an older write.
+        let status = IndexStatus {
+            schema_version: IndexStatus::SCHEMA_VERSION,
+            file_count: self.files.len(),
+            other_files: self.other_files,
+            indexed_commit: self.indexed_commit.clone(),
+            files: self.files.iter().map(|f| f.path.clone()).collect(),
+        };
+        // Best effort: a failure here costs speed, not correctness,
+        // because every reader falls back to the full index.
+        if let Ok(f) = std::fs::File::create(dir.join(Self::STATUS_FILE)) {
+            let _ = serde_json::to_writer(f, &status);
+        }
         Ok(path)
+    }
+
+    /// The slim sidecar, or `None` when it's absent, unreadable, of an
+    /// unrecognized schema version, or older than the index itself.
+    ///
+    /// Every one of those is a *fallback*, not an error: callers re-read
+    /// the full index and get the same answer more slowly. That keeps an
+    /// index built by an older `repowise` working untouched.
+    pub fn load_status(root: &Path) -> Option<IndexStatus> {
+        let status_path = Self::status_path(root);
+        let index_path = Self::index_path(root);
+
+        let modified = |p: &Path| std::fs::metadata(p).ok()?.modified().ok();
+        let (status_mtime, index_mtime) = (modified(&status_path)?, modified(&index_path)?);
+        if status_mtime < index_mtime {
+            return None;
+        }
+
+        let file = std::fs::File::open(&status_path).ok()?;
+        let status: IndexStatus = serde_json::from_reader(file).ok()?;
+        (status.schema_version == IndexStatus::SCHEMA_VERSION).then_some(status)
     }
 
     pub fn load(root: &Path) -> anyhow::Result<Self> {
@@ -813,6 +885,106 @@ impl RepoIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn index_with_one_file(root: &std::path::Path, name: &str) -> RepoIndex {
+        std::fs::write(root.join(name), "pub fn a() {}\n").unwrap();
+        RepoIndex {
+            root: root.to_path_buf(),
+            files: vec![FileRecord {
+                path: root.join(name),
+                language: Language::Rust,
+                lines: 1,
+                symbols: Vec::new(),
+                imports: Vec::new(),
+                calls: Vec::new(),
+                field_accesses: Vec::new(),
+            }],
+            other_files: 3,
+            indexed_commit: Some("abc123".to_string()),
+        }
+    }
+
+    /// `save` writes the sidecar, and it round-trips (issue #333).
+    #[test]
+    fn saving_an_index_also_writes_the_status_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let index = index_with_one_file(&root, "a.rs");
+        index.save(&root).unwrap();
+
+        let status = RepoIndex::load_status(&root).expect("the sidecar must exist after save");
+        assert_eq!(status.schema_version, IndexStatus::SCHEMA_VERSION);
+        assert_eq!(status.file_count, 1);
+        assert_eq!(status.other_files, 3);
+        assert_eq!(status.indexed_commit.as_deref(), Some("abc123"));
+        assert_eq!(status.files, vec![root.join("a.rs")]);
+    }
+
+    /// An index written before the sidecar existed must keep working:
+    /// no sidecar means `None`, and every caller falls back to the full
+    /// index rather than erroring.
+    #[test]
+    fn a_missing_sidecar_is_a_fallback_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_file(&root, "a.rs").save(&root).unwrap();
+        std::fs::remove_file(RepoIndex::status_path(&root)).unwrap();
+
+        assert!(RepoIndex::load_status(&root).is_none());
+        // The full index is still there and still readable.
+        assert_eq!(RepoIndex::load(&root).unwrap().files.len(), 1);
+    }
+
+    /// A sidecar older than the index describes a *previous* index, so
+    /// it must be refused. Something that rewrote `index.json` without
+    /// refreshing the sidecar (an older `repowise`, a restored backup)
+    /// would otherwise leave every reader reporting the wrong file list
+    /// indefinitely -- the sidecar is only safe because it is provably
+    /// not older than what it summarizes.
+    #[test]
+    fn a_sidecar_older_than_the_index_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_file(&root, "a.rs").save(&root).unwrap();
+        assert!(
+            RepoIndex::load_status(&root).is_some(),
+            "fresh sidecar reads"
+        );
+
+        // Push the index forward, as a later write would.
+        let index_path = RepoIndex::index_path(&root);
+        let newer = std::fs::metadata(&index_path).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&index_path)
+            .unwrap()
+            .set_modified(newer)
+            .unwrap();
+
+        assert!(
+            RepoIndex::load_status(&root).is_none(),
+            "a sidecar older than the index must not be trusted"
+        );
+    }
+
+    /// An unrecognized schema version falls back rather than
+    /// deserializing into whatever happens to fit -- the same stance
+    /// ADR-0002's portable index takes.
+    #[test]
+    fn an_unknown_sidecar_schema_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_with_one_file(&root, "a.rs").save(&root).unwrap();
+
+        let path = RepoIndex::status_path(&root);
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["schema_version"] = serde_json::json!(IndexStatus::SCHEMA_VERSION + 1);
+        std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
+
+        assert!(RepoIndex::load_status(&root).is_none());
+    }
 
     #[test]
     fn from_extension_recognizes_every_structural_tier_language() {

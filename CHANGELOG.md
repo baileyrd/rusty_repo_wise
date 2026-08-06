@@ -83,6 +83,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- `repowise status` and the Claude Code `SessionStart` hook no longer
+  parse the whole index to answer a freshness question. `init`/`update`
+  now also write `.repowise/status.json`, a ~8 KB sidecar holding the
+  indexed file paths and counts — the only things a freshness check
+  needs — next to an 8.4 MB index. `repowise status` drops from 2.02s to
+  7ms and the hook from 3.93s to 8ms, both release builds. The hook was
+  additionally parsing the index twice: once as an existence check whose
+  result it discarded, then again inside `collect_status`. An index
+  written before the sidecar existed falls back to the full parse, so
+  nothing breaks (#333).
 - `serve-dashboard` warms its index and health caches in the background
   at startup, so the first page load is fast too rather than paying the
   ~4-6s the caches were built to avoid. Only the server's own repo;

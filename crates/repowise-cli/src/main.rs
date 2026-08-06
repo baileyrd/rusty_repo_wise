@@ -2270,8 +2270,22 @@ fn collect_status(root: &Path) -> StatusReport {
     };
 
     let index_path = RepoIndex::index_path(root);
-    let Ok(index) = RepoIndex::load(root) else {
-        return report;
+
+    // Prefer the slim sidecar (issue #333). This function needs only
+    // each indexed file's path, and reading them out of the full index
+    // means parsing every symbol and call edge first -- ~2s on this repo
+    // in a release build, paid on every `repowise status` and on every
+    // Claude Code session start. Falls back to the full index when the
+    // sidecar is absent (an index built before it existed), stale, or
+    // an unrecognized schema version.
+    let files: Vec<PathBuf> = match RepoIndex::load_status(root) {
+        Some(status) => status.files,
+        None => {
+            let Ok(index) = RepoIndex::load(root) else {
+                return report;
+            };
+            index.files.iter().map(|f| f.path.clone()).collect()
+        }
     };
     let Some(index_mtime) = mtime_of(&index_path) else {
         return report;
@@ -2279,16 +2293,16 @@ fn collect_status(root: &Path) -> StatusReport {
 
     let mut stale = Vec::new();
     let mut missing = Vec::new();
-    for file in &index.files {
-        match mtime_of(&file.path) {
-            None => missing.push(file.path.clone()),
-            Some(m) if m > index_mtime => stale.push(file.path.clone()),
+    for path in &files {
+        match mtime_of(path) {
+            None => missing.push(path.clone()),
+            Some(m) if m > index_mtime => stale.push(path.clone()),
             Some(_) => {}
         }
     }
 
     report.indexed = Some(IndexedStatus {
-        file_count: index.files.len(),
+        file_count: files.len(),
         stale,
         missing,
     });
@@ -2671,8 +2685,34 @@ fn cmd_hook_rewrite(action: RewriteAction) -> anyhow::Result<()> {
 /// status`, without auto-updating a stale one -- see
 /// `ClaudeHookAction::SessionStart`'s own doc comment for why.
 fn claude_hook_session_start(root: &Path) -> Option<serde_json::Value> {
-    let additional_context = match RepoIndex::load(root) {
-        Err(_) => repowise_parser::build_index(root).ok().and_then(|index| {
+    // `collect_status` already reports "no readable index" as
+    // `indexed: None`, so ask it first and bootstrap only if it comes
+    // back empty (issue #333).
+    //
+    // The previous shape called `RepoIndex::load` purely to test whether
+    // an index existed, discarded the result, and then let
+    // `collect_status` load it a second time -- two full 8.4 MB parses
+    // to answer "is it stale?", which is why this hook measured ~3.9s in
+    // a release build while `repowise status` measured ~2.0s. It runs on
+    // every session start, with a person waiting.
+    let additional_context = match collect_status(root).indexed {
+        Some(indexed) => Some(if indexed.stale.is_empty() && indexed.missing.is_empty() {
+            format!(
+                "repowise: index is up to date ({} file(s)).",
+                indexed.file_count
+            )
+        } else {
+            format!(
+                "repowise: index is stale ({} file(s) changed, {} removed since the \
+                 last `repowise update`). MCP tool results may lag the working tree \
+                 until you run `repowise update`.",
+                indexed.stale.len(),
+                indexed.missing.len(),
+            )
+        }),
+        // No index, or one too damaged to read: build a fresh one, the
+        // same behaviour as before.
+        None => repowise_parser::build_index(root).ok().and_then(|index| {
             let file_count = index.files.len();
             index.save(root).ok().map(|_| {
                 format!(
@@ -2680,22 +2720,6 @@ fn claude_hook_session_start(root: &Path) -> Option<serde_json::Value> {
                      (search_codebase, get_context, get_risk, ...) are now available."
                 )
             })
-        }),
-        Ok(_) => collect_status(root).indexed.map(|indexed| {
-            if indexed.stale.is_empty() && indexed.missing.is_empty() {
-                format!(
-                    "repowise: index is up to date ({} file(s)).",
-                    indexed.file_count
-                )
-            } else {
-                format!(
-                    "repowise: index is stale ({} file(s) changed, {} removed since the \
-                     last `repowise update`). MCP tool results may lag the working tree \
-                     until you run `repowise update`.",
-                    indexed.stale.len(),
-                    indexed.missing.len(),
-                )
-            }
         }),
     };
 
@@ -5563,6 +5587,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root.canonicalize().unwrap()
+    }
+
+    /// The sidecar is a *speed* change, never a behaviour change: the
+    /// fast path and the fallback must produce the same report (issue
+    /// #333). Asserted by running both over one fixture rather than by
+    /// hand-writing the expected answer twice.
+    #[test]
+    fn status_is_identical_with_and_without_the_sidecar() {
+        let root = fake_project("sidecar-parity");
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "pub fn b() {}\n").unwrap();
+        let index = repowise_parser::build_index(&root).unwrap();
+        index.save(&root).unwrap();
+
+        // Make one file look edited since indexing, so the report has
+        // something non-trivial to agree about rather than two empty
+        // lists.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("a.rs"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        assert!(
+            RepoIndex::load_status(&root).is_some(),
+            "the fixture must actually have a sidecar, or this proves nothing"
+        );
+        let fast = collect_status(&root);
+
+        std::fs::remove_file(RepoIndex::status_path(&root)).unwrap();
+        assert!(RepoIndex::load_status(&root).is_none(), "fallback path now");
+        let slow = collect_status(&root);
+
+        let indexed = fast.indexed.expect("fast path found an index");
+        let fallback = slow.indexed.expect("fallback found an index");
+        assert_eq!(indexed.file_count, fallback.file_count);
+        assert_eq!(indexed.stale, fallback.stale);
+        assert_eq!(indexed.missing, fallback.missing);
+        assert_eq!(
+            indexed.stale.len(),
+            1,
+            "the fixture must show a stale file, or both paths agreeing on nothing is vacuous"
+        );
     }
 
     #[test]

@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `repowise generate-agents-md`: the same managed block
+  `generate-claude-md` writes, targeting a repo-root `AGENTS.md` — the
+  cross-agent convention Codex and opencode read. Identical marker
+  rules; the two blocks differ only in the command each names for
+  regenerating it (#333).
 - Claude Code plugin: a `PostToolUse` hook, matched to `Edit`/`Write`,
   reporting how many other files import the one just changed.
   `init`/`update` write `.repowise/dependents.json` (~12 KB of resolved

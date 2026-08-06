@@ -138,6 +138,22 @@ enum Command {
         #[arg(long)]
         stdout: bool,
     },
+    /// Write the same managed block into `AGENTS.md` (default at the
+    /// repo root) -- the cross-agent convention Codex and opencode
+    /// read, where `generate-claude-md` targets Claude Code's own
+    /// `.claude/CLAUDE.md`. Identical marker rules: prose outside the
+    /// markers is preserved, a file with no markers is appended to, and
+    /// malformed markers are refused rather than guessed at.
+    GenerateAgentsMd {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Write somewhere other than `AGENTS.md`.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Print the generated block to stdout and write nothing.
+        #[arg(long)]
+        stdout: bool,
+    },
     /// Search the index by symbol name (default), file path, or both --
     /// case-insensitive substring match -- or by meaning with `--mode
     /// semantic`, which ranks whole files against the stored embedding
@@ -861,7 +877,24 @@ fn main() -> anyhow::Result<()> {
             path,
             output,
             stdout,
-        } => cmd_generate_claude_md(&path, output.as_deref(), stdout),
+        } => cmd_generate_agent_md(
+            &path,
+            output.as_deref(),
+            stdout,
+            agent_md::DEFAULT_OUTPUT,
+            "generate-claude-md",
+        ),
+        Command::GenerateAgentsMd {
+            path,
+            output,
+            stdout,
+        } => cmd_generate_agent_md(
+            &path,
+            output.as_deref(),
+            stdout,
+            agent_md::AGENTS_OUTPUT,
+            "generate-agents-md",
+        ),
         Command::Search {
             query,
             path,
@@ -1785,11 +1818,22 @@ fn cmd_distill(command: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_generate_claude_md(path: &Path, output: Option<&Path>, stdout: bool) -> anyhow::Result<()> {
+/// Backs both `generate-claude-md` and `generate-agents-md` (issue
+/// #333). The two differ only in where they write by default and in the
+/// command they name inside the block -- the managed-marker rules,
+/// content, and refusal behaviour are deliberately identical, so a repo
+/// keeping both files can't have them drift.
+fn cmd_generate_agent_md(
+    path: &Path,
+    output: Option<&Path>,
+    stdout: bool,
+    default_output: &str,
+    generator: &str,
+) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let index = RepoIndex::load(&root)?;
     let graph = RepoGraph::build(&index);
-    let block = agent_md::render_block(&index, &graph, &root);
+    let block = agent_md::render_block(&index, &graph, &root, generator);
 
     if stdout {
         println!("{block}");
@@ -1799,7 +1843,7 @@ fn cmd_generate_claude_md(path: &Path, output: Option<&Path>, stdout: bool) -> a
     let target = match output {
         Some(p) if p.is_absolute() => p.to_path_buf(),
         Some(p) => root.join(p),
-        None => root.join(agent_md::DEFAULT_OUTPUT),
+        None => root.join(default_output),
     };
 
     let existing = std::fs::read_to_string(&target).ok();

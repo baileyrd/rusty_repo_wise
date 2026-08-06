@@ -83,6 +83,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- The dashboard server computes each repo's health report once and
+  reuses it across requests, instead of `/api/files` and `/api/health`
+  each recomputing one every time. Both endpoints now answer in
+  milliseconds once warm: `/api/files` 3.1s -> 0.003s and
+  `/api/health` 5.1s -> 0.013s (#398).
 - The dashboard server parses each repo's index once and reuses it
   across requests, keyed by repo root and invalidated by the index
   file's mtime, instead of re-parsing on every request.

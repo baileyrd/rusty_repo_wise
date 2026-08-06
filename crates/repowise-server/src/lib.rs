@@ -163,6 +163,9 @@ struct AppState {
     /// Parsed indexes and their call graphs, keyed by repo root (issue
     /// #398). See [`IndexCache`].
     index_cache: IndexCache,
+    /// Computed health reports, keyed by repo root and shape (issue
+    /// #398). See [`HealthCache`].
+    health_cache: HealthCache,
 }
 
 /// One parsed `RepoIndex` (and its `RepoGraph`) per repo root, reused
@@ -197,14 +200,82 @@ struct CachedIndex {
     graph: Arc<repowise_graph::RepoGraph>,
 }
 
+/// One computed `HealthReport` per (repo root, shape), reused across
+/// requests (issue #398).
+///
+/// Health analysis measured 3.5s on this repo, of which 3.45s is
+/// near-duplicate detection -- and both `/api/files` and `/api/health`
+/// want a report, recomputing it independently on every request. After
+/// the index cache landed this was the largest remaining cost on both.
+///
+/// Two shapes are cached separately because the two callers ask
+/// different questions: `/api/files` wants the plain index-derived
+/// report, `/api/health` wants one that folds in git-derived
+/// organizational signals.
+///
+/// **The two shapes cannot share an invalidation key.** The plain
+/// report is a pure function of the index and the weights, so the
+/// index file's mtime is a complete key for it. The org-signals report
+/// is not: `git blame` output changes when commits land, which does
+/// *not* touch `.repowise/index.json`. Keying that variant on mtime
+/// alone would serve organizational findings from before the last
+/// commit, so it carries the head SHA too. A root that isn't a git
+/// repository has no head and no org signals, so the key degenerates
+/// harmlessly.
+#[derive(Clone, Default)]
+struct HealthCache(Arc<Mutex<HashMap<HealthKey, Arc<repowise_health::HealthReport>>>>);
+
+#[derive(PartialEq, Eq, Hash)]
+struct HealthKey {
+    root: PathBuf,
+    mtime: std::time::SystemTime,
+    /// Serialized rather than held structurally: `HealthWeights` is
+    /// all floats, which are not `Eq`/`Hash`. A repo that edits
+    /// `.repowise/config.toml` gets a different string and so a
+    /// different entry.
+    weights: String,
+    /// `None` for the plain report; the head SHA for the org-signals
+    /// one (see this type's doc comment for why they differ).
+    head: Option<String>,
+}
+
+impl HealthCache {
+    fn get_or_insert(
+        &self,
+        key: HealthKey,
+        compute: impl FnOnce() -> repowise_health::HealthReport,
+    ) -> Arc<repowise_health::HealthReport> {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(hit) = guard.get(&key) {
+                return Arc::clone(hit);
+            }
+        }
+        // Computed outside the lock: this is seconds of work, and
+        // holding the mutex across it would serialize every other
+        // request behind it. A concurrent duplicate computation is
+        // cheaper than that, and both produce the same value.
+        let report = Arc::new(compute());
+        if let Ok(mut guard) = self.0.lock() {
+            guard.insert(key, Arc::clone(&report));
+        }
+        report
+    }
+}
+
+/// The index file's mtime, or `None` when it can't be read -- the
+/// shared freshness signal for both caches.
+fn index_mtime(root: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(root.join(".repowise").join("index.json"))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
 impl IndexCache {
     fn get(
         &self,
         root: &Path,
     ) -> Result<(Arc<RepoIndex>, Arc<repowise_graph::RepoGraph>), ApiError> {
-        let mtime = std::fs::metadata(root.join(".repowise").join("index.json"))
-            .and_then(|m| m.modified())
-            .ok();
+        let mtime = index_mtime(root);
 
         if let (Some(mtime), Ok(guard)) = (mtime, self.0.lock()) {
             if let Some(hit) = guard.get(root) {
@@ -1479,23 +1550,40 @@ async fn get_health(
 /// two can't compute it differently.
 fn health_dto_for(state: &AppState, root: &Path) -> Result<HealthDto, ApiError> {
     let (index, graph) = state.index_cache.get(root)?;
-    // Organizational-signal markers (#313) need one `git blame` per
-    // indexed file on top of a history walk -- several seconds on this
-    // port's own workspace, acceptable for a full-report endpoint.
-    // Degrades to skipping those six markers (not reporting zero risk)
-    // when the root isn't a git repository.
-    let analytics = repowise_git::GitAnalytics::collect(root).ok();
-    let org_signals = analytics
-        .as_ref()
-        .and_then(|a| repowise_git::org_signals::collect_org_signals(root, &index, a).ok());
     let config = load_repo_config(root);
-    let health = repowise_health::analyze_with_context(
-        &index,
-        &graph,
-        &config.health_weights,
-        &std::collections::HashSet::new(),
-        None,
-        org_signals.as_ref(),
+    // Keyed on the head SHA as well: org signals come from `git blame`,
+    // which changes when commits land without touching the index file
+    // (issue #398).
+    //
+    // The blame itself happens *inside* the closure, so a cache hit
+    // skips it. Computing it before the lookup would have left the
+    // ~2.4s that dominates this endpoint on every request, and cached
+    // only the cheaper half.
+    let health = state.health_cache.get_or_insert(
+        HealthKey {
+            root: root.to_path_buf(),
+            mtime: index_mtime(root).unwrap_or(std::time::UNIX_EPOCH),
+            weights: format!("{:?}", config.health_weights),
+            head: Some(repowise_git::head_sha(root).unwrap_or_default()),
+        },
+        || {
+            // Organizational-signal markers (#313) need one `git blame`
+            // per indexed file on top of a history walk. Degrades to
+            // skipping those six markers (not reporting zero risk) when
+            // the root isn't a git repository.
+            let analytics = repowise_git::GitAnalytics::collect(root).ok();
+            let org_signals = analytics
+                .as_ref()
+                .and_then(|a| repowise_git::org_signals::collect_org_signals(root, &index, a).ok());
+            repowise_health::analyze_with_context(
+                &index,
+                &graph,
+                &config.health_weights,
+                &std::collections::HashSet::new(),
+                None,
+                org_signals.as_ref(),
+            )
+        },
     );
 
     let by_kind = health
@@ -2352,7 +2440,17 @@ async fn get_files(
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
     let (index, graph) = state.index_cache.get(&root)?;
     let config = load_repo_config(&root);
-    let report = repowise_health::analyze_with_weights(&index, &graph, &config.health_weights);
+    // No git input, so the index mtime is a complete freshness signal
+    // (issue #398).
+    let report = state.health_cache.get_or_insert(
+        HealthKey {
+            root: root.clone(),
+            mtime: index_mtime(&root).unwrap_or(std::time::UNIX_EPOCH),
+            weights: format!("{:?}", config.health_weights),
+            head: None,
+        },
+        || repowise_health::analyze_with_weights(&index, &graph, &config.health_weights),
+    );
 
     let scores: std::collections::HashMap<&Path, (f64, usize)> = report
         .file_scores
@@ -3466,6 +3564,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>, workspace: Option<PathBuf
         usage: UsageTracker::new(),
         webhook_secret: Arc::new(std::env::var("REPOWISE_WEBHOOK_SECRET").ok()),
         index_cache: IndexCache::default(),
+        health_cache: HealthCache::default(),
     };
     build_router(state, static_dir)
 }
@@ -3949,6 +4048,101 @@ mod tests {
             "a changed index must not be served from cache"
         );
         assert_eq!(fresh.files.len(), 2, "the reload must see the new file");
+    }
+
+    /// The health cache must key the two report shapes apart, and only
+    /// the org-signals shape may depend on the head SHA (issue #398).
+    ///
+    /// This is the part worth pinning: the plain report is a pure
+    /// function of the index, so mtime is a complete key, while the
+    /// org-signals report is built from `git blame` output that changes
+    /// on a new commit *without* touching `.repowise/index.json`.
+    /// Sharing one key would serve organizational findings from before
+    /// the last commit.
+    #[tokio::test]
+    async fn the_health_cache_separates_the_two_report_shapes() {
+        let cache = HealthCache::default();
+        let root = PathBuf::from("/repo");
+        let mtime = std::time::SystemTime::UNIX_EPOCH;
+
+        let key = |head: Option<&str>| HealthKey {
+            root: root.clone(),
+            mtime,
+            weights: "w".to_string(),
+            head: head.map(str::to_string),
+        };
+
+        let mut computed = 0;
+        let run = |k: HealthKey, computed: &mut usize| {
+            cache.get_or_insert(k, || {
+                *computed += 1;
+                repowise_health::HealthReport {
+                    file_scores: Vec::new(),
+                    findings: Vec::new(),
+                    average_score: *computed as f64,
+                }
+            })
+        };
+
+        let plain = run(key(None), &mut computed);
+        let org = run(key(Some("abc")), &mut computed);
+        assert_eq!(computed, 2, "the two shapes must not share an entry");
+        assert_ne!(plain.average_score, org.average_score);
+
+        // Both are now hits.
+        run(key(None), &mut computed);
+        run(key(Some("abc")), &mut computed);
+        assert_eq!(computed, 2, "repeat lookups must be served from cache");
+
+        // A new commit moves the head SHA: the org-signals shape must
+        // recompute, and the plain shape must not.
+        run(key(Some("def")), &mut computed);
+        assert_eq!(computed, 3, "a new head SHA must invalidate org signals");
+        run(key(None), &mut computed);
+        assert_eq!(
+            computed, 3,
+            "a new commit must not invalidate the index-only report"
+        );
+    }
+
+    /// Reindexing invalidates both shapes, and different weights are
+    /// different entries -- a repo that edits `.repowise/config.toml`
+    /// must not keep being scored by the old numbers.
+    #[tokio::test]
+    async fn the_health_cache_invalidates_on_mtime_and_on_weights() {
+        let cache = HealthCache::default();
+        let root = PathBuf::from("/repo");
+
+        let mut computed = 0;
+        let run = |k: HealthKey, computed: &mut usize| {
+            cache.get_or_insert(k, || {
+                *computed += 1;
+                repowise_health::HealthReport {
+                    file_scores: Vec::new(),
+                    findings: Vec::new(),
+                    average_score: 0.0,
+                }
+            })
+        };
+        let key = |mtime: std::time::SystemTime, weights: &str| HealthKey {
+            root: root.clone(),
+            mtime,
+            weights: weights.to_string(),
+            head: None,
+        };
+
+        let t0 = std::time::SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+
+        run(key(t0, "w"), &mut computed);
+        run(key(t0, "w"), &mut computed);
+        assert_eq!(computed, 1, "same inputs, one computation");
+
+        run(key(t1, "w"), &mut computed);
+        assert_eq!(computed, 2, "a reindex must invalidate");
+
+        run(key(t1, "other"), &mut computed);
+        assert_eq!(computed, 3, "changed weights must invalidate");
     }
 
     /// Two roots must not share an entry -- #337 made every endpoint
@@ -5737,6 +5931,7 @@ mod tests {
             usage: UsageTracker::new(),
             webhook_secret: Arc::new(None),
             index_cache: IndexCache::default(),
+            health_cache: HealthCache::default(),
         };
         build_router(state, None)
     }
@@ -5751,6 +5946,7 @@ mod tests {
             usage: UsageTracker::new(),
             webhook_secret: Arc::new(secret.map(str::to_string)),
             index_cache: IndexCache::default(),
+            health_cache: HealthCache::default(),
         };
         build_router(state, None)
     }

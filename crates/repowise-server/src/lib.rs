@@ -111,6 +111,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use repowise_core::RepoIndex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -159,6 +160,75 @@ struct AppState {
     /// inject a fixture secret directly instead of racing process env
     /// vars across parallel tests.
     webhook_secret: Arc<Option<String>>,
+    /// Parsed indexes and their call graphs, keyed by repo root (issue
+    /// #398). See [`IndexCache`].
+    index_cache: IndexCache,
+}
+
+/// One parsed `RepoIndex` (and its `RepoGraph`) per repo root, reused
+/// across requests instead of re-parsed on every one (issue #398).
+///
+/// `RepoIndex::load` was measured at 2.78s on this repo -- paid by
+/// *every* index-derived endpoint, on *every* request, including the
+/// ones that are otherwise nearly instant. That was the largest
+/// remaining cost once near-duplicate detection stopped dominating.
+///
+/// Keyed by root rather than a single slot because #337 made every
+/// endpoint answer from an arbitrary workspace repo. Entries are held
+/// as `Arc`s and handed out by cloning the pointer, so a hit copies
+/// nothing.
+///
+/// Invalidated by the index file's mtime, the same signal
+/// `repowise-mcp` already uses: a `repowise update` or the dashboard's
+/// own reindex rewrites `.repowise/index.json`, so the next request
+/// sees a new mtime and reloads. A root whose mtime can't be read is
+/// loaded fresh and *not* cached, so a missing or unreadable index
+/// never gets pinned.
+///
+/// Unbounded in entry count, which is bounded in practice by the number
+/// of repos in the workspace -- there is no way to ask this server
+/// about a root that isn't its own or a configured member.
+#[derive(Clone, Default)]
+struct IndexCache(Arc<Mutex<HashMap<PathBuf, CachedIndex>>>);
+
+struct CachedIndex {
+    mtime: std::time::SystemTime,
+    index: Arc<RepoIndex>,
+    graph: Arc<repowise_graph::RepoGraph>,
+}
+
+impl IndexCache {
+    fn get(
+        &self,
+        root: &Path,
+    ) -> Result<(Arc<RepoIndex>, Arc<repowise_graph::RepoGraph>), ApiError> {
+        let mtime = std::fs::metadata(root.join(".repowise").join("index.json"))
+            .and_then(|m| m.modified())
+            .ok();
+
+        if let (Some(mtime), Ok(guard)) = (mtime, self.0.lock()) {
+            if let Some(hit) = guard.get(root) {
+                if hit.mtime == mtime {
+                    return Ok((Arc::clone(&hit.index), Arc::clone(&hit.graph)));
+                }
+            }
+        }
+
+        let index = Arc::new(RepoIndex::load(root)?);
+        let graph = Arc::new(repowise_graph::RepoGraph::build(&index));
+
+        if let (Some(mtime), Ok(mut guard)) = (mtime, self.0.lock()) {
+            guard.insert(
+                root.to_path_buf(),
+                CachedIndex {
+                    mtime,
+                    index: Arc::clone(&index),
+                    graph: Arc::clone(&graph),
+                },
+            );
+        }
+        Ok((index, graph))
+    }
 }
 
 /// Running token-usage totals for this server process, tallied across
@@ -1218,6 +1288,7 @@ fn load_repo_config(root: &Path) -> RepoConfig {
         .unwrap_or_default()
 }
 
+#[derive(Debug)]
 struct ApiError(anyhow::Error, StatusCode);
 
 impl ApiError {
@@ -1338,8 +1409,7 @@ async fn get_overview(
     let targets = resolve_repo_targets(&state, q.repo.as_deref())?;
     let mut per_repo = Vec::with_capacity(targets.len());
     for target in &targets {
-        let index = RepoIndex::load(&target.root)?;
-        let graph = repowise_graph::RepoGraph::build(&index);
+        let (index, graph) = state.index_cache.get(&target.root)?;
         let overview = graph.overview(&index);
         let mut dto = OverviewDto::from_overview(&target.root, &overview);
         dto.repo = target.repo.clone();
@@ -1392,24 +1462,23 @@ async fn get_health(
     if targets.len() > 1 {
         let mut per_repo = Vec::with_capacity(targets.len());
         for target in &targets {
-            let mut dto = health_dto_for(&target.root)?;
+            let mut dto = health_dto_for(&state, &target.root)?;
             dto.repo = target.repo.clone();
             per_repo.push(dto);
         }
-        let mut first = health_dto_for(&targets[0].root)?;
+        let mut first = health_dto_for(&state, &targets[0].root)?;
         first.repos = Some(per_repo);
         return Ok(Json(first));
     }
-    let dto = health_dto_for(&targets[0].root)?;
+    let dto = health_dto_for(&state, &targets[0].root)?;
     Ok(Json(dto))
 }
 
 /// One repo's health report (issue #337) -- shared by the unscoped
 /// path and by each entry of a federated `?repo=all` answer, so the
 /// two can't compute it differently.
-fn health_dto_for(root: &Path) -> Result<HealthDto, ApiError> {
-    let index = RepoIndex::load(root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
+fn health_dto_for(state: &AppState, root: &Path) -> Result<HealthDto, ApiError> {
+    let (index, graph) = state.index_cache.get(root)?;
     // Organizational-signal markers (#313) need one `git blame` per
     // indexed file on top of a history walk -- several seconds on this
     // port's own workspace, acceptable for a full-report endpoint.
@@ -1466,7 +1535,7 @@ async fn get_hotspots(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<HotspotsDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let dto = match repowise_git::GitAnalytics::collect(&root) {
         Ok(analytics) => {
             let hotspots = repowise_git::hotspots(&index, &analytics);
@@ -1643,7 +1712,7 @@ async fn get_decisions(
     Query(query): Query<DecisionsQuery>,
 ) -> Result<Json<DecisionsDto>, ApiError> {
     let root = resolve_scope_root(&state, query.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let (decisions, inferred_state) = repowise_adr::mine_reporting(&index)
         .unwrap_or_else(|_| (Vec::new(), repowise_adr::InferredState::NotGenerated));
     Ok(Json(DecisionsDto {
@@ -1673,7 +1742,7 @@ async fn get_symbols(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<Vec<SymbolDto>>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let mut symbols: Vec<SymbolDto> = index
         .files
         .iter()
@@ -1698,7 +1767,7 @@ async fn get_wiki_pages(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let mut pages: Vec<String> = wiki_indexed_files(&root, &index)
         .into_iter()
         .map(|(rel, _)| rel)
@@ -1717,7 +1786,7 @@ async fn get_wiki(
     Query(query): Query<WikiQuery>,
 ) -> Result<Response, ApiError> {
     let root = resolve_scope_root(&state, query.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let found = wiki_indexed_files(&root, &index)
         .into_iter()
         .find(|(rel, _)| *rel == query.path);
@@ -1759,8 +1828,7 @@ async fn get_search(
     let mut all_matches: Vec<FileMatchDto> = Vec::new();
     let mut all_symbols: Vec<SymbolDto> = Vec::new();
     for target in &targets {
-        let index = RepoIndex::load(&target.root)?;
-        let graph = repowise_graph::RepoGraph::build(&index);
+        let (index, graph) = state.index_cache.get(&target.root)?;
 
         let mut files: Vec<(usize, String)> = index
             .files
@@ -1825,7 +1893,7 @@ async fn get_search_semantic(
         }));
     };
 
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let root = root.clone();
     let retrieval = tokio::task::spawn_blocking(move || {
         repowise_llm::retrieve(&root, &index, &needle, &config)
@@ -1851,8 +1919,7 @@ async fn get_graph(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<GraphDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
+    let (index, graph) = state.index_cache.get(&root)?;
 
     let mut ranked: Vec<(&repowise_core::FileRecord, usize)> = index
         .files
@@ -1916,8 +1983,7 @@ async fn get_graph_modules(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<GraphDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
+    let (index, graph) = state.index_cache.get(&root)?;
 
     let module_of = |path: &Path| -> String {
         let rel = relative(&root, path);
@@ -2012,8 +2078,7 @@ async fn get_communities(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<CommunitiesDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
+    let (index, graph) = state.index_cache.get(&root)?;
 
     let nodes: Vec<PathBuf> = index.files.iter().map(|f| f.path.clone()).collect();
     let mut edges: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -2082,7 +2147,7 @@ async fn get_ownership(
     Query(query): Query<OwnershipQuery>,
 ) -> Result<Json<OwnershipDto>, ApiError> {
     let root = resolve_scope_root(&state, query.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let Some(file) = index
         .files
         .iter()
@@ -2119,7 +2184,7 @@ async fn get_symbol_detail(
     Query(query): Query<SymbolDetailQuery>,
 ) -> Result<Json<SymbolDetailDto>, ApiError> {
     let root = resolve_scope_root(&state, query.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let found = index.files.iter().find_map(|f| {
         (relative(&root, &f.path) == query.file)
             .then(|| f.symbols.iter().find(|s| s.start_line == query.line))
@@ -2204,7 +2269,7 @@ async fn get_decision_detail(
     Query(query): Query<DecisionDetailQuery>,
 ) -> Result<Json<DecisionDetailDto>, ApiError> {
     let root = resolve_scope_root(&state, query.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let decisions = repowise_adr::mine(&index).unwrap_or_default();
 
     // The reverse lineage link: which decision (if any) this one
@@ -2285,8 +2350,7 @@ async fn get_files(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<FilesDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
-    let graph = repowise_graph::RepoGraph::build(&index);
+    let (index, graph) = state.index_cache.get(&root)?;
     let config = load_repo_config(&root);
     let report = repowise_health::analyze_with_weights(&index, &graph, &config.health_weights);
 
@@ -2328,7 +2392,7 @@ async fn get_contributors(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<ContributorsDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let files_total = index.files.len();
 
     // Largest files first: they hold most of the repo's lines, so when
@@ -2400,7 +2464,7 @@ async fn get_coverage(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<CoverageDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let Ok(coverage) = repowise_core::coverage::CoverageData::load(&root) else {
         return Ok(Json(CoverageDto {
             available: false,
@@ -2485,8 +2549,7 @@ async fn get_dead_code(
     let mut all: Vec<DeadCodeCandidateDto> = Vec::new();
     let mut total_matching = 0usize;
     for target in &targets {
-        let index = RepoIndex::load(&target.root)?;
-        let graph = repowise_graph::RepoGraph::build(&index);
+        let (index, graph) = state.index_cache.get(&target.root)?;
         let matching: Vec<_> = repowise_health::find_dead_code(&index, &graph)
             .into_iter()
             .filter(|c| c.confidence >= threshold)
@@ -2532,8 +2595,7 @@ async fn get_refactor_candidates(
     let mut all: Vec<RefactorCandidateDto> = Vec::new();
     let mut total_matching = 0usize;
     for target in &targets {
-        let index = RepoIndex::load(&target.root)?;
-        let graph = repowise_graph::RepoGraph::build(&index);
+        let (index, graph) = state.index_cache.get(&target.root)?;
         let mut found = repowise_refactor::find_refactor_candidates(&index, &graph);
         if let Some(kind) = query.kind.as_deref() {
             found.retain(|c| c.kind.label() == kind);
@@ -2578,7 +2640,7 @@ async fn get_security(
     let mut all: Vec<SecurityFindingDto> = Vec::new();
     let mut total_matching = 0usize;
     for target in &targets {
-        let index = RepoIndex::load(&target.root)?;
+        let (index, _graph) = state.index_cache.get(&target.root)?;
         let mut found = repowise_security::scan(&index);
         if let Some(rank) = min_rank {
             found.retain(|f| f.severity >= rank);
@@ -2606,7 +2668,7 @@ async fn get_doc_coverage(
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<DocCoverageDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let report = repowise_docs::check_freshness(&index);
     let (missing, fresh, stale) = report.counts();
 
@@ -2754,7 +2816,7 @@ async fn post_chat(
         }));
     };
 
-    let index = RepoIndex::load(&root)?;
+    let (index, _graph) = state.index_cache.get(&root)?;
     let question = request
         .history
         .iter()
@@ -3170,7 +3232,7 @@ async fn get_workspace_contracts(State(state): State<AppState>) -> Json<Workspac
 }
 
 async fn get_settings(State(state): State<AppState>) -> Result<Json<SettingsDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+    let (index, _graph) = state.index_cache.get(&state.root)?;
     let git_available = repowise_git::GitAnalytics::collect(&state.root).is_ok();
     let wiki_pages_available = !wiki_indexed_files(&state.root, &index).is_empty();
     let llm_config = state.llm_config.as_ref().clone();
@@ -3403,6 +3465,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>, workspace: Option<PathBuf
         reindex_job: ReindexJob::new(),
         usage: UsageTracker::new(),
         webhook_secret: Arc::new(std::env::var("REPOWISE_WEBHOOK_SECRET").ok()),
+        index_cache: IndexCache::default(),
     };
     build_router(state, static_dir)
 }
@@ -3838,6 +3901,80 @@ mod tests {
             json["most_depended_on"].as_array().unwrap().is_empty(),
             "within-repo dependent counts must not be ranked across repos"
         );
+    }
+
+    /// A cache that never invalidates is worse than a slow endpoint:
+    /// it serves data the repo no longer has (issue #398). Reindexing
+    /// rewrites `.repowise/index.json`, so a changed mtime must be
+    /// picked up on the very next request.
+    ///
+    /// The new mtime is set explicitly rather than by writing and
+    /// hoping -- some filesystems have one-second mtime granularity, so
+    /// a fast test could otherwise rewrite the file and produce an
+    /// identical timestamp, silently passing for the wrong reason.
+    #[tokio::test]
+    async fn the_index_cache_reloads_when_the_index_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        index_dir_at(&root);
+
+        let cache = IndexCache::default();
+        let (first, _) = cache.get(&root).expect("first load");
+        assert_eq!(first.files.len(), 1);
+
+        // Same mtime -> same allocation handed back, no reparse.
+        let (again, _) = cache.get(&root).expect("cached load");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "an unchanged index must be served from cache, not reparsed"
+        );
+
+        // Reindex with a second file, and push the mtime forward.
+        std::fs::write(root.join("b.rs"), "pub fn b() {}\n").unwrap();
+        index_dir_at(&root);
+        let index_path = root.join(".repowise").join("index.json");
+        let bumped = std::fs::metadata(&index_path).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&index_path)
+            .unwrap()
+            .set_modified(bumped)
+            .unwrap();
+
+        let (fresh, _) = cache.get(&root).expect("reload after reindex");
+        assert!(
+            !Arc::ptr_eq(&first, &fresh),
+            "a changed index must not be served from cache"
+        );
+        assert_eq!(fresh.files.len(), 2, "the reload must see the new file");
+    }
+
+    /// Two roots must not share an entry -- #337 made every endpoint
+    /// answer from an arbitrary workspace repo, so a single-slot cache
+    /// would hand one repo's index to another.
+    #[tokio::test]
+    async fn the_index_cache_keys_by_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let (own, _ws) = workspace_of_two(&base);
+        let other = base.join("repo-b");
+
+        let cache = IndexCache::default();
+        let (a, _) = cache.get(&own).expect("repo-a");
+        let (b, _) = cache.get(&other).expect("repo-b");
+
+        assert_eq!(a.files.len(), 1, "repo-a has 1 file");
+        assert_eq!(b.files.len(), 2, "repo-b has 2");
+        assert!(!Arc::ptr_eq(&a, &b));
+
+        // And both stay distinct on a second pass, from cache.
+        let (a2, _) = cache.get(&own).unwrap();
+        let (b2, _) = cache.get(&other).unwrap();
+        assert!(Arc::ptr_eq(&a, &a2) && Arc::ptr_eq(&b, &b2));
+        assert_eq!(a2.files.len(), 1);
+        assert_eq!(b2.files.len(), 2);
     }
 
     /// The bug this fixes: the frontend injects `?repo=` into *every*
@@ -5599,6 +5736,7 @@ mod tests {
             reindex_job: ReindexJob::new(),
             usage: UsageTracker::new(),
             webhook_secret: Arc::new(None),
+            index_cache: IndexCache::default(),
         };
         build_router(state, None)
     }
@@ -5612,6 +5750,7 @@ mod tests {
             reindex_job: ReindexJob::new(),
             usage: UsageTracker::new(),
             webhook_secret: Arc::new(secret.map(str::to_string)),
+            index_cache: IndexCache::default(),
         };
         build_router(state, None)
     }

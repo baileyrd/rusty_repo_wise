@@ -83,6 +83,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- The dashboard server parses each repo's index once and reuses it
+  across requests, keyed by repo root and invalidated by the index
+  file's mtime, instead of re-parsing on every request.
+  `RepoIndex::load` was 2.78s on this repo, paid by every index-derived
+  endpoint every time. `/api/overview` drops from 3.35s to 0.005s and
+  `/api/hotspots` from 3.16s to 0.038s (#398).
 - Near-duplicate detection no longer degenerates into repeated
   all-pairs comparison. Its Rabin-Karp bucketing claimed pairs "with
   nothing in common never get compared at all", but at a 3-token window

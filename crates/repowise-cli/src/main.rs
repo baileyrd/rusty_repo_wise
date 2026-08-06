@@ -621,6 +621,16 @@ enum Command {
         /// Omit to run single-repo only.
         #[arg(long)]
         workspace: Option<PathBuf>,
+        /// Re-index automatically when HEAD moves past the indexed
+        /// commit, checked every N seconds (issue #335). For a server
+        /// watching a checkout that something *else* updates -- CI, a
+        /// deploy script, another person's `git pull` -- where the
+        /// post-commit hook and `repowise watch` (which run where edits
+        /// happen) never fire and the forge may not be able to reach a
+        /// webhook URL. Compares local HEAD only; never runs `git
+        /// fetch`, which would mutate your repository on a timer.
+        #[arg(long, value_name = "SECONDS")]
+        poll: Option<u64>,
     },
     /// List every repo configured in a workspace TOML file, each with
     /// its indexed status and file count if a prior `repowise init`/
@@ -991,7 +1001,8 @@ fn main() -> anyhow::Result<()> {
             addr,
             static_dir,
             workspace,
-        } => cmd_serve_dashboard(&path, addr, static_dir, workspace),
+            poll,
+        } => cmd_serve_dashboard(&path, addr, static_dir, workspace, poll),
         Command::WorkspaceMetrics { workspace, json } => cmd_workspace_metrics(&workspace, json),
         Command::WorkspaceDiagnostics { workspace, json } => {
             cmd_workspace_diagnostics(&workspace, json)
@@ -3887,6 +3898,7 @@ fn cmd_serve_dashboard(
     addr: std::net::SocketAddr,
     static_dir: Option<PathBuf>,
     workspace: Option<PathBuf>,
+    poll: Option<u64>,
 ) -> anyhow::Result<()> {
     let workspace = resolve_workspace(workspace)?;
     let root = path.canonicalize()?;
@@ -3922,7 +3934,9 @@ fn cmd_serve_dashboard(
     }
     println!("Dashboard server listening on http://{addr}");
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(repowise_server::serve(root, addr, static_dir, workspace))
+    runtime.block_on(repowise_server::serve(
+        root, addr, static_dir, workspace, poll,
+    ))
 }
 
 /// See `repowise-workspace`'s own docs for the workspace TOML format.

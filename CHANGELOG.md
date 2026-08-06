@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `repowise serve-dashboard --poll <SECONDS>`: re-index automatically
+  when HEAD moves past the indexed commit. The fifth auto-sync
+  mechanism, for the case the other four miss — a server watching a
+  checkout that something *else* updates (CI, a deploy script, another
+  person's `git pull`), where the post-commit hook and `repowise watch`
+  run on the wrong machine and the forge may not reach a webhook URL.
+  Local HEAD only; never runs `git fetch`, which would mutate your
+  repository on a timer. Opt-in (#335).
 - `REPOWISE_WORKSPACE` is honoured by `repowise serve` and
   `serve-dashboard` when no `--workspace` flag is given. The Claude Code
   plugin starts the MCP server from a static `.mcp.json` whose `args`
@@ -104,6 +112,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- Server-side reindexes no longer erase the index's commit stamp. The
+  dashboard's Reindex button and both webhook receivers built the index
+  via `repowise_parser::build_index`, which leaves `indexed_commit`
+  unset — only `repowise init`/`update` stamped it. That silently
+  degraded the MCP staleness warning from a commit comparison to an age
+  guess after any server-triggered reindex (#335, #345).
+- Server-side reindexes now refresh `.repowise/dependents.json` too.
+  Rewriting the index without it left the sidecar older than the index,
+  which `load_dependents` correctly refuses — silently disabling the
+  Claude Code `PostToolUse` hook until someone ran the CLI (#333).
 - `repowise status` and the Claude Code `SessionStart` hook no longer
   parse the whole index to answer a freshness question. `init`/`update`
   now also write `.repowise/status.json`, a ~8 KB sidecar holding the

@@ -342,7 +342,7 @@ impl UsageTracker {
 /// /api/reindex`. Internally tagged so the wire format is a flat
 /// `{"status": "completed", "file_count": ..., ...}` object rather than a
 /// separate boolean/variant-name split.
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum ReindexStatusDto {
     Idle,
@@ -3395,14 +3395,98 @@ async fn post_settings_health_weights(
 /// job-triggering code path shared by `POST /api/reindex` and the two
 /// webhook endpoints, so all three can't drift out of sync with each
 /// other.
+/// Periodically re-index when HEAD has moved past the indexed commit
+/// (issue #335).
+///
+/// The fifth auto-sync mechanism, after the post-commit hook, the file
+/// watcher, and the two webhook receivers. It exists for the case none
+/// of those cover: a server indexing a repo whose commits land
+/// *somewhere else*. The post-commit hook and `repowise watch` both run
+/// on the machine where edits happen; a dashboard server watching a
+/// checkout updated by CI, a deploy script, or another person's `git
+/// pull` sees neither. Webhooks cover it only when the forge can reach
+/// the server, which a self-hosted forge or a laptop behind NAT cannot.
+///
+/// **Local HEAD only -- this never runs `git fetch`.** Fetching on a
+/// timer would mutate the user's repository and need credentials the
+/// server has no business holding. What this detects is "something
+/// moved this checkout", which is exactly the uncovered case.
+///
+/// Costs per tick: one `git rev-parse HEAD`, plus an ~8 KB read of the
+/// status sidecar for the indexed commit (issue #333) rather than the
+/// 8.4 MB index. The comparison itself is the one `repowise-mcp`'s
+/// `_meta` already makes on every tool call, so this adds no new notion
+/// of freshness -- and no new persisted state, which was the stated
+/// reason this mechanism was previously declined.
+fn spawn_poller(state: AppState, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // The first tick fires immediately; skip it so startup warming
+        // isn't racing a reindex.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let root = (*state.root).clone();
+            let moved = tokio::task::spawn_blocking(move || head_moved_past_index(&root))
+                .await
+                .unwrap_or(false);
+            if moved {
+                // `try_start` makes this a no-op when a reindex is
+                // already running, so a slow re-index can't queue up
+                // behind a fast tick.
+                trigger_reindex(&state);
+            }
+        }
+    });
+}
+
+/// True only when both the indexed commit and live HEAD are known and
+/// disagree.
+///
+/// Either side unknown means there is nothing to compare, and polling
+/// stays quiet rather than re-indexing on a guess -- the same rule
+/// `repowise-mcp`'s staleness warning follows.
+fn head_moved_past_index(root: &Path) -> bool {
+    let indexed = match RepoIndex::load_status(root) {
+        Some(status) => status.indexed_commit,
+        // No sidecar: fall back to the index itself rather than
+        // re-indexing blindly, which on a big repo would be a expensive
+        // reaction to a missing file.
+        None => RepoIndex::load(root).ok().and_then(|i| i.indexed_commit),
+    };
+    match (indexed, repowise_git::head_sha(root)) {
+        (Some(indexed), Some(head)) => indexed != head,
+        _ => false,
+    }
+}
+
 fn trigger_reindex(state: &AppState) -> ReindexStatusDto {
     if state.reindex_job.try_start() {
         let root = (*state.root).clone();
         let job = state.reindex_job.clone();
         tokio::task::spawn_blocking(move || {
             let start = Instant::now();
-            let outcome = repowise_parser::build_index(&root).and_then(|index| {
+            let outcome = repowise_parser::build_index(&root).and_then(|mut index| {
+                // Stamp the commit, as `repowise init`/`update` do.
+                // `build_index` leaves it `None`, so without this every
+                // server-side reindex -- the dashboard button, both
+                // webhook receivers (#335), and the poller below --
+                // erased it. That degrades the MCP staleness warning
+                // from a commit comparison to an age guess, and stops
+                // the poller dead: with no indexed commit there is
+                // nothing to compare HEAD against, so it would fire
+                // exactly once and then go quiet.
+                index.indexed_commit = repowise_git::head_sha(&index.root);
                 index.save(&index.root)?;
+                // The dependents sidecar must be refreshed alongside the
+                // index, or `load_dependents` correctly refuses it for
+                // being older -- and the Claude Code `PostToolUse` hook
+                // silently stops enriching until the next CLI
+                // `repowise update` (issue #333). This is the fifth
+                // index-write site; the other four go through the CLI's
+                // `save_index_with_sidecars`.
+                let graph = repowise_graph::RepoGraph::build(&index);
+                let _ = repowise_graph::write_dependents(&index.root, &index, &graph);
                 Ok((index.files.len(), index.other_files))
             });
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -3677,9 +3761,17 @@ pub async fn serve(
     addr: SocketAddr,
     static_dir: Option<PathBuf>,
     workspace: Option<PathBuf>,
+    poll_seconds: Option<u64>,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let state = build_state(root, workspace);
+
+    // Opt-in: a server that re-indexes on a timer without being asked
+    // would be a surprise, and the three existing mechanisms already
+    // cover the common cases (issue #335).
+    if let Some(seconds) = poll_seconds.filter(|s| *s > 0) {
+        spawn_poller(state.clone(), std::time::Duration::from_secs(seconds));
+    }
 
     // Off the async runtime's worker threads: this is seconds of pure
     // CPU, and running it inline would stall every request the server
@@ -4099,6 +4191,139 @@ mod tests {
             "a changed index must not be served from cache"
         );
         assert_eq!(fresh.files.len(), 2, "the reload must see the new file");
+    }
+
+    /// A server-side reindex must keep the commit stamp (issues #335,
+    /// #345). `repowise_parser::build_index` leaves `indexed_commit`
+    /// `None` -- only `repowise init`/`update` stamped it -- so the
+    /// dashboard button, both webhook receivers, and the poller all
+    /// erased it.
+    ///
+    /// The poller is the sharpest symptom: with no indexed commit there
+    /// is nothing to compare HEAD against, so it would fire exactly
+    /// once and then go silent forever. Caught by running it against a
+    /// real repo across two commits, not by the unit test above.
+    #[tokio::test]
+    async fn a_server_reindex_keeps_the_commit_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+
+        // A real git repo, so there is a HEAD to stamp.
+        for args in [
+            vec!["init", "-q", "."],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "-A"],
+            vec!["commit", "-qm", "first"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                return; // no usable git here; nothing to assert against
+            }
+        }
+        let head = repowise_git::head_sha(&root).expect("a committed repo has a HEAD");
+
+        index_dir_at(&root);
+        let state = build_state(root.clone(), None);
+        trigger_reindex(&state);
+        for _ in 0..200 {
+            if !matches!(state.reindex_job.snapshot(), ReindexStatusDto::Running) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(
+            RepoIndex::load(&root).unwrap().indexed_commit,
+            Some(head),
+            "a server-side reindex must stamp the commit, or polling fires once and stops"
+        );
+    }
+
+    /// Polling's whole decision (issue #335). It must fire only when
+    /// both commits are known and differ -- an unknown on either side
+    /// means there is nothing to compare, and re-indexing on a guess
+    /// would make a big repo churn forever.
+    #[tokio::test]
+    async fn head_moved_past_index_only_fires_on_a_known_disagreement() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        index_dir_at(&root);
+
+        // Not a git repo: HEAD is unknown, so nothing to compare.
+        assert!(
+            !head_moved_past_index(&root),
+            "an unknown HEAD must not trigger a reindex"
+        );
+
+        // Stamp an indexed commit that cannot match any real HEAD, but
+        // still with no git repo -- HEAD unknown keeps it quiet.
+        let mut index = RepoIndex::load(&root).unwrap();
+        index.indexed_commit = Some("0000000000000000000000000000000000000000".to_string());
+        index.save(&root).unwrap();
+        assert!(
+            !head_moved_past_index(&root),
+            "a known indexed commit with an unknown HEAD is still nothing to compare"
+        );
+    }
+
+    /// The reindex job must refresh the dependents sidecar, not just
+    /// the index (issue #333). It is the fifth index-write site; the
+    /// other four go through the CLI. Leaving it out makes
+    /// `load_dependents` refuse the now-older sidecar, silently
+    /// disabling the `PostToolUse` hook until someone runs the CLI.
+    #[tokio::test]
+    async fn a_server_reindex_refreshes_the_dependents_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "mod a;\npub fn go() { a::a() }\n").unwrap();
+
+        let index = repowise_parser::build_index(&root).unwrap();
+        index.save(&root).unwrap();
+        let graph = repowise_graph::RepoGraph::build(&index);
+        repowise_graph::write_dependents(&root, &index, &graph).unwrap();
+        assert!(
+            repowise_graph::load_dependents(&root).is_some_and(|d| !d.dependents.is_empty()),
+            "fixture must start with a usable sidecar, or this proves nothing"
+        );
+
+        let state = build_state(root.clone(), None);
+        trigger_reindex(&state);
+
+        // The job runs on a blocking thread; wait for it to settle.
+        for _ in 0..200 {
+            if !matches!(state.reindex_job.snapshot(), ReindexStatusDto::Running) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            matches!(
+                state.reindex_job.snapshot(),
+                ReindexStatusDto::Completed { .. }
+            ),
+            "reindex must complete: {:?}",
+            state.reindex_job.snapshot()
+        );
+
+        assert!(
+            repowise_graph::load_dependents(&root).is_some_and(|d| !d.dependents.is_empty()),
+            "the sidecar must survive a server-side reindex, not be left older than the index"
+        );
     }
 
     /// Warming has to fill the *same* cache keys the handlers look up,

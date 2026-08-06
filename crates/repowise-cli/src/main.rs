@@ -813,10 +813,11 @@ enum ClaudeHookAction {
     /// (`repowise init`'s own implementation), and reports freshness
     /// otherwise -- never auto-updates a stale index, the same "report,
     /// don't silently refresh behind the caller's back" stance the MCP
-    /// server's own `_meta.stale_warning` already takes, and cheap
-    /// enough to run synchronously on every session start (the same
-    /// mtime-diffing `repowise status` already does, no git history
-    /// walk).
+    /// server's own `_meta.stale_warning` already takes. Cheap enough
+    /// to run synchronously because it reads the
+    /// `.repowise/status.json` sidecar rather than the whole index --
+    /// it measured ~3.9s in a release build when it parsed the index
+    /// (twice), and ~8ms now.
     SessionStart,
     /// `PreToolUse` (matched to `Bash` only): routes the command
     /// through the exact same fail-open Distill decision logic `hook
@@ -824,6 +825,12 @@ enum ClaudeHookAction {
     /// `PreToolUse` JSON contract instead of a raw stdin/stdout command
     /// string.
     PreToolUse,
+    /// `PostToolUse` (matched to `Edit`/`Write` only): after a file is
+    /// changed, reports how many other files import it, from the
+    /// `.repowise/dependents.json` sidecar. Says nothing when the
+    /// sidecar is missing or older than the index -- a stale blast
+    /// radius reads as fact, silence reads as "no information".
+    PostToolUse,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -989,9 +996,28 @@ fn build_stamped_index(root: &Path) -> anyhow::Result<RepoIndex> {
     Ok(index)
 }
 
+/// Save an index and every sidecar derived from it (issue #333).
+///
+/// One function rather than a `save` call plus a `write_dependents`
+/// call at each of the four places an index gets built. A site that
+/// remembered one and forgot the other would leave a dependents file
+/// describing a previous index -- which `load_dependents` would then
+/// correctly refuse, silently costing the `PostToolUse` hook its
+/// enrichment with nothing to indicate why.
+///
+/// The graph build costs ~0.02s on an index already in hand, and the
+/// sidecar write is best effort: failing it costs a hook its
+/// enrichment, never the index.
+fn save_index_with_sidecars(index: &RepoIndex) -> anyhow::Result<PathBuf> {
+    let saved_to = index.save(&index.root)?;
+    let graph = repowise_graph::RepoGraph::build(index);
+    let _ = repowise_graph::write_dependents(&index.root, index, &graph);
+    Ok(saved_to)
+}
+
 fn cmd_init(path: &Path) -> anyhow::Result<()> {
     let index = build_stamped_index(path)?;
-    let saved_to = index.save(&index.root)?;
+    let saved_to = save_index_with_sidecars(&index)?;
     refresh_embeddings(&index.root, &index);
     println!(
         "Indexed {} file(s) ({} other file(s) skipped) under {}",
@@ -1037,7 +1063,7 @@ fn cmd_update(path: &Path) -> anyhow::Result<()> {
     let root = path.canonicalize()?;
     let previous = RepoIndex::load(&root).ok();
     let index = build_stamped_index(&root)?;
-    let saved_to = index.save(&index.root)?;
+    let saved_to = save_index_with_sidecars(&index)?;
     refresh_embeddings(&index.root, &index);
     match previous {
         Some(prev) => {
@@ -1203,7 +1229,7 @@ fn cmd_watch(path: &Path, debounce_ms: u64, verbose: bool) -> anyhow::Result<()>
                 let count = pending.len();
                 pending.clear();
                 match build_stamped_index(&root) {
-                    Ok(index) => match index.save(&index.root) {
+                    Ok(index) => match save_index_with_sidecars(&index) {
                         Ok(_) => println!(
                             "re-indexed after {count} change(s): {} file(s)",
                             index.files.len()
@@ -2714,7 +2740,7 @@ fn claude_hook_session_start(root: &Path) -> Option<serde_json::Value> {
         // same behaviour as before.
         None => repowise_parser::build_index(root).ok().and_then(|index| {
             let file_count = index.files.len();
-            index.save(root).ok().map(|_| {
+            save_index_with_sidecars(&index).ok().map(|_| {
                 format!(
                     "repowise: indexed {file_count} file(s) for the first time. MCP tools \
                      (search_codebase, get_context, get_risk, ...) are now available."
@@ -2765,6 +2791,83 @@ fn claude_hook_pre_tool_use(input: &str) -> Option<serde_json::Value> {
     }))
 }
 
+/// How many dependents to name before falling back to a bare count.
+///
+/// This text is injected into the model's context after *every* matching
+/// edit, so it is a per-edit token tax. Naming the whole list of a
+/// heavily-imported file (70 of them, on this repo's own
+/// `repowise-core/src/lib.rs`) would cost more than it informs -- the
+/// actionable part is the magnitude, plus enough names to start looking.
+const POST_TOOL_USE_NAMED_DEPENDENTS: usize = 5;
+
+/// `PostToolUse`: after an edit, say what else imports the file that was
+/// just changed (issue #333).
+///
+/// Matched to `Edit`/`Write` only, deliberately. `Read`, `Grep` and
+/// `Glob` are far more frequent and the answer is not actionable at that
+/// moment -- the blast radius of a file matters when you have just
+/// changed it. Every match costs context tokens, so the narrow matcher
+/// is the point rather than an omission.
+///
+/// Reads the `.repowise/dependents.json` sidecar, never the index: this
+/// runs after every matching tool call, and `RepoIndex::load` is ~2s in
+/// a release build on this repo. A missing, stale, or unreadable sidecar
+/// means this says nothing at all, which is the right failure -- silence
+/// reads as "no information", a stale blast radius reads as fact.
+fn claude_hook_post_tool_use(root: &Path, input: &str) -> Option<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_str(input).ok()?;
+    let tool = parsed.get("tool_name").and_then(|v| v.as_str())?;
+    if !matches!(tool, "Edit" | "Write") {
+        return None;
+    }
+    let file = parsed
+        .pointer("/tool_input/file_path")
+        .and_then(|v| v.as_str())?;
+
+    // The sidecar is keyed by repo-relative path; the hook receives an
+    // absolute one.
+    let path = Path::new(file);
+    let relative = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+
+    let dependents = repowise_graph::load_dependents(root)?;
+    let who = dependents.of(&relative);
+    if who.is_empty() {
+        // Nothing imports it, or it isn't indexed. Either way there is
+        // no blast radius worth a line of context.
+        return None;
+    }
+
+    let named = who
+        .iter()
+        .take(POST_TOOL_USE_NAMED_DEPENDENTS)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let context = if who.len() > POST_TOOL_USE_NAMED_DEPENDENTS {
+        format!(
+            "repowise: {} file(s) import {relative}, including {named}. \
+             Use `get_context` for the full list before assuming this change is local.",
+            who.len()
+        )
+    } else {
+        format!(
+            "repowise: {} file(s) import {relative}: {named}.",
+            who.len()
+        )
+    };
+
+    Some(serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": context,
+        }
+    }))
+}
+
 /// See `ClaudeHookAction`'s own doc comments for what each event does.
 /// Both are fail-open by construction (see
 /// `claude_hook_session_start`/`claude_hook_pre_tool_use`): a hook that
@@ -2789,6 +2892,10 @@ fn cmd_claude_hook(action: ClaudeHookAction) -> anyhow::Result<()> {
             claude_hook_session_start(&root)
         }
         ClaudeHookAction::PreToolUse => claude_hook_pre_tool_use(&input),
+        ClaudeHookAction::PostToolUse => match std::env::current_dir() {
+            Ok(root) => claude_hook_post_tool_use(&root, &input),
+            Err(_) => None,
+        },
     };
 
     if let Some(output) = output {
@@ -5709,6 +5816,111 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(text.contains("indexed 0 file(s)"), "{text}");
+    }
+
+    /// A fixture where `src/lib.rs` imports `src/a.rs`, indexed with
+    /// sidecars.
+    ///
+    /// A real crate layout, not two files at the root: Rust module
+    /// resolution maps `mod a;` to a *sibling of the crate root*, so a
+    /// flat `a.rs`/`b.rs` pair resolves to nothing and every assertion
+    /// below would pass vacuously against an empty dependents map.
+    fn project_with_one_dependent(name: &str) -> PathBuf {
+        let root = fake_project(name);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "mod a;\npub fn go() { a::a() }\n").unwrap();
+        let index = repowise_parser::build_index(&root).unwrap();
+        save_index_with_sidecars(&index).unwrap();
+
+        // Guard the guard: if resolution ever stops producing this edge,
+        // the tests below must fail loudly rather than quietly assert
+        // nothing.
+        let deps = repowise_graph::load_dependents(&root).expect("fixture must have a sidecar");
+        assert_eq!(
+            deps.of("src/a.rs"),
+            ["src/lib.rs".to_string()],
+            "fixture must actually produce a resolved dependent edge"
+        );
+        root
+    }
+
+    fn post_tool_use_input(root: &Path, tool: &str, file: &str) -> String {
+        serde_json::json!({
+            "tool_name": tool,
+            "tool_input": { "file_path": root.join(file).display().to_string() },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn claude_hook_post_tool_use_reports_who_imports_the_edited_file() {
+        let root = project_with_one_dependent("post-tool-use");
+        let out = claude_hook_post_tool_use(&root, &post_tool_use_input(&root, "Edit", "src/a.rs"))
+            .expect("a.rs has a dependent, so there is something to say");
+        let text = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("1 file(s) import src/a.rs"), "{text}");
+        assert!(text.contains("src/lib.rs"), "{text}");
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    }
+
+    /// Nothing imports `b.rs`, so the hook stays silent rather than
+    /// spending context tokens to say "zero".
+    #[test]
+    fn claude_hook_post_tool_use_says_nothing_for_a_file_with_no_dependents() {
+        let root = project_with_one_dependent("post-tool-use-none");
+        assert!(claude_hook_post_tool_use(
+            &root,
+            &post_tool_use_input(&root, "Edit", "src/lib.rs")
+        )
+        .is_none());
+    }
+
+    /// The matcher is the point: `Read`/`Grep` are far more frequent and
+    /// the answer isn't actionable then, so matching them would be a
+    /// per-call token tax for nothing.
+    #[test]
+    fn claude_hook_post_tool_use_ignores_tools_other_than_edit_and_write() {
+        let root = project_with_one_dependent("post-tool-use-matcher");
+        for tool in ["Read", "Grep", "Glob", "Bash"] {
+            assert!(
+                claude_hook_post_tool_use(&root, &post_tool_use_input(&root, tool, "src/a.rs"))
+                    .is_none(),
+                "{tool} must not trigger enrichment"
+            );
+        }
+        assert!(
+            claude_hook_post_tool_use(&root, &post_tool_use_input(&root, "Write", "src/a.rs"))
+                .is_some(),
+            "Write must trigger it"
+        );
+    }
+
+    /// Without a sidecar the hook must say nothing rather than fall back
+    /// to loading the index -- that fallback is ~2s in a release build,
+    /// paid after every edit.
+    #[test]
+    fn claude_hook_post_tool_use_is_silent_without_a_sidecar() {
+        let root = project_with_one_dependent("post-tool-use-nosidecar");
+        std::fs::remove_file(repowise_graph::Dependents::path(&root)).unwrap();
+        assert!(
+            claude_hook_post_tool_use(&root, &post_tool_use_input(&root, "Edit", "src/a.rs"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claude_hook_post_tool_use_fails_open_on_malformed_input() {
+        let root = project_with_one_dependent("post-tool-use-malformed");
+        assert!(claude_hook_post_tool_use(&root, "not json").is_none());
+        assert!(claude_hook_post_tool_use(&root, "{}").is_none());
     }
 
     #[test]

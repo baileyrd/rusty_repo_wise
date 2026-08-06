@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Claude Code plugin: a `PostToolUse` hook, matched to `Edit`/`Write`,
+  reporting how many other files import the one just changed.
+  `init`/`update` write `.repowise/dependents.json` (~12 KB of resolved
+  reverse import edges, beside an 8.4 MB index) so the hook costs
+  process startup and no measurable lookup — loading the index instead
+  would be ~2s after every edit. Says nothing when the sidecar is
+  missing or older than the index, rather than reporting a stale blast
+  radius as fact (#333).
 - Dashboard: a stylesheet. The frontend had carried class hooks
   (`empty`, `error`, `mono`, `view-nav`, `badge`, `repo-card`, ...)
   since it was written but no CSS ever existed, so every view rendered

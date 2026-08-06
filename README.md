@@ -3196,9 +3196,15 @@ across releases.
   don't silently refresh behind the caller's back" stance the MCP
   server's own `_meta.stale_warning` already takes. This answers the
   issue's third open question (which hook events have cheap-enough data
-  for a synchronous hook) for `SessionStart`: `repowise status`'s
-  filesystem-mtime check needs no git history walk, so it's safe to run
-  on every session start.
+  for a synchronous hook) for `SessionStart` — but the first answer was
+  wrong, and measuring it is what corrected it. "No git history walk" is
+  true and was never the expensive part: reaching each indexed file's
+  path meant parsing the whole 8.4 MB index first, twice over, and the
+  hook measured **3.9s in a release build** on this repo. `repowise
+  init`/`update` now also write `.repowise/status.json`, a ~8 KB sidecar
+  holding exactly what a freshness check needs, and the hook reads that
+  instead: **8ms**. An index built before the sidecar existed falls back
+  to the full parse, so nothing breaks.
 - **`PreToolUse` hook** (`repowise claude-hook pre-tool-use`, matched to
   `Bash` only): the same answer to that third open question, the other
   direction — routes a command through the exact same fail-open Distill

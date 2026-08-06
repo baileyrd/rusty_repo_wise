@@ -390,6 +390,9 @@ const COMMITS_MAX_LIMIT: usize = 200;
 
 #[derive(Deserialize)]
 struct CommitsQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -417,6 +420,9 @@ struct CommitsDto {
 
 #[derive(Deserialize)]
 struct CommitRiskQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     /// A single commit hash or a `base..head` range. Defaults to `HEAD`,
     /// same as `get_change_risk`.
     revspec: Option<String>,
@@ -547,6 +553,9 @@ fn wiki_indexed_files(root: &Path, index: &RepoIndex) -> Vec<(String, PathBuf)> 
 
 #[derive(Deserialize)]
 struct WikiQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     path: String,
 }
 
@@ -593,6 +602,9 @@ struct SearchDto {
 
 #[derive(Deserialize)]
 struct SemanticSearchQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     q: String,
 }
 
@@ -679,6 +691,9 @@ const COMMUNITIES_LIMIT: usize = 150;
 
 #[derive(Deserialize)]
 struct OwnershipQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     path: String,
 }
 
@@ -1278,6 +1293,34 @@ fn resolve_repo_targets(state: &AppState, repo: Option<&str>) -> Result<Vec<Repo
     }
 }
 
+/// Resolve `?repo=` for an endpoint that answers from exactly **one**
+/// repo (issue #337).
+///
+/// A name scopes the answer, which is the half that matters: without
+/// it, picking a repo in the dashboard changed some views and silently
+/// left the rest showing the server's own root. `all` is a 400 rather
+/// than a quiet fallback -- these endpoints return un-labeled shapes,
+/// so a federated answer would have to either merge rows that can't be
+/// told apart or invent a label field the frontend doesn't read.
+/// Refusing is the honest option; the frontend keeps `all` off the
+/// views that can't serve it.
+fn resolve_scope_root(state: &AppState, repo: Option<&str>) -> Result<PathBuf, ApiError> {
+    if repo == Some("all") {
+        return Err(ApiError::bad_request(
+            "repo=\"all\" is not supported by this endpoint: it answers from a single \
+             repo and its rows carry no repo label. Name one workspace repo instead."
+                .to_string(),
+        ));
+    }
+    let mut targets = resolve_repo_targets(state, repo)?;
+    if targets.is_empty() {
+        return Err(ApiError::bad_request(
+            "the configured workspace has no repos".to_string(),
+        ));
+    }
+    Ok(targets.remove(0).root)
+}
+
 async fn get_overview(
     State(state): State<AppState>,
     Query(q): Query<RepoQuery>,
@@ -1411,9 +1454,13 @@ fn health_dto_for(root: &Path) -> Result<HealthDto, ApiError> {
     })
 }
 
-async fn get_hotspots(State(state): State<AppState>) -> Result<Json<HotspotsDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let dto = match repowise_git::GitAnalytics::collect(&state.root) {
+async fn get_hotspots(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<HotspotsDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
+    let dto = match repowise_git::GitAnalytics::collect(&root) {
         Ok(analytics) => {
             let hotspots = repowise_git::hotspots(&index, &analytics);
             HotspotsDto {
@@ -1422,7 +1469,7 @@ async fn get_hotspots(State(state): State<AppState>) -> Result<Json<HotspotsDto>
                     .iter()
                     .take(HOTSPOTS_LIMIT)
                     .map(|h| HotspotDto {
-                        file: relative(&state.root, &h.file),
+                        file: relative(&root, &h.file),
                         churn: h.churn,
                         total_complexity: h.total_complexity,
                         bugfix_commits: h.bugfix_commits,
@@ -1448,11 +1495,12 @@ async fn get_commits(
     State(state): State<AppState>,
     Query(query): Query<CommitsQuery>,
 ) -> Result<Json<CommitsDto>, ApiError> {
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
     let limit = query
         .limit
         .unwrap_or(COMMITS_DEFAULT_LIMIT)
         .clamp(1, COMMITS_MAX_LIMIT);
-    let dto = match repowise_git::collect_recent_commits(&state.root, limit) {
+    let dto = match repowise_git::collect_recent_commits(&root, limit) {
         Ok(commits) => CommitsDto {
             available: true,
             commits: commits
@@ -1484,7 +1532,8 @@ async fn get_commit_risk(
     State(state): State<AppState>,
     Query(query): Query<CommitRiskQuery>,
 ) -> Result<Json<CommitRiskDto>, ApiError> {
-    let risk = repowise_git::change_risk(&state.root, query.revspec.as_deref())?;
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
+    let risk = repowise_git::change_risk(&root, query.revspec.as_deref())?;
     Ok(Json(CommitRiskDto {
         revspec: risk.revspec,
         lines_added: risk.lines_added,
@@ -1504,16 +1553,20 @@ async fn get_commit_risk(
 /// `GitAnalytics::top_co_changed_pairs` already backs the cross-repo
 /// `/api/workspace-co-changes`; this is its single-repo counterpart,
 /// which had no dashboard/CLI/MCP surface at all before this endpoint.
-async fn get_coupling(State(state): State<AppState>) -> Result<Json<CouplingDto>, ApiError> {
-    let dto = match repowise_git::GitAnalytics::collect(&state.root) {
+async fn get_coupling(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<CouplingDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let dto = match repowise_git::GitAnalytics::collect(&root) {
         Ok(analytics) => CouplingDto {
             available: true,
             pairs: analytics
                 .top_co_changed_pairs(COUPLING_LIMIT)
                 .into_iter()
                 .map(|(a, b, count)| CouplingPairDto {
-                    file_a: relative(&state.root, &a),
-                    file_b: relative(&state.root, &b),
+                    file_a: relative(&root, &a),
+                    file_b: relative(&root, &b),
                     count,
                 })
                 .collect(),
@@ -1528,8 +1581,10 @@ async fn get_coupling(State(state): State<AppState>) -> Result<Json<CouplingDto>
 
 async fn get_external_deps(
     State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
 ) -> Result<Json<Vec<ExternalDependencyDto>>, ApiError> {
-    let deps = repowise_external_deps::collect_dependencies(&state.root)?;
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let deps = repowise_external_deps::collect_dependencies(&root)?;
     let mut deps: Vec<ExternalDependencyDto> = deps
         .into_iter()
         .map(|d| ExternalDependencyDto {
@@ -1537,7 +1592,7 @@ async fn get_external_deps(
             version: d.version,
             kind: d.kind.label(),
             ecosystem: d.ecosystem,
-            file: relative(&state.root, &d.file),
+            file: relative(&root, &d.file),
             line: d.line,
         })
         .collect();
@@ -1547,17 +1602,26 @@ async fn get_external_deps(
 
 #[derive(Deserialize)]
 struct SymbolDetailQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     file: String,
     line: usize,
 }
 
 #[derive(Deserialize)]
 struct DecisionDetailQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     id: String,
 }
 
 #[derive(Deserialize)]
 struct DecisionsQuery {
+    /// Which repo to answer from (issue #337); `all` is refused.
+    #[serde(default)]
+    repo: Option<String>,
     /// Optional relative file path -- when given, only decisions linked
     /// to that file are returned. Powers the per-file decision-tracker
     /// panel; omitted entirely, this endpoint behaves exactly as it did
@@ -1571,7 +1635,8 @@ async fn get_decisions(
     State(state): State<AppState>,
     Query(query): Query<DecisionsQuery>,
 ) -> Result<Json<DecisionsDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let (decisions, inferred_state) = repowise_adr::mine_reporting(&index)
         .unwrap_or_else(|_| (Vec::new(), repowise_adr::InferredState::NotGenerated));
     Ok(Json(DecisionsDto {
@@ -1579,13 +1644,10 @@ async fn get_decisions(
             .into_iter()
             .filter(|d| match &query.file {
                 None => true,
-                Some(rel) => d
-                    .linked_files
-                    .iter()
-                    .any(|f| relative(&state.root, f) == *rel),
+                Some(rel) => d.linked_files.iter().any(|f| relative(&root, f) == *rel),
             })
             .map(|d| DecisionDto {
-                source: source_label(&state.root, &d.source),
+                source: source_label(&root, &d.source),
                 inferred: d.source.is_inferred(),
                 confidence: d.confidence,
                 id: d.id,
@@ -1599,8 +1661,12 @@ async fn get_decisions(
     }))
 }
 
-async fn get_symbols(State(state): State<AppState>) -> Result<Json<Vec<SymbolDto>>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+async fn get_symbols(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<Vec<SymbolDto>>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let mut symbols: Vec<SymbolDto> = index
         .files
         .iter()
@@ -1611,7 +1677,7 @@ async fn get_symbols(State(state): State<AppState>) -> Result<Json<Vec<SymbolDto
             repo: None,
             name: s.name.clone(),
             kind: s.kind.label().to_string(),
-            file: relative(&state.root, &s.file),
+            file: relative(&root, &s.file),
             start_line: s.start_line,
             end_line: s.end_line,
         })
@@ -1620,9 +1686,13 @@ async fn get_symbols(State(state): State<AppState>) -> Result<Json<Vec<SymbolDto
     Ok(Json(symbols))
 }
 
-async fn get_wiki_pages(State(state): State<AppState>) -> Result<Json<Vec<String>>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let mut pages: Vec<String> = wiki_indexed_files(&state.root, &index)
+async fn get_wiki_pages(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
+    let mut pages: Vec<String> = wiki_indexed_files(&root, &index)
         .into_iter()
         .map(|(rel, _)| rel)
         .collect();
@@ -1639,14 +1709,15 @@ async fn get_wiki(
     State(state): State<AppState>,
     Query(query): Query<WikiQuery>,
 ) -> Result<Response, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let found = wiki_indexed_files(&state.root, &index)
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
+    let found = wiki_indexed_files(&root, &index)
         .into_iter()
         .find(|(rel, _)| *rel == query.path);
     let Some((rel, file)) = found else {
         return Ok((StatusCode::NOT_FOUND, "no wiki page for that path").into_response());
     };
-    let wiki_path = repowise_docs::wiki_page_path(&state.root, &file);
+    let wiki_path = repowise_docs::wiki_page_path(&root, &file);
     let content = std::fs::read_to_string(&wiki_path)?;
     Ok(Json(WikiDto { path: rel, content }).into_response())
 }
@@ -1735,6 +1806,7 @@ async fn get_search_semantic(
     State(state): State<AppState>,
     Query(query): Query<SemanticSearchQuery>,
 ) -> Result<Json<SemanticSearchDto>, ApiError> {
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
     let needle = query.q.trim().to_string();
     let Some(config) = (!needle.is_empty())
         .then(|| state.llm_config.as_ref().clone())
@@ -1746,8 +1818,8 @@ async fn get_search_semantic(
         }));
     };
 
-    let index = RepoIndex::load(&state.root)?;
-    let root = (*state.root).clone();
+    let index = RepoIndex::load(&root)?;
+    let root = root.clone();
     let retrieval = tokio::task::spawn_blocking(move || {
         repowise_llm::retrieve(&root, &index, &needle, &config)
     })
@@ -1767,8 +1839,12 @@ async fn get_search_semantic(
     }))
 }
 
-async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+async fn get_graph(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<GraphDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let graph = repowise_graph::RepoGraph::build(&index);
 
     let mut ranked: Vec<(&repowise_core::FileRecord, usize)> = index
@@ -1789,7 +1865,7 @@ async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiE
     let nodes = ranked
         .iter()
         .map(|(f, _)| GraphNodeDto {
-            id: relative(&state.root, &f.path),
+            id: relative(&root, &f.path),
             language: f.language.label().to_string(),
         })
         .collect();
@@ -1799,8 +1875,8 @@ async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiE
         for dep in graph.dependencies_of(&f.path) {
             if included.contains(dep.as_path()) {
                 edges.push(GraphEdgeDto {
-                    from: relative(&state.root, &f.path),
-                    to: relative(&state.root, &dep),
+                    from: relative(&root, &f.path),
+                    to: relative(&root, &dep),
                 });
             }
         }
@@ -1828,12 +1904,16 @@ async fn get_graph(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiE
 /// frontend can reuse its layout/rendering code unchanged; a module
 /// node's `language` is whichever language is most common among its
 /// files (ties broken alphabetically for determinism).
-async fn get_graph_modules(State(state): State<AppState>) -> Result<Json<GraphDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+async fn get_graph_modules(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<GraphDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let graph = repowise_graph::RepoGraph::build(&index);
 
     let module_of = |path: &Path| -> String {
-        let rel = relative(&state.root, path);
+        let rel = relative(&root, path);
         match rel.rfind('/') {
             Some(i) => rel[..i].to_string(),
             None => ".".to_string(),
@@ -1920,8 +2000,12 @@ async fn get_graph_modules(State(state): State<AppState>) -> Result<Json<GraphDt
 /// to code volume in each component." See
 /// `repowise_graph::community`'s module doc for the algorithm and why
 /// it's the right read of that description.
-async fn get_communities(State(state): State<AppState>) -> Result<Json<CommunitiesDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+async fn get_communities(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<CommunitiesDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let graph = repowise_graph::RepoGraph::build(&index);
 
     let nodes: Vec<PathBuf> = index.files.iter().map(|f| f.path.clone()).collect();
@@ -1972,7 +2056,7 @@ async fn get_communities(State(state): State<AppState>) -> Result<Json<Communiti
                 file_count: files.len(),
                 total_lines,
                 dominant_language,
-                files: files.iter().map(|f| relative(&state.root, f)).collect(),
+                files: files.iter().map(|f| relative(&root, f)).collect(),
             }
         })
         .collect();
@@ -1990,11 +2074,12 @@ async fn get_ownership(
     State(state): State<AppState>,
     Query(query): Query<OwnershipQuery>,
 ) -> Result<Json<OwnershipDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let Some(file) = index
         .files
         .iter()
-        .find(|f| relative(&state.root, &f.path) == query.path)
+        .find(|f| relative(&root, &f.path) == query.path)
     else {
         return Ok(Json(OwnershipDto {
             available: false,
@@ -2002,7 +2087,7 @@ async fn get_ownership(
         }));
     };
 
-    let dto = match repowise_git::ownership_of(&state.root, &file.path) {
+    let dto = match repowise_git::ownership_of(&root, &file.path) {
         Ok(owners) => OwnershipDto {
             available: true,
             owners: owners
@@ -2026,9 +2111,10 @@ async fn get_symbol_detail(
     State(state): State<AppState>,
     Query(query): Query<SymbolDetailQuery>,
 ) -> Result<Json<SymbolDetailDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let found = index.files.iter().find_map(|f| {
-        (relative(&state.root, &f.path) == query.file)
+        (relative(&root, &f.path) == query.file)
             .then(|| f.symbols.iter().find(|s| s.start_line == query.line))
             .flatten()
             .map(|s| (f, s))
@@ -2094,7 +2180,7 @@ async fn get_symbol_detail(
         found: true,
         name: sym.name.clone(),
         kind: sym.kind.label().to_string(),
-        file: relative(&state.root, &file.path),
+        file: relative(&root, &file.path),
         start_line: sym.start_line,
         end_line: sym.end_line,
         parent: sym.parent.clone(),
@@ -2110,7 +2196,8 @@ async fn get_decision_detail(
     State(state): State<AppState>,
     Query(query): Query<DecisionDetailQuery>,
 ) -> Result<Json<DecisionDetailDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+    let root = resolve_scope_root(&state, query.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let decisions = repowise_adr::mine(&index).unwrap_or_default();
 
     // The reverse lineage link: which decision (if any) this one
@@ -2138,7 +2225,7 @@ async fn get_decision_detail(
 
     Ok(Json(DecisionDetailDto {
         found: true,
-        source: source_label(&state.root, &d.source),
+        source: source_label(&root, &d.source),
         inferred: d.source.is_inferred(),
         id: d.id,
         title: d.title,
@@ -2146,19 +2233,19 @@ async fn get_decision_detail(
         superseded_by: d.superseded_by,
         supersedes,
         body: d.body,
-        linked_files: d
-            .linked_files
-            .iter()
-            .map(|f| relative(&state.root, f))
-            .collect(),
+        linked_files: d.linked_files.iter().map(|f| relative(&root, f)).collect(),
     }))
 }
 
-async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsDto>, ApiError> {
-    let shallow = repowise_git::is_shallow(&state.root);
+async fn get_stats(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<StatsDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let shallow = repowise_git::is_shallow(&root);
     // No git history is an empty state, not an error -- same as every
     // other git-backed endpoint here.
-    let Ok(commits) = repowise_git::collect_commits(&state.root) else {
+    let Ok(commits) = repowise_git::collect_commits(&root) else {
         return Ok(Json(StatsDto {
             available: false,
             shallow,
@@ -2186,10 +2273,14 @@ async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsDto>, ApiE
     }))
 }
 
-async fn get_files(State(state): State<AppState>) -> Result<Json<FilesDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+async fn get_files(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<FilesDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let graph = repowise_graph::RepoGraph::build(&index);
-    let config = load_repo_config(&state.root);
+    let config = load_repo_config(&root);
     let report = repowise_health::analyze_with_weights(&index, &graph, &config.health_weights);
 
     let scores: std::collections::HashMap<&Path, (f64, usize)> = report
@@ -2205,7 +2296,7 @@ async fn get_files(State(state): State<AppState>) -> Result<Json<FilesDto>, ApiE
         .map(|f| {
             let scored = scores.get(f.path.as_path());
             FileEntryDto {
-                path: relative(&state.root, &f.path),
+                path: relative(&root, &f.path),
                 language: f.language.label().to_string(),
                 lines: f.lines,
                 score: scored.map(|(s, _)| *s),
@@ -2227,8 +2318,10 @@ async fn get_files(State(state): State<AppState>) -> Result<Json<FilesDto>, ApiE
 
 async fn get_contributors(
     State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
 ) -> Result<Json<ContributorsDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let files_total = index.files.len();
 
     // Largest files first: they hold most of the repo's lines, so when
@@ -2248,7 +2341,7 @@ async fn get_contributors(
         // A file that can't be blamed (untracked, or no git at all) is
         // skipped rather than failing the whole endpoint -- consistent
         // with how every other git-backed surface here degrades.
-        let Ok(owners) = repowise_git::ownership_of(&state.root, &file.path) else {
+        let Ok(owners) = repowise_git::ownership_of(&root, &file.path) else {
             continue;
         };
         if owners.is_empty() {
@@ -2295,9 +2388,13 @@ async fn get_contributors(
     }))
 }
 
-async fn get_coverage(State(state): State<AppState>) -> Result<Json<CoverageDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
-    let Ok(coverage) = repowise_core::coverage::CoverageData::load(&state.root) else {
+async fn get_coverage(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<CoverageDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
+    let Ok(coverage) = repowise_core::coverage::CoverageData::load(&root) else {
         return Ok(Json(CoverageDto {
             available: false,
             files: Vec::new(),
@@ -2323,7 +2420,7 @@ async fn get_coverage(State(state): State<AppState>) -> Result<Json<CoverageDto>
                     .map(|l| l.values().filter(|c| **c > 0).count())
                     .unwrap_or(0);
                 files.push(FileCoverageDto {
-                    path: relative(&state.root, &file.path),
+                    path: relative(&root, &file.path),
                     percent,
                     lines_known,
                     lines_hit,
@@ -2497,8 +2594,12 @@ async fn get_security(
     }))
 }
 
-async fn get_doc_coverage(State(state): State<AppState>) -> Result<Json<DocCoverageDto>, ApiError> {
-    let index = RepoIndex::load(&state.root)?;
+async fn get_doc_coverage(
+    State(state): State<AppState>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<DocCoverageDto>, ApiError> {
+    let root = resolve_scope_root(&state, q.repo.as_deref())?;
+    let index = RepoIndex::load(&root)?;
     let report = repowise_docs::check_freshness(&index);
     let (missing, fresh, stale) = report.counts();
 
@@ -2506,7 +2607,7 @@ async fn get_doc_coverage(State(state): State<AppState>) -> Result<Json<DocCover
         .entries
         .into_iter()
         .map(|e| DocCoverageEntryDto {
-            file: relative(&state.root, &e.file),
+            file: relative(&root, &e.file),
             status: freshness_status_label(e.status),
         })
         .collect();
@@ -3724,6 +3825,110 @@ mod tests {
             json["most_depended_on"].as_array().unwrap().is_empty(),
             "within-repo dependent counts must not be ranked across repos"
         );
+    }
+
+    /// The bug this fixes: the frontend injects `?repo=` into *every*
+    /// GET, but an endpoint that never declared the parameter let serde
+    /// discard it and answered from the server's own root. Picking a
+    /// repo therefore changed some views and silently left the rest
+    /// showing a different repo, side by side, with no indication.
+    ///
+    /// `repo-a` has 1 file and `repo-b` has 2, and the server's own
+    /// root here is `repo-a` -- so "honoured the scope" and "ignored it"
+    /// give different numbers, which is the whole point.
+    #[tokio::test]
+    async fn every_scoped_endpoint_answers_from_the_named_repo_not_the_servers_own_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        // (uri, json pointer to a count, expected value for repo-b)
+        let cases: &[(&str, &str, u64)] = &[
+            ("/api/files?repo=repo-b", "/files", 2),
+            ("/api/symbols?repo=repo-b", "", 2),
+            ("/api/graph?repo=repo-b", "/nodes", 2),
+            ("/api/doc-coverage?repo=repo-b", "/entries", 2),
+        ];
+
+        for (uri, pointer, expected) in cases {
+            let (status, json) = get_ws(own.clone(), ws.clone(), uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            let arr = if pointer.is_empty() {
+                json.as_array().unwrap_or_else(|| panic!("{uri}: not an array"))
+            } else {
+                json.pointer(pointer)
+                    .and_then(|v| v.as_array())
+                    .unwrap_or_else(|| panic!("{uri}: no array at {pointer}"))
+            };
+            assert_eq!(
+                arr.len() as u64,
+                *expected,
+                "{uri} must answer from repo-b (2 files), not the server's own repo-a (1)"
+            );
+        }
+    }
+
+    /// An unscoped call is unchanged: still the server's own root.
+    #[tokio::test]
+    async fn an_unscoped_scoped_endpoint_still_answers_from_the_servers_own_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, json) = get_ws(own, ws, "/api/files").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["files"].as_array().unwrap().len(),
+            1,
+            "own root is repo-a, which has 1 file"
+        );
+    }
+
+    /// `all` is refused rather than quietly answering from one repo:
+    /// these endpoints return un-labeled rows, so a federated answer
+    /// would merge rows nothing could tell apart.
+    #[tokio::test]
+    async fn scoped_endpoints_refuse_repo_all_with_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        for uri in [
+            "/api/files?repo=all",
+            "/api/hotspots?repo=all",
+            "/api/symbols?repo=all",
+            "/api/coverage?repo=all",
+            "/api/graph?repo=all",
+            "/api/stats?repo=all",
+            "/api/contributors?repo=all",
+            "/api/external-deps?repo=all",
+            "/api/doc-coverage?repo=all",
+            "/api/coupling?repo=all",
+            "/api/communities?repo=all",
+            "/api/decisions?repo=all",
+            "/api/commits?repo=all",
+            "/api/graph-modules?repo=all",
+            "/api/wiki-pages?repo=all",
+        ] {
+            let (status, _) = get_ws(own.clone(), ws.clone(), uri).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{uri} must refuse `all`, not silently pick a repo"
+            );
+        }
+    }
+
+    /// An unknown repo name is a 400 on the scoped endpoints too, not a
+    /// silent fallback to the server's own root.
+    #[tokio::test]
+    async fn scoped_endpoints_reject_an_unknown_repo_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let (status, _) = get_ws(own, ws, "/api/files?repo=nope").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// `/api/search` federates too (issue #337). The fixture has

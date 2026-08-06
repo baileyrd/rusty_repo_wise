@@ -73,6 +73,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- Dashboard: picking a repo in the header changed some views and
+  silently left the rest showing the server's own repo, side by side,
+  with no indication — the frontend sent `?repo=` on every request but
+  most endpoints never declared the parameter, so serde discarded it.
+  Every index- and git-derived endpoint now honours `?repo=<name>`.
+  `?repo=all` is refused with a 400 on the ones whose rows carry no
+  repo label, and the frontend keeps "All repos" from reaching them
+  (#337).
 - `get_risk` collected git analytics from the MCP server's own root
   rather than from the repo being assessed. Before `repo` existed those
   were always the same path, so the bug was unreachable; adding the

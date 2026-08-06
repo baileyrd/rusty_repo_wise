@@ -2142,6 +2142,35 @@ enum Route {
     NotFound,
 }
 
+/// Whether a view can answer under `repo=all` (issue #337).
+///
+/// The federating endpoints return rows that carry their own repo
+/// label, so merging them stays unambiguous. The rest return un-labeled
+/// shapes and the API refuses `all` with a 400 rather than silently
+/// picking a repo -- so the frontend must not ask. Views not listed
+/// here render an explanation instead of firing a request that is
+/// guaranteed to fail.
+///
+/// Workspace-level views are included because they were always about
+/// the whole workspace and never took a repo scope at all.
+fn route_supports_all_repos(route: Route) -> bool {
+    matches!(
+        route,
+        Route::Overview
+            | Route::Health
+            | Route::DeadCode
+            | Route::RefactorCandidates
+            | Route::Security
+            | Route::Workspace
+            | Route::CoChanges
+            | Route::Conformance
+            | Route::Contracts
+            | Route::Settings
+            | Route::Usage
+            | Route::Costs
+    )
+}
+
 /// Every routable view, in nav order, as `(route, slug, label)`.
 ///
 /// Single source of truth: the nav, the parser, and the formatter all
@@ -4866,7 +4895,20 @@ fn App() -> impl IntoView {
         </nav>
         <main class="app-main">
         <FileDetailPanel wiki_pages=wiki_pages selected=selected />
-        {move || match (current.get(), detail_id.get()) {
+        {move || {
+        // `repo=all` reaches views whose endpoints refuse it with a
+        // 400 (issue #337). Saying so beats firing a request that is
+        // guaranteed to fail and rendering "server returned 400".
+        if fetch_repo().as_deref() == Some("all") && !route_supports_all_repos(current.get()) {
+            return view! {
+                <p class="empty">
+                    "This view answers from one repo at a time. Pick a single \
+                     repo in the header to see it."
+                </p>
+            }
+            .into_any();
+        }
+        match (current.get(), detail_id.get()) {
             (Route::Symbols, Some(id)) => {
                 view! { <SymbolDetailSection id=id selected=selected /> }.into_any()
             }
@@ -4912,6 +4954,7 @@ fn App() -> impl IntoView {
             }
             .into_any(),
             },
+        }
         }}
         </main>
     }

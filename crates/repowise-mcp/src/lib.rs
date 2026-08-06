@@ -2943,16 +2943,15 @@ impl RepowiseServer {
         // find (issue #337).
         let mut dependencies = Vec::new();
         for target in &targets {
-            let deps =
-                repowise_external_deps::collect_dependencies(&target.root).map_err(|e| {
-                    ErrorData::invalid_params(
-                        format!(
-                            "failed to collect dependencies at {}: {e}",
-                            target.root.display()
-                        ),
-                        None,
-                    )
-                })?;
+            let deps = repowise_external_deps::collect_dependencies(&target.root).map_err(|e| {
+                ErrorData::invalid_params(
+                    format!(
+                        "failed to collect dependencies at {}: {e}",
+                        target.root.display()
+                    ),
+                    None,
+                )
+            })?;
             dependencies.extend(deps.into_iter().map(|d| ExternalDependencyOutput {
                 repo: target.repo.clone(),
                 name: d.name,
@@ -3871,7 +3870,9 @@ mod tests {
         .unwrap();
 
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_external_deps(Parameters(RepoOnlyParams::default())).unwrap();
+        let Json(Envelope { data, .. }) = server
+            .get_external_deps(Parameters(RepoOnlyParams::default()))
+            .unwrap();
 
         assert_eq!(data.dependencies.len(), 1);
         assert_eq!(data.dependencies[0].name, "serde");
@@ -3886,7 +3887,9 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
 
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_external_deps(Parameters(RepoOnlyParams::default())).unwrap();
+        let Json(Envelope { data, .. }) = server
+            .get_external_deps(Parameters(RepoOnlyParams::default()))
+            .unwrap();
 
         assert!(data.dependencies.is_empty());
     }
@@ -4464,7 +4467,9 @@ mod tests {
         build_and_save_index(&root);
 
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_doc_coverage(Parameters(RepoOnlyParams::default())).unwrap();
+        let Json(Envelope { data, .. }) = server
+            .get_doc_coverage(Parameters(RepoOnlyParams::default()))
+            .unwrap();
 
         assert_eq!(data.missing, 1);
         assert_eq!(data.fresh, 0);
@@ -4485,13 +4490,17 @@ mod tests {
         repowise_docs::generate(&index, &graph, &health).unwrap();
 
         let server = RepowiseServer::new(root.clone(), None);
-        let Json(Envelope { data, .. }) = server.get_doc_coverage(Parameters(RepoOnlyParams::default())).unwrap();
+        let Json(Envelope { data, .. }) = server
+            .get_doc_coverage(Parameters(RepoOnlyParams::default()))
+            .unwrap();
         assert_eq!(data.fresh, 1);
         assert_eq!(data.entries[0].status, "fresh");
 
         std::fs::write(root.join("solo.py"), "def solo():\n    return 2\n").unwrap();
         let server = RepowiseServer::new(root, None);
-        let Json(Envelope { data, .. }) = server.get_doc_coverage(Parameters(RepoOnlyParams::default())).unwrap();
+        let Json(Envelope { data, .. }) = server
+            .get_doc_coverage(Parameters(RepoOnlyParams::default()))
+            .unwrap();
         assert_eq!(data.stale, 1);
         assert_eq!(data.entries[0].status, "stale");
     }

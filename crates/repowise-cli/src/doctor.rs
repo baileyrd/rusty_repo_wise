@@ -82,6 +82,7 @@ pub fn run_checks(root: &Path) -> Vec<Check> {
     checks.push(check_github_token());
     checks.push(check_llm_endpoint());
     checks.push(check_webhook_secret());
+    checks.push(check_workspace_env());
     checks
 }
 
@@ -172,6 +173,40 @@ fn check_llm_endpoint() -> Check {
 /// every command, this one to a single opt-in server flag, but it's
 /// still worth surfacing here rather than only failing loudly the first
 /// time someone points a forge's webhook at an unconfigured server.
+/// `REPOWISE_WORKSPACE` (issue #333): how `serve`/`serve-dashboard`
+/// find a workspace file when no `--workspace` flag is passed -- the
+/// only route available to the Claude Code plugin, whose `.mcp.json`
+/// args are static.
+fn check_workspace_env() -> Check {
+    match std::env::var("REPOWISE_WORKSPACE") {
+        Ok(v) if !v.trim().is_empty() => {
+            let path = std::path::PathBuf::from(v.trim());
+            if path.exists() {
+                Check::pass(
+                    "REPOWISE_WORKSPACE",
+                    format!("set to {} -- workspace tools and `repo=` are available to `serve`/`serve-dashboard` without the flag", path.display()),
+                )
+            } else {
+                // A hard fail, not a warn: `serve` refuses to start on
+                // this rather than quietly running single-repo, so
+                // `doctor` must not imply it is merely suboptimal.
+                Check::fail(
+                    "REPOWISE_WORKSPACE",
+                    format!("set to {}, which does not exist", path.display()),
+                    "unset it, or point it at a workspace TOML file -- `serve` and \
+                     `serve-dashboard` refuse to start rather than quietly running single-repo",
+                )
+            }
+        }
+        _ => Check::warn(
+            "REPOWISE_WORKSPACE",
+            "not set -- `serve`/`serve-dashboard` run single-repo unless given `--workspace`, \
+             so MCP tools' `repo` parameter and `list_repos` report no workspace configured",
+            "optional: only needed for multi-repo workspaces",
+        ),
+    }
+}
+
 fn check_webhook_secret() -> Check {
     match std::env::var("REPOWISE_WEBHOOK_SECRET") {
         Ok(v) if !v.is_empty() => Check::pass(

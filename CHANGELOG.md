@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `REPOWISE_WORKSPACE` is honoured by `repowise serve` and
+  `serve-dashboard` when no `--workspace` flag is given. The Claude Code
+  plugin starts the MCP server from a static `.mcp.json` whose `args`
+  can't be conditional, so every `repo` parameter added in #337 answered
+  "requires a workspace" from inside the plugin and none of the
+  federated querying was reachable. An explicit flag still wins, and a
+  path that doesn't exist is a hard error rather than a quiet fall back
+  to single-repo mode. `repowise doctor` reports it (#333).
 - `repowise generate-agents-md`: the same managed block
   `generate-claude-md` writes, targeting a repo-root `AGENTS.md` — the
   cross-agent convention Codex and opencode read. Identical marker

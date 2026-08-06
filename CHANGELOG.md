@@ -83,6 +83,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- `serve-dashboard` warms its index and health caches in the background
+  at startup, so the first page load is fast too rather than paying the
+  ~4-6s the caches were built to avoid. Only the server's own repo;
+  workspace members stay lazy, since eagerly indexing every configured
+  repo would turn startup into a long CPU burn for repos that may never
+  be opened (#398).
 - The dashboard server computes each repo's health report once and
   reuses it across requests, instead of `/api/files` and `/api/health`
   each recomputing one every time. Both endpoints now answer in

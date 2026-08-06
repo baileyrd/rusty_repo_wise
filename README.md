@@ -3214,6 +3214,17 @@ across releases.
   JSON contract (`tool_input.command` in, `hookSpecificOutput.updatedInput`
   out) instead of a raw stdin/stdout pipe. `distill_apply` is the one
   function backing both surfaces, so they can't drift apart.
+- **`PostToolUse` hook** (`repowise claude-hook post-tool-use`, matched
+  to `Edit`/`Write` only): after a file is changed, reports how many
+  other files import it — the blast radius of the edit just made. Reads
+  `.repowise/dependents.json`, a ~12 KB sidecar of resolved reverse
+  import edges written at index time beside the 8.4 MB index, so the
+  hook costs process startup (~10-25ms) and no measurable lookup. It
+  says **nothing** when that sidecar is missing or older than the index:
+  silence reads as "no information", a stale blast radius reads as fact.
+  Matched narrowly on purpose — `Read`/`Grep`/`Glob` are far more
+  frequent and the answer isn't actionable at that moment, and every
+  match is a per-call context-token cost.
 - **A skill** (`skills/repowise-overview/SKILL.md`): which MCP tool or
   CLI command answers which kind of question, so the model reaches for
   `search_codebase` over `Grep`, `get_context` before editing, `get_risk`

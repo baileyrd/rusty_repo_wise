@@ -7,12 +7,14 @@
 
 mod community;
 mod cross_repo;
+pub mod dependents;
 mod modpath;
 mod search;
 
 pub mod json_graph;
 
 pub use community::detect_communities;
+pub use dependents::{load_dependents, write_dependents, Dependents};
 pub use search::{classify, parse_symbol_kind, path_matches, FileKind, SearchMode};
 
 pub use cross_repo::{

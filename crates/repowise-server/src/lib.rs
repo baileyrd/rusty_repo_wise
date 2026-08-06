@@ -1545,6 +1545,30 @@ async fn get_health(
     Ok(Json(dto))
 }
 
+/// The index-derived health report, with no git input (issue #398).
+///
+/// Shared by `/api/files` and by startup warming so the two cannot
+/// build different cache keys for the same work -- a warm pass that
+/// filled a key no request ever looks up would be silently useless.
+fn plain_health_report(
+    state: &AppState,
+    root: &Path,
+    index: &RepoIndex,
+    graph: &repowise_graph::RepoGraph,
+) -> Arc<repowise_health::HealthReport> {
+    let config = load_repo_config(root);
+    // No git input, so the index mtime is a complete freshness signal.
+    state.health_cache.get_or_insert(
+        HealthKey {
+            root: root.to_path_buf(),
+            mtime: index_mtime(root).unwrap_or(std::time::UNIX_EPOCH),
+            weights: format!("{:?}", config.health_weights),
+            head: None,
+        },
+        || repowise_health::analyze_with_weights(index, graph, &config.health_weights),
+    )
+}
+
 /// One repo's health report (issue #337) -- shared by the unscoped
 /// path and by each entry of a federated `?repo=all` answer, so the
 /// two can't compute it differently.
@@ -2439,18 +2463,7 @@ async fn get_files(
 ) -> Result<Json<FilesDto>, ApiError> {
     let root = resolve_scope_root(&state, q.repo.as_deref())?;
     let (index, graph) = state.index_cache.get(&root)?;
-    let config = load_repo_config(&root);
-    // No git input, so the index mtime is a complete freshness signal
-    // (issue #398).
-    let report = state.health_cache.get_or_insert(
-        HealthKey {
-            root: root.clone(),
-            mtime: index_mtime(&root).unwrap_or(std::time::UNIX_EPOCH),
-            weights: format!("{:?}", config.health_weights),
-            head: None,
-        },
-        || repowise_health::analyze_with_weights(&index, &graph, &config.health_weights),
-    );
+    let report = plain_health_report(&state, &root, &index, &graph);
 
     let scores: std::collections::HashMap<&Path, (f64, usize)> = report
         .file_scores
@@ -3551,11 +3564,15 @@ async fn post_webhook_gitlab(
 /// built `repowise-web` frontend (e.g. `crates/repowise-web/dist` after
 /// `trunk build`) as a fallback for any path the JSON API doesn't claim.
 pub fn app(root: PathBuf, static_dir: Option<PathBuf>, workspace: Option<PathBuf>) -> Router {
+    build_router(build_state(root, workspace), static_dir)
+}
+
+fn build_state(root: PathBuf, workspace: Option<PathBuf>) -> AppState {
     let workspace_state_dir = workspace
         .as_deref()
         .map(repowise_workspace::workspace_state_dir);
     let workspace_repos = workspace.and_then(|path| repowise_workspace::load_resolved(&path).ok());
-    let state = AppState {
+    AppState {
         root: Arc::new(root),
         llm_config: Arc::new(repowise_llm::LlmConfig::from_env()),
         workspace_repos: Arc::new(workspace_repos),
@@ -3565,8 +3582,7 @@ pub fn app(root: PathBuf, static_dir: Option<PathBuf>, workspace: Option<PathBuf
         webhook_secret: Arc::new(std::env::var("REPOWISE_WEBHOOK_SECRET").ok()),
         index_cache: IndexCache::default(),
         health_cache: HealthCache::default(),
-    };
-    build_router(state, static_dir)
+    }
 }
 
 fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
@@ -3629,6 +3645,33 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
 /// `tokio::runtime::Runtime` it builds just for this command, the same
 /// "rest of the CLI stays synchronous" pattern `repowise serve` (the
 /// MCP server) already uses.
+/// Fill the caches for `root` so the first request doesn't pay for
+/// them (issue #398).
+///
+/// Everything after #400/#401/#402 is milliseconds *once warm*, but the
+/// first request per repo still paid the full ~4-6s -- which is exactly
+/// the request a person is sitting in front of, having just run
+/// `serve-dashboard` and opened the page.
+///
+/// Both health shapes are warmed through the same helpers the handlers
+/// use, so a warm pass can't fill a key no request looks up.
+///
+/// Only this server's own root. A workspace can name any number of
+/// repos, and eagerly indexing all of them at startup would turn
+/// `serve-dashboard` into a long CPU burn for repos the user may never
+/// open; those stay lazy, paying the cold cost once on first selection.
+fn warm_caches(state: &AppState) {
+    let root = state.root.as_ref().clone();
+    let Ok((index, graph)) = state.index_cache.get(&root) else {
+        // No index yet (never `repowise init`ed). Not an error here --
+        // the endpoints report it per request, and warming is best
+        // effort.
+        return;
+    };
+    plain_health_report(state, &root, &index, &graph);
+    let _ = health_dto_for(state, &root);
+}
+
 pub async fn serve(
     root: PathBuf,
     addr: SocketAddr,
@@ -3636,7 +3679,15 @@ pub async fn serve(
     workspace: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(root, static_dir, workspace)).await?;
+    let state = build_state(root, workspace);
+
+    // Off the async runtime's worker threads: this is seconds of pure
+    // CPU, and running it inline would stall every request the server
+    // is meanwhile accepting -- the opposite of the point.
+    let warming = state.clone();
+    tokio::task::spawn_blocking(move || warm_caches(&warming));
+
+    axum::serve(listener, build_router(state, static_dir)).await?;
     Ok(())
 }
 
@@ -4048,6 +4099,61 @@ mod tests {
             "a changed index must not be served from cache"
         );
         assert_eq!(fresh.files.len(), 2, "the reload must see the new file");
+    }
+
+    /// Warming has to fill the *same* cache keys the handlers look up,
+    /// or it is silently useless: it would burn CPU at startup and the
+    /// first request would still pay full freight (issue #398). So this
+    /// asserts the handlers find hits afterwards, not merely that
+    /// warming ran.
+    #[tokio::test]
+    async fn warming_fills_the_keys_the_handlers_actually_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        index_dir_at(&root);
+
+        let state = build_state(root.clone(), None);
+        assert_eq!(
+            state.health_cache.0.lock().unwrap().len(),
+            0,
+            "nothing cached before warming"
+        );
+
+        warm_caches(&state);
+
+        // Both shapes, under the keys the two endpoints construct.
+        assert_eq!(
+            state.health_cache.0.lock().unwrap().len(),
+            2,
+            "warming must fill both the plain and the org-signals shape"
+        );
+
+        // And the handlers hit them rather than recomputing: reaching
+        // into the cache with the handlers' own helpers must not add a
+        // third entry.
+        let (index, graph) = state.index_cache.get(&root).unwrap();
+        plain_health_report(&state, &root, &index, &graph);
+        let _ = health_dto_for(&state, &root);
+        assert_eq!(
+            state.health_cache.0.lock().unwrap().len(),
+            2,
+            "the handlers must reuse the warmed entries, not add new keys"
+        );
+    }
+
+    /// A root with no index at all must not panic or hang startup --
+    /// warming is best effort, and the endpoints report the problem
+    /// per request.
+    #[tokio::test]
+    async fn warming_an_unindexed_root_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let state = build_state(root, None);
+        warm_caches(&state);
+
+        assert_eq!(state.health_cache.0.lock().unwrap().len(), 0);
     }
 
     /// The health cache must key the two report shapes apart, and only

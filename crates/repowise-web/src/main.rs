@@ -395,9 +395,25 @@ struct WikiPage {
     content: String,
 }
 
+/// A matching file plus the repo it came from (issue #337).
+///
+/// `SearchResults::files` is a flat `Vec<String>`, and under
+/// `?repo=all` two repos can both return `src/lib.rs` -- the same
+/// string twice, with nothing to tell them apart. `matches` carries
+/// the label, so this is what gets rendered.
+#[derive(Deserialize, Clone, Debug)]
+struct FileMatch {
+    /// Absent on an unscoped search.
+    #[serde(default)]
+    repo: Option<String>,
+    file: String,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 struct SearchResults {
     files: Vec<String>,
+    #[serde(default)]
+    matches: Vec<FileMatch>,
     symbols: Vec<Symbol>,
 }
 
@@ -598,6 +614,11 @@ struct ChatTurn {
 #[derive(Serialize)]
 struct ChatRequest {
     history: Vec<ChatTurn>,
+    /// Chat is the one repo-scoped endpoint that is a POST, so
+    /// `fetch_json_with_query`'s `?repo=` injection never covered it
+    /// (issue #337) -- the scope has to travel in the body instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
 }
 
 /// Mirrors `repowise-server`'s `UpdateHealthWeightsDto` wire shape
@@ -2126,6 +2147,35 @@ enum Route {
     NotFound,
 }
 
+/// Whether a view can answer under `repo=all` (issue #337).
+///
+/// The federating endpoints return rows that carry their own repo
+/// label, so merging them stays unambiguous. The rest return un-labeled
+/// shapes and the API refuses `all` with a 400 rather than silently
+/// picking a repo -- so the frontend must not ask. Views not listed
+/// here render an explanation instead of firing a request that is
+/// guaranteed to fail.
+///
+/// Workspace-level views are included because they were always about
+/// the whole workspace and never took a repo scope at all.
+fn route_supports_all_repos(route: Route) -> bool {
+    matches!(
+        route,
+        Route::Overview
+            | Route::Health
+            | Route::DeadCode
+            | Route::RefactorCandidates
+            | Route::Security
+            | Route::Workspace
+            | Route::CoChanges
+            | Route::Conformance
+            | Route::Contracts
+            | Route::Settings
+            | Route::Usage
+            | Route::Costs
+    )
+}
+
 /// Every routable view, in nav order, as `(route, slug, label)`.
 ///
 /// Single source of truth: the nav, the parser, and the formatter all
@@ -2364,6 +2414,7 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
                 return Ok::<CombinedSearchResults, String>(CombinedSearchResults {
                     substring: SearchResults {
                         files: Vec::new(),
+                        matches: Vec::new(),
                         symbols: Vec::new(),
                     },
                     semantic: None,
@@ -2449,18 +2500,28 @@ fn SearchBox(selected: RwSignal<Option<String>>) -> impl IntoView {
                             <p class="empty">
                                 {format!(
                                     "{} file(s), {} symbol(s).",
-                                    res.files.len(), res.symbols.len(),
+                                    res.matches.len(), res.symbols.len(),
                                 )}
                             </p>
                             <ul class="search-results">
-                                {res.files.into_iter().map(|f| {
-                                    let target = f.clone();
+                                {res.matches.into_iter().map(|m| {
+                                    let target = m.file.clone();
+                                    let label = m.file.clone();
+                                    // Under `repo=all` the same path can
+                                    // come back from several repos; the
+                                    // badge is the only thing that tells
+                                    // two identical rows apart.
+                                    let repo = m.repo.clone();
                                     view! {
                                         <li>
+                                            {repo.map(|r| view! {
+                                                <span class="badge">{r}</span>
+                                                " "
+                                            })}
                                             <a href="#" on:click=move |ev| {
                                                 ev.prevent_default();
                                                 selected.set(Some(target.clone()));
-                                            }>{f}</a>
+                                            }>{label}</a>
                                         </li>
                                     }
                                 }).collect::<Vec<_>>()}
@@ -4542,6 +4603,7 @@ fn ChatSection() -> impl IntoView {
                 "/api/chat",
                 &ChatRequest {
                     history: request_history,
+                    repo: fetch_repo(),
                 },
             )
             .await;
@@ -4839,7 +4901,20 @@ fn App() -> impl IntoView {
         </nav>
         <main class="app-main">
         <FileDetailPanel wiki_pages=wiki_pages selected=selected />
-        {move || match (current.get(), detail_id.get()) {
+        {move || {
+        // `repo=all` reaches views whose endpoints refuse it with a
+        // 400 (issue #337). Saying so beats firing a request that is
+        // guaranteed to fail and rendering "server returned 400".
+        if fetch_repo().as_deref() == Some("all") && !route_supports_all_repos(current.get()) {
+            return view! {
+                <p class="empty">
+                    "This view answers from one repo at a time. Pick a single \
+                     repo in the header to see it."
+                </p>
+            }
+            .into_any();
+        }
+        match (current.get(), detail_id.get()) {
             (Route::Symbols, Some(id)) => {
                 view! { <SymbolDetailSection id=id selected=selected /> }.into_any()
             }
@@ -4885,6 +4960,7 @@ fn App() -> impl IntoView {
             }
             .into_any(),
             },
+        }
         }}
         </main>
     }

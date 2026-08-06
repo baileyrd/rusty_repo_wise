@@ -30,12 +30,12 @@ convention from issues like #64 and #319). **Priority for this repo's
 near-term work is parity** — closing these before starting anything not
 tracked back to the upstream reference.
 
-**Status as of 2026-08-05:** of the 20 tracked gaps below, 3 remain open
+**Status as of 2026-08-06:** of the 20 tracked gaps below, 2 remain open
 ([#333](https://github.com/baileyrd/rusty_repo_wise/issues/333),
-[#335](https://github.com/baileyrd/rusty_repo_wise/issues/335),
-[#337](https://github.com/baileyrd/rusty_repo_wise/issues/337)) — each
-partially closed, with the remainder needing a human decision. The other
-17 are closed or closed-not-planned. Work shipped in the same period that
+[#335](https://github.com/baileyrd/rusty_repo_wise/issues/335)) — both
+partially closed, with the remainder needing a human decision.
+[#337](https://github.com/baileyrd/rusty_repo_wise/issues/337) is now
+fully closed. The other 18 are closed or closed-not-planned. Work shipped in the same period that
 is *not* parity work is listed separately below, so this file isn't
 mistaken for a full changelog.
 
@@ -125,7 +125,7 @@ what the port has gained.
 **This deviated from the priority stated above.** That line reads
 "closing these before starting anything not tracked back to the upstream
 reference", and three parity gaps (#333, #335, #337) stayed open
-throughout. Recorded rather than quietly absorbed, since the priority is
+throughout. #337 has since been closed; #333 and #335 remain open. Recorded rather than quietly absorbed, since the priority is
 either real or it should be rewritten.
 
 Two corrections these changes forced, worth keeping visible because they
@@ -150,7 +150,7 @@ were wrong in the issue text before they were right in the code:
 | 3 | GitHub PR bot | [#334](https://github.com/baileyrd/rusty_repo_wise/issues/334) | partially closed via PR #375 — `.github/actions/pr-risk-comment`, a self-hosted composite GitHub Action (not a hosted App — resolves the issue's own hosting-scope question) wrapping the existing `repowise risk` command as-is and posting/updating a single PR comment; dogfooded on this repo's own PRs via `.github/workflows/pr-risk-comment.yml`; health-delta and decisions-touched (upstream's other two PR-bot signals) left open, see the issue |
 | 4 | Webhook- and polling-triggered auto-sync | [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335) | partially closed via PR #345 — `POST /api/webhook/github`/`/gitlab` added (both trigger the shared reindex job, `REPOWISE_WEBHOOK_SECRET`-gated); polling deliberately declined, see the issue |
 | 5 | Native multi-provider LLM support in `repowise-llm` | [#336](https://github.com/baileyrd/rusty_repo_wise/issues/336) | closed, not planned — `rusty_provider` is the accepted permanent answer, see the issue |
-| 6 | Federated workspace queries (`repo="all"`) | [#337](https://github.com/baileyrd/rusty_repo_wise/issues/337) | partially closed via PR #348 — `search_codebase`'s new `repo` parameter (named repo or `"all"`) federates lexical search across the MCP server's configured workspace; extending to other tools/the dashboard left open, see the issue |
+| 6 | Federated workspace queries (`repo="all"`) | [#337](https://github.com/baileyrd/rusty_repo_wise/issues/337) | **closed** — every MCP tool now takes `repo` or is workspace-level by construction, and every repo-scoped dashboard endpoint honours `?repo=`. `"all"` federates where rows can carry a repo label; where the answer is a single subject or an un-labeled list, `repo` selects which repo and `"all"` is refused with a reason rather than silently answering from one. Landed across PRs #348, #391, #393, #394, #399 and this round |
 | 7 | Cross-repo import resolution beyond Rust | [#338](https://github.com/baileyrd/rusty_repo_wise/issues/338) | closed via PR #343 — now covers Rust/Python/Java/Kotlin/Scala/Go/C#/PHP |
 | 8 | Contract breaking-change detection | [#339](https://github.com/baileyrd/rusty_repo_wise/issues/339) | closed via PR #344 — persisted `.repowise-workspace/contracts.json` snapshot, diffed every `workspace-contracts` run |
 | 9 | Git-worktree auto-seeding for incremental indexing | [#340](https://github.com/baileyrd/rusty_repo_wise/issues/340) | closed, not planned — this port has no incremental re-indexing at all yet, even for the common case; building it narrowly for worktrees first is the wrong order, see the issue |

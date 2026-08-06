@@ -14,11 +14,30 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `--workspace` and more than one repo. The choice lives in the URL
   hash, so it survives navigation and travels in a shared link
   (partial #337).
+- Dashboard API: `/api/search` gained `?repo=` as well. It was
+  previously skipped because its `files` field is a bare string list
+  and a federated search can return the same relative path from two
+  repos. `files` is kept exactly as it was; a new `matches` array
+  carries the same paths *with* the repo that produced each one, and
+  the search box renders that instead (#337).
+- MCP: `get_doc_coverage` and `get_external_deps` gained `repo`,
+  federating with per-entry labels — doc coverage's three counts sum
+  across repos (every file lands in exactly one status), and external
+  deps are deliberately **not** de-duplicated, so two repos pinning
+  different versions of the same package stays visible (#337).
+- MCP: `get_coupling`, `get_commits`, `get_why`, `get_answer`, and
+  `get_change_risk` gained `repo` as a scope selector, completing the
+  tool surface — every MCP tool now either takes `repo` or is
+  workspace-level by construction (`list_repos`, `get_architecture`)
+  (#337).
+- MCP: `get_context`, `get_symbol`, and `get_risk` gained `repo` as a
+  *scope selector*. `"all"` is rejected for anything answering about a
+  single file or symbol, since there is nothing to federate; `get_risk`
+  accepts it only in repo-wide mode, applying `top_n` per repo and
+  grouping rather than re-ranking across repos (#337).
 - Dashboard API: `/api/health`, `/api/dead-code`,
-  `/api/refactor-candidates`, and `/api/security` gained `?repo=` too —
-  every federatable endpoint now honours it. `/api/search` is
-  deliberately excluded: its `files` field is a bare string list, so
-  labelling matches would change a type the frontend consumes (#337).
+  `/api/refactor-candidates`, and `/api/security` gained `?repo=` too
+  (#337).
 - Dashboard API: `GET /api/overview` gained a `?repo=` query parameter
   (a named workspace repo, or `all` to federate), mirroring the MCP
   tool — federated responses add a `repos` breakdown, and an unknown
@@ -59,6 +78,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- Dashboard: picking a repo in the header changed some views and
+  silently left the rest showing the server's own repo, side by side,
+  with no indication — the frontend sent `?repo=` on every request but
+  most endpoints never declared the parameter, so serde discarded it.
+  Every index- and git-derived endpoint now honours `?repo=<name>`.
+  `?repo=all` is refused with a 400 on the ones whose rows carry no
+  repo label, and the frontend keeps "All repos" from reaching them.
+  `POST /api/chat` takes the scope in its body, since the frontend's
+  query-parameter injection only ever covered GETs (#337).
+- `get_risk` collected git analytics from the MCP server's own root
+  rather than from the repo being assessed. Before `repo` existed those
+  were always the same path, so the bug was unreachable; adding the
+  parameter would have made it reachable, and it is fixed in the same
+  change (#337).
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD

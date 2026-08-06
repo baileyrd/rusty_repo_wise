@@ -3996,12 +3996,20 @@ route-shaped string that isn't actually a route) are both expected.
 - `repowise serve-dashboard --workspace <path>` gains `GET
   /api/workspace-contracts` and the dashboard gets a **Contracts
   section**.
-- This closes out all five items #64 originally bundled. There's still
-  no way to switch which repo the rest of the dashboard/MCP server
-  operates on — `root` stays fixed for the life of the process (issue
-  #337's `search_codebase` `repo` parameter, below, is the first crack in
-  that: one tool can now be pointed at another workspace repo per call,
-  though the dashboard and every other MCP tool still can't).
+- This closes out all five items #64 originally bundled. Issue #337
+  then closed the last piece: `root` no longer stays fixed for the life
+  of the process. Every MCP tool either takes a `repo` parameter or is
+  workspace-level by construction, and every repo-scoped dashboard
+  endpoint honours `?repo=`.
+
+  `repo` has two meanings, and which one applies depends on whether the
+  answer can carry a label. Where results are a list whose rows can each
+  name their repo — overview, health, dead code, refactor candidates,
+  security, search, doc coverage, external deps — `"all"` federates.
+  Where the answer is a single subject (one file, one symbol, one LLM
+  reply) or a list of un-labeled rows, `repo` selects *which* repo and
+  `"all"` is refused with a message saying why, rather than quietly
+  answering from one of them.
 
 Issue #338, filed after #64 as a follow-on parity gap (this port's
 cross-repo resolution covered only Rust, where upstream repowise

@@ -75,3 +75,24 @@ extend later" pattern:
 - **No `AGENTS.md` generation wired into a hook** -- `repowise
   generate-claude-md` already exists as a CLI command; automating it via
   a hook is a natural follow-up, not included here.
+
+## Multi-repo workspaces
+
+The plugin's `.mcp.json` `args` are static, so it cannot conditionally
+pass `--workspace`. Without one, every MCP tool's `repo` parameter (and
+`list_repos`) answers *"requires a workspace; start the MCP server with
+--workspace"* — none of the federated querying is reachable from inside
+the plugin.
+
+Export `REPOWISE_WORKSPACE` instead, pointing at your workspace TOML:
+
+```sh
+export REPOWISE_WORKSPACE=/path/to/workspace.toml
+```
+
+`repowise serve` and `repowise serve-dashboard` both pick it up when no
+`--workspace` flag is given; an explicit flag always wins. A path that
+doesn't exist is a hard error rather than a quiet fall back to
+single-repo mode, so a typo in a shell profile can't silently disable
+workspace tools. `repowise doctor` reports the variable's state either
+way.

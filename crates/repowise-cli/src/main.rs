@@ -3834,7 +3834,47 @@ fn cmd_security(
     Ok(())
 }
 
+/// The workspace TOML to run with: the explicit flag, else
+/// `REPOWISE_WORKSPACE` (issue #333).
+///
+/// The Claude Code plugin starts the MCP server from a static
+/// `.mcp.json`, whose `args` cannot be conditional -- so without this,
+/// every `repo` parameter added in #337 answered `requires a workspace;
+/// start the MCP server with --workspace` and the plugin could reach
+/// none of it. An env var is how this repo already gates its other
+/// optional features (`REPOWISE_LLM_BASE_URL`, `REPOWISE_WEBHOOK_SECRET`),
+/// and it needs no change to the plugin manifest at all.
+///
+/// Deliberately *not* discovery of a conventional filename: the
+/// workspace file has no established name here, and inventing one would
+/// make `serve` change behaviour based on a file appearing next to it.
+///
+/// An unusable value is a hard error rather than a quiet fall back to
+/// single-repo mode -- a typo in a globally-exported variable would
+/// otherwise leave every `repo="all"` call reporting "no workspace
+/// configured" with nothing pointing at the cause.
+fn resolve_workspace(flag: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+    if let Some(path) = flag {
+        return Ok(Some(path));
+    }
+    match std::env::var("REPOWISE_WORKSPACE") {
+        Ok(v) if !v.trim().is_empty() => {
+            let path = PathBuf::from(v.trim());
+            if !path.exists() {
+                anyhow::bail!(
+                    "REPOWISE_WORKSPACE is set to {}, which does not exist -- \
+                     unset it or point it at a workspace TOML file",
+                    path.display()
+                );
+            }
+            Ok(Some(path))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn cmd_serve(path: &Path, workspace: Option<PathBuf>) -> anyhow::Result<()> {
+    let workspace = resolve_workspace(workspace)?;
     let root = path.canonicalize()?;
     // The rest of the CLI is synchronous; only the MCP server needs an
     // async runtime, so build one here rather than making `main` async.
@@ -3848,6 +3888,7 @@ fn cmd_serve_dashboard(
     static_dir: Option<PathBuf>,
     workspace: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let workspace = resolve_workspace(workspace)?;
     let root = path.canonicalize()?;
     let static_dir = static_dir.or_else(|| {
         let exe = std::env::current_exe().ok();
@@ -5720,6 +5761,54 @@ mod tests {
 
     /// A ledger holding only MCP records must still show them, rather
     /// than being swallowed by the no-distillations empty state.
+    /// `REPOWISE_WORKSPACE` is the plugin's only route to a workspace,
+    /// since `.mcp.json` args are static (issue #333).
+    ///
+    /// These mutate a process-global env var, so they run as one test
+    /// rather than several -- `cargo test` runs test fns on parallel
+    /// threads, and two tests setting the same variable would race.
+    #[test]
+    fn workspace_resolution_prefers_the_flag_then_the_env_var() {
+        let root = fake_project("workspace-env");
+        let ws = root.join("ws.toml");
+        std::fs::write(&ws, "[[repo]]\nname = \"a\"\npath = \".\"\n").unwrap();
+
+        // Unset: single-repo, no error.
+        unsafe { std::env::remove_var("REPOWISE_WORKSPACE") };
+        assert_eq!(resolve_workspace(None).unwrap(), None);
+
+        // The explicit flag wins, and is returned untouched.
+        unsafe { std::env::set_var("REPOWISE_WORKSPACE", ws.display().to_string()) };
+        let flagged = root.join("other.toml");
+        assert_eq!(
+            resolve_workspace(Some(flagged.clone())).unwrap(),
+            Some(flagged),
+            "an explicit --workspace must not be overridden by the environment"
+        );
+
+        // No flag: the env var is used.
+        assert_eq!(resolve_workspace(None).unwrap(), Some(ws.clone()));
+
+        // Empty/whitespace is treated as unset rather than as a path.
+        unsafe { std::env::set_var("REPOWISE_WORKSPACE", "   ") };
+        assert_eq!(resolve_workspace(None).unwrap(), None);
+
+        // A path that doesn't exist is a hard error, not a quiet
+        // fallback to single-repo: a typo in a globally-exported
+        // variable would otherwise be invisible.
+        unsafe {
+            std::env::set_var(
+                "REPOWISE_WORKSPACE",
+                root.join("nope.toml").display().to_string(),
+            )
+        };
+        let err = resolve_workspace(None).unwrap_err().to_string();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(err.contains("REPOWISE_WORKSPACE"), "{err}");
+
+        unsafe { std::env::remove_var("REPOWISE_WORKSPACE") };
+    }
+
     #[test]
     fn mcp_records_survive_an_empty_distillation_ledger() {
         let out = render_saved(&[mcp_rec("get_symbol", 9000, 500)], "program");

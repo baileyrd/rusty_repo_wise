@@ -614,6 +614,11 @@ struct ChatTurn {
 #[derive(Serialize)]
 struct ChatRequest {
     history: Vec<ChatTurn>,
+    /// Chat is the one repo-scoped endpoint that is a POST, so
+    /// `fetch_json_with_query`'s `?repo=` injection never covered it
+    /// (issue #337) -- the scope has to travel in the body instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
 }
 
 /// Mirrors `repowise-server`'s `UpdateHealthWeightsDto` wire shape
@@ -4598,6 +4603,7 @@ fn ChatSection() -> impl IntoView {
                 "/api/chat",
                 &ChatRequest {
                     history: request_history,
+                    repo: fetch_repo(),
                 },
             )
             .await;

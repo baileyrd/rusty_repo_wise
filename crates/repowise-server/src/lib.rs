@@ -1121,6 +1121,13 @@ struct ChatRequestDto {
     /// turn -- this endpoint is otherwise stateless, so the frontend
     /// owns history and resends it every call.
     history: Vec<ChatTurnDto>,
+    /// Which repo to answer from (issue #337). A body field rather than
+    /// a query parameter because this is the one repo-scoped endpoint
+    /// that is a POST, so the frontend's `?repo=` injection -- which
+    /// only covers GETs -- never reached it. `all` is refused: an
+    /// answer is singular, so there is nothing to federate.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2729,6 +2736,12 @@ async fn post_chat(
     State(state): State<AppState>,
     Json(request): Json<ChatRequestDto>,
 ) -> Result<Json<ChatResponseDto>, ApiError> {
+    // Resolved before the LLM-config check so an unknown repo (or
+    // `all`) is a 400 either way. Otherwise a server with no LLM
+    // configured would answer "unavailable" to a request that was
+    // *also* malformed, hiding the client's mistake behind a
+    // server-configuration message.
+    let root = resolve_scope_root(&state, request.repo.as_deref())?;
     let Some(config) = state.llm_config.as_ref().clone() else {
         return Ok(Json(ChatResponseDto {
             available: false,
@@ -2741,7 +2754,7 @@ async fn post_chat(
         }));
     };
 
-    let index = RepoIndex::load(&state.root)?;
+    let index = RepoIndex::load(&root)?;
     let question = request
         .history
         .iter()
@@ -2749,7 +2762,7 @@ async fn post_chat(
         .find(|t| t.role == "user")
         .map(|t| t.content.clone())
         .unwrap_or_default();
-    let root = (*state.root).clone();
+    let root = root.clone();
     let history: Vec<repowise_llm::Turn> = request
         .history
         .into_iter()
@@ -5677,6 +5690,32 @@ mod tests {
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// Chat is the one repo-scoped endpoint that is a POST, so the
+    /// frontend's `?repo=` query injection never reached it and the
+    /// scope has to travel in the body (issue #337). `all` is refused
+    /// -- an answer is singular -- and the refusal happens *before* the
+    /// LLM-config check, so a malformed request is a 400 even on a
+    /// server with no LLM configured.
+    #[tokio::test]
+    async fn post_chat_refuses_repo_all_even_without_llm_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (own, ws) = workspace_of_two(&root);
+
+        let router = app(own, None, Some(ws));
+        let (status, _) = post_json(
+            router,
+            "/api/chat",
+            serde_json::json!({
+                "history": [{"role": "user", "content": "hi"}],
+                "repo": "all",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

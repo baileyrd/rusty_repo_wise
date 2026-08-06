@@ -84,8 +84,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   most endpoints never declared the parameter, so serde discarded it.
   Every index- and git-derived endpoint now honours `?repo=<name>`.
   `?repo=all` is refused with a 400 on the ones whose rows carry no
-  repo label, and the frontend keeps "All repos" from reaching them
-  (#337).
+  repo label, and the frontend keeps "All repos" from reaching them.
+  `POST /api/chat` takes the scope in its body, since the frontend's
+  query-parameter injection only ever covered GETs (#337).
 - `get_risk` collected git analytics from the MCP server's own root
   rather than from the repo being assessed. Before `repo` existed those
   were always the same path, so the bug was unreachable; adding the

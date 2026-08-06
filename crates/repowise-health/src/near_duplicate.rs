@@ -45,7 +45,7 @@
 //! shared; pairs at or above `MIN_OVERLAP_RATIO` are reported.
 
 use repowise_core::{RepoIndex, Symbol, SymbolKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
@@ -94,7 +94,7 @@ struct Eligible<'a> {
 /// pairs already caught by the exact-body-hash `DuplicateCode` marker.
 /// Each flagged symbol gets its own `NearDuplicateCandidate` pointing at
 /// the other half of the pair.
-pub fn find_near_duplicates(index: &RepoIndex) -> Vec<NearDuplicateCandidate> {
+fn collect_eligible(index: &RepoIndex) -> Vec<Eligible<'_>> {
     let mut eligible: Vec<Eligible> = Vec::new();
     for file in &index.files {
         let Ok(source) = std::fs::read_to_string(&file.path) else {
@@ -114,13 +114,21 @@ pub fn find_near_duplicates(index: &RepoIndex) -> Vec<NearDuplicateCandidate> {
                 continue;
             };
             let tokens: Vec<u64> = tokenize(&text).iter().map(|t| token_hash(t)).collect();
-            let windows = rolling_windows(&tokens);
+            let mut windows = rolling_windows(&tokens);
             if windows.is_empty() {
                 continue;
             }
+            // Sorted so `shared_window_count` can intersect two symbols
+            // with a linear merge instead of building a set per pair.
+            windows.sort_unstable();
             eligible.push(Eligible { sym, windows });
         }
     }
+    eligible
+}
+
+pub fn find_near_duplicates(index: &RepoIndex) -> Vec<NearDuplicateCandidate> {
+    let eligible = collect_eligible(index);
 
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, e) in eligible.iter().enumerate() {
@@ -129,9 +137,53 @@ pub fn find_near_duplicates(index: &RepoIndex) -> Vec<NearDuplicateCandidate> {
         }
     }
 
-    let mut shared: HashMap<(usize, usize), usize> = HashMap::new();
+    // Candidate pairs come only from *discriminative* buckets (issue
+    // #398).
+    //
+    // The module's original claim -- "pairs with nothing in common
+    // never get compared at all" -- was true but useless in practice.
+    // At `WINDOW_TOKENS == 3` almost every pair of functions shares
+    // *something*: `) { let`, `; if (`, `self . foo`. Measured on this
+    // repo, the single largest window bucket held 1308 of 2089 eligible
+    // symbols, and enumerating every bucket's pairs cost 16.9M
+    // pair-visits -- so the scan degenerated to repeated all-pairs work
+    // and took ~12s, which was essentially the entire cost of
+    // `/api/health` and `/api/files`.
+    //
+    // A window shared by a large fraction of all symbols is boilerplate
+    // and carries no signal, so it is skipped for *candidate discovery*.
+    // It is NOT skipped for scoring: the overlap ratio below is computed
+    // by exact intersection of the two symbols' full window sets, so any
+    // pair that becomes a candidate gets exactly the ratio it always got.
+    //
+    // This does change what the marker reports, and the change is not
+    // small: on this repo it drops 7,246 of 25,510 pairs (28%). Every
+    // dropped pair is one whose *entire* shared window set is repo-wide
+    // boilerplate, and that turns out to be a precision win rather than a
+    // loss. Such pairs are short functions where `min(|windows|)` is tiny
+    // enough that shared boilerplate alone clears `MIN_OVERLAP_RATIO` --
+    // the highest-ratio casualty on this repo is 0.88 between
+    //
+    //     fn an_unrelated_repo_reports_no_dependencies() {
+    //         let dir = tempfile::tempdir().unwrap();
+    //         let root = dir.path().canonicalize().unwrap();
+    //         ...
+    //
+    // and a different crate's four-line `returns_empty_when_...` test.
+    // Those are not near-duplicates in any sense a reader would accept.
+    //
+    // No pair is *added*: the result is a strict subset of what the
+    // previous implementation produced (verified by diffing both outputs
+    // over this repo).
+    //
+    // The cap is also what makes this fast, not the restructuring around
+    // it. Measured with the cap disabled, computing exact intersections
+    // for all 16.9M candidate pairs takes 18.6s -- slower than the 12.4s
+    // it replaced. With the cap it is 2.9s.
+    let cap = bucket_candidate_cap(eligible.len());
+    let mut candidates: HashSet<(usize, usize)> = HashSet::new();
     for idxs in buckets.values() {
-        if idxs.len() < 2 {
+        if idxs.len() < 2 || idxs.len() > cap {
             continue;
         }
         for a in 0..idxs.len() {
@@ -140,15 +192,16 @@ pub fn find_near_duplicates(index: &RepoIndex) -> Vec<NearDuplicateCandidate> {
                 if i == j {
                     continue;
                 }
-                *shared.entry((i, j)).or_insert(0) += 1;
+                candidates.insert((i, j));
             }
         }
     }
 
     let mut out = Vec::new();
-    for ((i, j), count) in shared {
+    for (i, j) in candidates {
         let a = &eligible[i];
         let b = &eligible[j];
+        let count = shared_window_count(&a.windows, &b.windows);
         if a.sym.body_hash == b.sym.body_hash {
             continue; // already an exact duplicate; DuplicateCode covers it
         }
@@ -185,6 +238,41 @@ pub fn find_near_duplicates(index: &RepoIndex) -> Vec<NearDuplicateCandidate> {
             .then(x.other_symbol.cmp(&y.other_symbol))
     });
     out
+}
+
+/// Largest bucket still used to propose candidate pairs.
+///
+/// Proportional to the symbol count rather than a fixed number, so the
+/// meaning ("this window is boilerplate *for this repo*") holds whether
+/// the index has 200 symbols or 200,000. The floor keeps small repos --
+/// where every bucket is small and the scan is cheap anyway -- behaving
+/// exactly as before.
+fn bucket_candidate_cap(symbol_count: usize) -> usize {
+    const SHARE_DIVISOR: usize = 32; // ~3% of eligible symbols
+    const FLOOR: usize = 64;
+    (symbol_count / SHARE_DIVISOR).max(FLOOR)
+}
+
+/// `|a ∩ b|` for two sorted, deduplicated window lists.
+///
+/// This is exactly the count the previous bucket-accumulation produced
+/// -- a pair's tally there was the number of distinct windows both
+/// symbols appeared under -- so scoring is unchanged, only cheaper and
+/// no longer dependent on which buckets were visited.
+fn shared_window_count(a: &[u64], b: &[u64]) -> usize {
+    let (mut i, mut j, mut n) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                n += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    n
 }
 
 /// A symbol's full line span (declaration through closing brace), 1:1
@@ -457,6 +545,98 @@ mod tests {
         };
 
         assert!(find_near_duplicates(&index_with(vec![file], &root)).is_empty());
+    }
+
+    /// The scoring path must stay exact (issue #398): a pair's overlap
+    /// count is the number of distinct windows both symbols carry, and
+    /// swapping bucket-accumulation for set intersection must not have
+    /// changed it.
+    #[test]
+    fn shared_window_count_is_a_plain_set_intersection() {
+        assert_eq!(shared_window_count(&[1, 2, 3], &[2, 3, 4]), 2);
+        assert_eq!(shared_window_count(&[1, 2, 3], &[4, 5]), 0);
+        assert_eq!(shared_window_count(&[], &[1]), 0);
+        assert_eq!(shared_window_count(&[1, 2], &[1, 2]), 2);
+    }
+
+    /// The candidate cap scales with the index rather than being a
+    /// fixed number, so "this window is boilerplate" keeps meaning the
+    /// same thing at 200 symbols and at 200,000 -- with a floor so
+    /// small repos, where every bucket is small anyway, are unaffected.
+    #[test]
+    fn the_candidate_cap_scales_with_the_index_but_never_below_the_floor() {
+        assert_eq!(
+            bucket_candidate_cap(0),
+            64,
+            "floor applies to an empty index"
+        );
+        assert_eq!(bucket_candidate_cap(100), 64, "still the floor");
+        assert_eq!(
+            bucket_candidate_cap(2089),
+            65,
+            "this repo, just over the floor"
+        );
+        assert_eq!(
+            bucket_candidate_cap(200_000),
+            6250,
+            "scales on a large index"
+        );
+    }
+
+    /// A genuine near-duplicate must survive the cap. Both halves here
+    /// sit in a corpus of many unrelated functions that share plenty of
+    /// boilerplate windows with each other, so the over-cap buckets are
+    /// populated and the pair has to be found through its own
+    /// distinctive windows.
+    #[test]
+    fn a_real_near_duplicate_survives_a_corpus_full_of_boilerplate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let mut files = Vec::new();
+
+        // The pair worth finding.
+        let (path, a_span, b_span) = write_two_functions(&root, "widgets.rs", BODY_A, BODY_B);
+        files.push(FileRecord {
+            path: path.clone(),
+            language: Language::Rust,
+            lines: b_span.1,
+            symbols: vec![
+                function_symbol(&path, "process_widget", a_span.0, a_span.1),
+                function_symbol(&path, "process_gadget", b_span.0, b_span.1),
+            ],
+            imports: Vec::new(),
+            calls: Vec::new(),
+            field_accesses: Vec::new(),
+        });
+
+        // 200 short functions that differ only in a name, so their
+        // shared boilerplate windows land in buckets far above the cap.
+        for i in 0..200 {
+            let body = format!(
+                "fn boilerplate_{i}() {{\n    let dir = tempfile::tempdir().unwrap();\n    let root = dir.path().canonicalize().unwrap();\n    assert!(check(&root).is_empty());\n}}\n"
+            );
+            let name = format!("boiler{i}.rs");
+            let p = write(&root, &name, &body);
+            files.push(FileRecord {
+                path: p.clone(),
+                language: Language::Rust,
+                lines: 5,
+                symbols: vec![function_symbol(&p, &format!("boilerplate_{i}"), 1, 5)],
+                imports: Vec::new(),
+                calls: Vec::new(),
+                field_accesses: Vec::new(),
+            });
+        }
+
+        let found = find_near_duplicates(&index_with(files, &root));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.symbol == "process_widget" && c.other_symbol == "process_gadget"),
+            "the real pair must survive a boilerplate-heavy corpus, got {} candidates",
+            found.len()
+        );
     }
 
     #[test]

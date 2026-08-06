@@ -70,6 +70,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   dependency-ordered reading path through a codebase, with `--from`,
   `--max-steps`, and `--format text|markdown` (#377).
 ### Changed
+- Near-duplicate findings are a strict subset of what they were: 28%
+  fewer on this repo, all of them pairs whose entire shared content was
+  repo-wide boilerplate. The highest-ratio example dropped was 0.88
+  between two unrelated four-line tests that shared only
+  `tempfile::tempdir().unwrap()` and an `assert!` (#398).
 - Portable index records Rust/Go module paths at export time, so a
   workspace member backed by an artifact with no checkout now resolves
   cross-repo imports instead of silently contributing none (#388).
@@ -78,6 +83,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this repo) with no capability loss. v1 artifacts are rejected with an
   actionable message and must be re-exported (#381).
 ### Fixed
+- Near-duplicate detection no longer degenerates into repeated
+  all-pairs comparison. Its Rabin-Karp bucketing claimed pairs "with
+  nothing in common never get compared at all", but at a 3-token window
+  almost every pair of functions shares *something* — on this repo the
+  largest window bucket held 1308 of 2089 symbols and the scan cost
+  16.9M pair-visits. Buckets too large to be discriminative no longer
+  propose candidate pairs, and overlap is now scored by exact set
+  intersection. `find_near_duplicates` drops from 12.4s to 2.9s, taking
+  `/api/files` from 16.0s to 6.3s and `/api/health` from 19.0s to 8.5s
+  (#398).
 - Dashboard: picking a repo in the header changed some views and
   silently left the rest showing the server's own repo, side by side,
   with no indication — the frontend sent `?repo=` on every request but

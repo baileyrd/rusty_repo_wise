@@ -3854,7 +3854,8 @@ mod tests {
             let (status, json) = get_ws(own.clone(), ws.clone(), uri).await;
             assert_eq!(status, StatusCode::OK, "{uri}");
             let arr = if pointer.is_empty() {
-                json.as_array().unwrap_or_else(|| panic!("{uri}: not an array"))
+                json.as_array()
+                    .unwrap_or_else(|| panic!("{uri}: not an array"))
             } else {
                 json.pointer(pointer)
                     .and_then(|v| v.as_array())

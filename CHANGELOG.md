@@ -25,6 +25,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   across repos (every file lands in exactly one status), and external
   deps are deliberately **not** de-duplicated, so two repos pinning
   different versions of the same package stays visible (#337).
+- MCP: `get_coupling`, `get_commits`, `get_why`, `get_answer`, and
+  `get_change_risk` gained `repo` as a scope selector, completing the
+  tool surface — every MCP tool now either takes `repo` or is
+  workspace-level by construction (`list_repos`, `get_architecture`)
+  (#337).
 - MCP: `get_context`, `get_symbol`, and `get_risk` gained `repo` as a
   *scope selector*. `"all"` is rejected for anything answering about a
   single file or symbol, since there is nothing to federate; `get_risk`

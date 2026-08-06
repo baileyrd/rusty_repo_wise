@@ -537,6 +537,13 @@ struct RepoOnlyParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 struct WhyParams {
+    /// Which repo to answer from (issue #337). Omit for this server's
+    /// own indexed root; name a configured workspace repo to answer
+    /// from there instead (requires `--workspace`). `"all"` is
+    /// rejected -- this tool's rows carry no repo label, so a
+    /// federated answer would merge rows nothing could tell apart.
+    #[serde(default)]
+    repo: Option<String>,
     /// File paths (absolute or relative to the indexed root) or symbol
     /// ids (as returned by `search_codebase`/`get_context`) to filter
     /// mined decisions by. A decision matches if its body links to any
@@ -589,6 +596,13 @@ impl Default for DeadCodeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 struct ChangeRiskParams {
+    /// Which repo to answer from (issue #337). Omit for this server's
+    /// own indexed root; name a configured workspace repo to answer
+    /// from there instead (requires `--workspace`). `"all"` is
+    /// rejected -- this tool's rows carry no repo label, so a
+    /// federated answer would merge rows nothing could tell apart.
+    #[serde(default)]
+    repo: Option<String>,
     /// A single commit, or a `base..head` range, to assess. Defaults to
     /// `HEAD` (the most recent commit) when omitted.
     #[serde(default)]
@@ -1079,6 +1093,13 @@ fn default_coupling_limit() -> usize {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CouplingParams {
+    /// Which repo to answer from (issue #337). Omit for this server's
+    /// own indexed root; name a configured workspace repo to answer
+    /// from there instead (requires `--workspace`). `"all"` is
+    /// rejected -- this tool's rows carry no repo label, so a
+    /// federated answer would merge rows nothing could tell apart.
+    #[serde(default)]
+    repo: Option<String>,
     /// Max pairs returned. Default 30.
     #[serde(default = "default_coupling_limit")]
     limit: usize,
@@ -1088,6 +1109,7 @@ impl Default for CouplingParams {
     fn default() -> Self {
         CouplingParams {
             limit: default_coupling_limit(),
+            repo: None,
         }
     }
 }
@@ -1116,6 +1138,13 @@ fn default_commits_limit() -> usize {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CommitsParams {
+    /// Which repo to answer from (issue #337). Omit for this server's
+    /// own indexed root; name a configured workspace repo to answer
+    /// from there instead (requires `--workspace`). `"all"` is
+    /// rejected -- this tool's rows carry no repo label, so a
+    /// federated answer would merge rows nothing could tell apart.
+    #[serde(default)]
+    repo: Option<String>,
     /// Max commits returned, newest first. Default 30, capped at 200.
     #[serde(default = "default_commits_limit")]
     limit: usize,
@@ -1125,6 +1154,7 @@ impl Default for CommitsParams {
     fn default() -> Self {
         CommitsParams {
             limit: default_commits_limit(),
+            repo: None,
         }
     }
 }
@@ -1323,6 +1353,13 @@ struct HealthOutput {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 struct AnswerParams {
+    /// Which repo to answer from (issue #337). Omit for this server's
+    /// own indexed root; name a configured workspace repo to answer
+    /// from there instead (requires `--workspace`). `"all"` is
+    /// rejected -- this tool's rows carry no repo label, so a
+    /// federated answer would merge rows nothing could tell apart.
+    #[serde(default)]
+    repo: Option<String>,
     /// A natural-language question about the codebase.
     question: String,
 }
@@ -2131,14 +2168,15 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_change_risk",
-        description = "Deterministic diff-shape risk score for a single commit or a `base..head` range: lines added/deleted, files touched, subsystems (top-level directories) touched, change concentration (how evenly the diff is spread across files), and the head commit's author's prior-commit count as an experience proxy. These combine into a documented fixed-weight 0-10 score. This is a heuristic approximation of the reference repowise's `get_change_risk`, NOT its ML-calibrated score — this port has no trained model or labeled defect corpus, so treat the number as a rough signal, not a probability."
+        description = "Deterministic diff-shape risk score for a single commit or a `base..head` range: lines added/deleted, files touched, subsystems (top-level directories) touched, change concentration (how evenly the diff is spread across files), and the head commit's author's prior-commit count as an experience proxy. These combine into a documented fixed-weight 0-10 score. This is a heuristic approximation of the reference repowise's `get_change_risk`, NOT its ML-calibrated score — this port has no trained model or labeled defect corpus, so treat the number as a rough signal, not a probability. Set `repo` to answer from a configured workspace repo instead of this server's own root; `\"all\"` is rejected, since this tool's rows carry no repo label."
     )]
     fn get_change_risk(
         &self,
-        Parameters(ChangeRiskParams { revspec }): Parameters<ChangeRiskParams>,
+        Parameters(ChangeRiskParams { revspec, repo }): Parameters<ChangeRiskParams>,
     ) -> Result<Json<Envelope<ChangeRiskOutput>>, ErrorData> {
         let started = Instant::now();
-        let risk = repowise_git::change_risk(&self.root, revspec.as_deref()).map_err(|e| {
+        let scope = self.resolve_single_target(repo.as_deref())?;
+        let risk = repowise_git::change_risk(&scope.root, revspec.as_deref()).map_err(|e| {
             ErrorData::invalid_params(format!("failed to compute change risk: {e}"), None)
         })?;
         Ok(self.untracked(
@@ -2215,14 +2253,15 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_why",
-        description = "Architectural decisions mined from docs/adr/*.md, decision-like commit messages, merged PR bodies, code comments, inline WHY:/DECISION: markers, CHANGELOG sections, and decision-flavored README/ARCHITECTURE prose (via repowise-adr), same data as `repowise decisions --for-file`. Given `targets` (file paths or symbol ids), returns only decisions whose body links to at least one target's file. Given no targets (or an empty list), returns every mined decision. Each decision carries a `confidence` in [0, 1], derived from how trustworthy its source is as a record of actual intent (an ADR file or a `repowise decide` record outranks a freeform README paragraph or code comment) -- weigh a low-confidence hit more skeptically. One source is NOT a written artifact: decisions marked `inferred: true` were inferred by a model from code during `repowise generate`, anchored to a verbatim quote that is re-checked against the file on every read. `inferred_source` always reports what that source contributed, so an absent contribution can't be mistaken for a repo with nothing to infer."
+        description = "Architectural decisions mined from docs/adr/*.md, decision-like commit messages, merged PR bodies, code comments, inline WHY:/DECISION: markers, CHANGELOG sections, and decision-flavored README/ARCHITECTURE prose (via repowise-adr), same data as `repowise decisions --for-file`. Given `targets` (file paths or symbol ids), returns only decisions whose body links to at least one target's file. Given no targets (or an empty list), returns every mined decision. Each decision carries a `confidence` in [0, 1], derived from how trustworthy its source is as a record of actual intent (an ADR file or a `repowise decide` record outranks a freeform README paragraph or code comment) -- weigh a low-confidence hit more skeptically. One source is NOT a written artifact: decisions marked `inferred: true` were inferred by a model from code during `repowise generate`, anchored to a verbatim quote that is re-checked against the file on every read. `inferred_source` always reports what that source contributed, so an absent contribution can't be mistaken for a repo with nothing to infer. Set `repo` to answer from a configured workspace repo instead of this server's own root; `\"all\"` is rejected, since this tool's rows carry no repo label."
     )]
     fn get_why(
         &self,
-        Parameters(WhyParams { targets }): Parameters<WhyParams>,
+        Parameters(WhyParams { targets, repo }): Parameters<WhyParams>,
     ) -> Result<Json<Envelope<WhyOutput>>, ErrorData> {
         let started = Instant::now();
-        let (index, _graph, cached) = self.load()?;
+        let scope = self.resolve_single_target(repo.as_deref())?;
+        let (index, _graph, cached) = self.load_at(&scope.root)?;
         let (mut decisions, inferred_state) =
             repowise_adr::mine_reporting(&index).map_err(|e| {
                 ErrorData::internal_error(format!("failed to mine decisions: {e}"), None)
@@ -2317,20 +2356,21 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_answer",
-        description = "Answer a natural-language question about this codebase, with citations. Retrieves relevant files by embedding similarity, then answers from them. Requires an LLM endpoint (REPOWISE_LLM_BASE_URL); reports `available: false` with a reason when unconfigured rather than guessing. Reuses vectors from the persisted embedding index (built by `init`/`update`) and embeds only the files it doesn't cover, in one batched call alongside the question -- coverage is always complete regardless of how much of the index that call had to fill in, so there's a `vectors_reused`/`vectors_embedded_now` split (semantic mode only) but no caveat to go with it. Still a considered-question tool rather than a cheap lookup -- use search_codebase for finding things by name."
+        description = "Answer a natural-language question about this codebase, with citations. Retrieves relevant files by embedding similarity, then answers from them. Requires an LLM endpoint (REPOWISE_LLM_BASE_URL); reports `available: false` with a reason when unconfigured rather than guessing. Reuses vectors from the persisted embedding index (built by `init`/`update`) and embeds only the files it doesn't cover, in one batched call alongside the question -- coverage is always complete regardless of how much of the index that call had to fill in, so there's a `vectors_reused`/`vectors_embedded_now` split (semantic mode only) but no caveat to go with it. Still a considered-question tool rather than a cheap lookup -- use search_codebase for finding things by name. Set `repo` to answer from a configured workspace repo instead of this server's own root; `\"all\"` is rejected, since this tool's rows carry no repo label."
     )]
     fn get_answer(
         &self,
-        Parameters(AnswerParams { question }): Parameters<AnswerParams>,
+        Parameters(AnswerParams { question, repo }): Parameters<AnswerParams>,
     ) -> Result<Json<Envelope<AnswerOutput>>, ErrorData> {
         let started = Instant::now();
+        let scope = self.resolve_single_target(repo.as_deref())?;
         if question.trim().is_empty() {
             return Err(ErrorData::invalid_params(
                 "question must not be empty",
                 None,
             ));
         }
-        let (index, _graph, cached) = self.load()?;
+        let (index, _graph, cached) = self.load_at(&scope.root)?;
 
         // Unconfigured is a real, reportable state -- not an error, and
         // certainly not an empty answer. An agent needs to distinguish
@@ -2358,7 +2398,7 @@ impl RepowiseServer {
             ));
         };
 
-        let retrieval = repowise_llm::retrieve(&self.root, &index, &question, &config);
+        let retrieval = repowise_llm::retrieve(&scope.root, &index, &question, &config);
         let turns = vec![
             repowise_llm::Turn::system(retrieval.context.clone()),
             repowise_llm::Turn::user(question),
@@ -2873,14 +2913,15 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_coupling",
-        description = "Repo-wide change coupling: the file pairs that most often change together in the same commit, regardless of whether an import edge connects them -- catches architectural coupling static analysis alone can't see. Ranks every pair in the repo, strongest first (unlike `get_health`'s hidden-coupling/co-change-scatter markers, which fold this signal into a per-file score rather than exposing the raw pairs). `limit` (default 30) caps the list."
+        description = "Repo-wide change coupling: the file pairs that most often change together in the same commit, regardless of whether an import edge connects them -- catches architectural coupling static analysis alone can't see. Ranks every pair in the repo, strongest first (unlike `get_health`'s hidden-coupling/co-change-scatter markers, which fold this signal into a per-file score rather than exposing the raw pairs). `limit` (default 30) caps the list. Set `repo` to answer from a configured workspace repo instead of this server's own root; `\"all\"` is rejected, since this tool's rows carry no repo label."
     )]
     fn get_coupling(
         &self,
-        Parameters(CouplingParams { limit }): Parameters<CouplingParams>,
+        Parameters(CouplingParams { limit, repo }): Parameters<CouplingParams>,
     ) -> Result<Json<Envelope<CouplingOutput>>, ErrorData> {
         let started = Instant::now();
-        let analytics = repowise_git::GitAnalytics::collect(&self.root).map_err(|e| {
+        let scope = self.resolve_single_target(repo.as_deref())?;
+        let analytics = repowise_git::GitAnalytics::collect(&scope.root).map_err(|e| {
             ErrorData::invalid_params(format!("failed to compute change coupling: {e}"), None)
         })?;
 
@@ -2899,15 +2940,16 @@ impl RepowiseServer {
 
     #[tool(
         name = "get_commits",
-        description = "The most recent commits, newest first: hash, author, subject line, timestamp, and how many files each touched. No risk score attached -- call `get_change_risk` with a specific commit hash for that, since scoring every listed commit eagerly would multiply its real per-commit diff cost by however many are listed. `limit` (default 30, capped at 200) bounds the list; this always queries git for exactly that many commits rather than walking the whole history and truncating, so it stays cheap on a long-lived repo."
+        description = "The most recent commits, newest first: hash, author, subject line, timestamp, and how many files each touched. No risk score attached -- call `get_change_risk` with a specific commit hash for that, since scoring every listed commit eagerly would multiply its real per-commit diff cost by however many are listed. `limit` (default 30, capped at 200) bounds the list; this always queries git for exactly that many commits rather than walking the whole history and truncating, so it stays cheap on a long-lived repo. Set `repo` to answer from a configured workspace repo instead of this server's own root; `\"all\"` is rejected, since this tool's rows carry no repo label."
     )]
     fn get_commits(
         &self,
-        Parameters(CommitsParams { limit }): Parameters<CommitsParams>,
+        Parameters(CommitsParams { limit, repo }): Parameters<CommitsParams>,
     ) -> Result<Json<Envelope<CommitsOutput>>, ErrorData> {
         let started = Instant::now();
+        let scope = self.resolve_single_target(repo.as_deref())?;
         let limit = limit.clamp(1, COMMITS_MAX_LIMIT);
-        let commits = repowise_git::collect_recent_commits(&self.root, limit)
+        let commits = repowise_git::collect_recent_commits(&scope.root, limit)
             .map_err(|e| ErrorData::invalid_params(format!("failed to list commits: {e}"), None))?;
 
         let commits = commits
@@ -3706,7 +3748,10 @@ mod tests {
 
         let server = RepowiseServer::new(root.clone(), None);
         let Json(Envelope { data: risk, .. }) = server
-            .get_change_risk(Parameters(ChangeRiskParams { revspec: None }))
+            .get_change_risk(Parameters(ChangeRiskParams {
+                revspec: None,
+                repo: None,
+            }))
             .unwrap();
 
         assert_eq!(risk.revspec, "HEAD");
@@ -3734,6 +3779,7 @@ mod tests {
         let Json(Envelope { data: risk, .. }) = server
             .get_change_risk(Parameters(ChangeRiskParams {
                 revspec: Some("base..HEAD".to_string()),
+                repo: None,
             }))
             .unwrap();
 
@@ -3748,7 +3794,10 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
 
         let server = RepowiseServer::new(root, None);
-        let result = server.get_change_risk(Parameters(ChangeRiskParams { revspec: None }));
+        let result = server.get_change_risk(Parameters(ChangeRiskParams {
+            revspec: None,
+            repo: None,
+        }));
         let Err(err) = result else {
             panic!("expected an error when the root isn't a git repository");
         };
@@ -3839,7 +3888,10 @@ mod tests {
 
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data, .. }) = server
-            .get_commits(Parameters(CommitsParams { limit: 1 }))
+            .get_commits(Parameters(CommitsParams {
+                limit: 1,
+                repo: None,
+            }))
             .unwrap();
 
         assert_eq!(data.commits.len(), 1);
@@ -4017,7 +4069,10 @@ mod tests {
 
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data: why, .. }) = server
-            .get_why(Parameters(WhyParams { targets: vec![] }))
+            .get_why(Parameters(WhyParams {
+                targets: vec![],
+                repo: None,
+            }))
             .unwrap();
 
         assert_eq!(why.decisions.len(), 2);
@@ -4033,6 +4088,7 @@ mod tests {
         let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams {
                 targets: vec!["src/queue.rs".to_string()],
+                repo: None,
             }))
             .unwrap();
 
@@ -4059,6 +4115,7 @@ mod tests {
         let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams {
                 targets: vec![symbol_id],
+                repo: None,
             }))
             .unwrap();
 
@@ -4076,6 +4133,7 @@ mod tests {
         let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams {
                 targets: vec!["src/nonexistent.rs".to_string()],
+                repo: None,
             }))
             .unwrap();
 
@@ -4093,7 +4151,10 @@ mod tests {
 
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data: why, .. }) = server
-            .get_why(Parameters(WhyParams { targets: vec![] }))
+            .get_why(Parameters(WhyParams {
+                targets: vec![],
+                repo: None,
+            }))
             .unwrap();
 
         assert!(
@@ -4131,7 +4192,10 @@ mod tests {
 
         let server = RepowiseServer::new(root, None);
         let Json(Envelope { data: why, .. }) = server
-            .get_why(Parameters(WhyParams { targets: vec![] }))
+            .get_why(Parameters(WhyParams {
+                targets: vec![],
+                repo: None,
+            }))
             .unwrap();
 
         let inferred: Vec<_> = why.decisions.iter().filter(|d| d.inferred).collect();
@@ -4187,6 +4251,7 @@ mod tests {
         let Json(Envelope { data: why, .. }) = server
             .get_why(Parameters(WhyParams {
                 targets: vec!["src/queue.rs".to_string()],
+                repo: None,
             }))
             .unwrap();
 
@@ -5298,6 +5363,7 @@ mod tests {
         let Json(Envelope { data, .. }) = server
             .get_answer(Parameters(AnswerParams {
                 question: "how does this work".to_string(),
+                repo: None,
             }))
             .unwrap();
 
@@ -5322,6 +5388,7 @@ mod tests {
         let err = server
             .get_answer(Parameters(AnswerParams {
                 question: "   ".to_string(),
+                repo: None,
             }))
             .err()
             .expect("an empty question is invalid params");
@@ -5859,5 +5926,70 @@ mod tests {
                 "tool {i} names the missing flag: {msg}"
             );
         }
+    }
+
+    /// The five remaining single-repo tools take `repo` as a scope and
+    /// refuse `"all"` -- their rows carry no repo label, so a federated
+    /// answer would merge rows nothing could tell apart (issue #337).
+    #[test]
+    fn the_single_repo_tools_scope_to_a_name_and_refuse_all() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_dir.path().canonicalize().unwrap();
+        let workspace_repos = two_repo_workspace_with_matching_symbols(&workspace_root);
+
+        let self_dir = tempfile::tempdir().unwrap();
+        let root = self_dir.path().canonicalize().unwrap();
+        build_and_save_index(&root);
+        let server = RepowiseServer::new(root, Some(workspace_repos));
+
+        // `"all"` is refused by every one of them.
+        let refusals = [
+            server
+                .get_coupling(Parameters(CouplingParams {
+                    limit: 5,
+                    repo: Some("all".to_string()),
+                }))
+                .err(),
+            server
+                .get_commits(Parameters(CommitsParams {
+                    limit: 5,
+                    repo: Some("all".to_string()),
+                }))
+                .err(),
+            server
+                .get_why(Parameters(WhyParams {
+                    targets: vec![],
+                    repo: Some("all".to_string()),
+                }))
+                .err(),
+            server
+                .get_answer(Parameters(AnswerParams {
+                    question: "what is this".to_string(),
+                    repo: Some("all".to_string()),
+                }))
+                .err(),
+            server
+                .get_change_risk(Parameters(ChangeRiskParams {
+                    revspec: None,
+                    repo: Some("all".to_string()),
+                }))
+                .err(),
+        ];
+        for (i, err) in refusals.iter().enumerate() {
+            let err = err
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool {i} must refuse repo=\"all\""));
+            assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "tool {i}");
+        }
+
+        // A *name* still works, and reads that repo -- `get_why` mines
+        // decisions from the index, so scoping it to repo-b must not
+        // error on a repo that exists.
+        server
+            .get_why(Parameters(WhyParams {
+                targets: vec![],
+                repo: Some("repo-b".to_string()),
+            }))
+            .expect("a named repo scopes rather than refusing");
     }
 }

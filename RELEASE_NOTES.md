@@ -6,6 +6,49 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## Domains reaches the dashboard and MCP (partial #412) — PR #416
+**2026-08-07**
+
+- PR #414 shipped `repowise domains` as a CLI command only. This adds
+  the two surfaces that make it reachable from an agent and from a
+  browser: a `get_domains` MCP tool and `GET /api/domains` behind a
+  Domains view.
+- **All three surfaces share the one control that carries the value**:
+  `min_layers: 2`, "only domains spread across two or more
+  directories". That is the question the dashboard's existing views
+  structurally cannot answer — System map, Map (communities) and
+  Knowledge Graph all group *by* the structure that split the domain
+  across layers in the first place. Everything else the view shows is a
+  summary of that one filter.
+- **A named domain gets a file list; an unnamed request doesn't.** On
+  saleor that difference is 489 paths against 3702, so shipping every
+  domain's paths up front would send most of the repo to draw a table of
+  counts. Clicking a domain issues a second, narrow request. The MCP
+  tool takes the same `name` parameter and sets `files_truncated` when
+  `limit` cut the list, rather than letting a short list read as
+  complete.
+- **Federated totals stay per-repo rather than summed.** Every threshold
+  in `repowise-domains` is a fraction of one repo's file count, so a
+  single workspace total would mix denominators — the same reasoning
+  `get_health` already applies when it refuses to synthesize a workspace
+  average. `?repo=all` is supported rather than refused, because every
+  row carries its own repo label, which is the test #337 established for
+  whether an endpoint can federate at all.
+- **The unassigned count is always stated.** A domain map that silently
+  drops a third of the repo reads as complete when it isn't, and on a
+  real repo that share is large (599 of 4301 on saleor). The
+  cross-cutting filter also reports how many domains it hid and why, so
+  a shorter table never reads as "this repo has fewer domains than it
+  does".
+- **Verified in a browser**, not just compiled: against a fixture whose
+  checkout, payment and shipping code is split across `graphql/` and
+  `tests/`, the table regroups all three, the filter drops the one
+  single-directory domain and says so, and clicking `checkout` lists its
+  six files across three trees. A network trace confirms exactly the
+  three expected requests fire and none fail.
+
+---
+
 ## A deterministic domain view — `repowise domains` (partial #412) — PR #414
 **2026-08-07**
 

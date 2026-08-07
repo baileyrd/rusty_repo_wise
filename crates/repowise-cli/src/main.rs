@@ -286,14 +286,24 @@ enum Command {
         #[command(subcommand)]
         action: HookAction,
     },
-    /// Adapters for Claude Code's own hook JSON contract (issue #333's
-    /// Claude Code plugin, `.claude-plugin/hooks/hooks.json`) --
-    /// distinct from `hook`/`hook rewrite` above, which are
-    /// harness-agnostic (a git hook, and a stdin/stdout command
-    /// rewriter any agent harness can point at). These speak Claude
-    /// Code's specific per-event stdin/stdout JSON contract directly,
-    /// since that's what a Claude Code hook command is invoked with.
-    /// Not meant to be run by hand -- installed by the plugin.
+    /// Adapters for the agent-hook JSON contract shared by Claude Code
+    /// and Codex (issue #333) -- distinct from `hook`/`hook rewrite`
+    /// above, which are harness-agnostic (a git hook, and a
+    /// stdin/stdout command rewriter any agent harness can point at).
+    /// These speak the specific per-event stdin/stdout JSON a hook
+    /// command is invoked with.
+    ///
+    /// Both hosts use the same shape -- a `hookSpecificOutput` wrapper
+    /// carrying `additionalContext` for `SessionStart`/`PostToolUse`
+    /// and `permissionDecision`/`updatedInput` for `PreToolUse` -- and
+    /// the same event names, so one implementation serves both
+    /// (verified against Codex's own hooks documentation, not assumed
+    /// from the resemblance). Reachable as `agent-hook`, the
+    /// host-neutral name, with `claude-hook` kept as an alias so
+    /// already-installed plugin manifests keep working.
+    ///
+    /// Not meant to be run by hand -- installed by a plugin/config.
+    #[command(name = "agent-hook", alias = "claude-hook")]
     ClaudeHook {
         #[command(subcommand)]
         action: ClaudeHookAction,
@@ -6003,6 +6013,49 @@ mod tests {
             "tool_input": { "file_path": root.join(file).display().to_string() },
         })
         .to_string()
+    }
+
+    /// Codex and Claude Code share one hook contract, so one
+    /// implementation serves both (issue #333).
+    ///
+    /// Verified against Codex's published hook docs rather than assumed
+    /// from the resemblance: same event names, the same
+    /// `hookSpecificOutput` wrapper, `additionalContext` for
+    /// `SessionStart`/`PostToolUse`, and
+    /// `permissionDecision`/`updatedInput` for `PreToolUse`. Codex's
+    /// stdin carries extra fields Claude Code's does not (`turn_id`,
+    /// `tool_use_id`), so this feeds a Codex-shaped payload to prove
+    /// the extras are ignored rather than tripping the parse.
+    #[test]
+    fn the_hooks_answer_a_codex_shaped_payload_identically() {
+        let root = project_with_one_dependent("codex-shape");
+
+        let pre = serde_json::json!({
+            "turn_id": "t1",
+            "tool_name": "Bash",
+            "tool_use_id": "tu1",
+            "tool_input": { "command": "cargo test" },
+        })
+        .to_string();
+        let out = claude_hook_pre_tool_use(&pre).expect("a recognized command is rewritten");
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(out["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("repowise distill")));
+
+        let post = serde_json::json!({
+            "turn_id": "t1",
+            "tool_name": "Edit",
+            "tool_use_id": "tu2",
+            "tool_input": { "file_path": root.join("src/a.rs").display().to_string() },
+        })
+        .to_string();
+        let out = claude_hook_post_tool_use(&root, &post).expect("src/a.rs has a dependent");
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert!(out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .is_some_and(|c| c.contains("import src/a.rs")));
     }
 
     #[test]

@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Codex and opencode integration (#333): `.codex/config.toml` +
+  `.codex/hooks.json` and `opencode.json`, both committed project-level
+  configs, so cloning the repo is the whole install. Codex's hook
+  contract is identical to Claude Code's — same event names and the same
+  `hookSpecificOutput` wrapper — verified against Codex's own docs, so
+  the existing adapters serve both hosts unchanged. They are now
+  `repowise agent-hook <event>`, with `claude-hook` kept as an alias.
 - `repowise serve-dashboard --poll <SECONDS>`: re-index automatically
   when HEAD moves past the indexed commit. The fifth auto-sync
   mechanism, for the case the other four miss — a server watching a

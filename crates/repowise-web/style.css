@@ -291,6 +291,15 @@ a:focus-visible {
   font-size: 13px;
 }
 
+/* A standing caveat about what a view does and doesn't claim -- dimmer
+   than body copy, but not an empty state. Introduced for the Domains
+   view (#412), whose whole risk is being read as more authoritative
+   than it is. */
+.note {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
 /* 41 sites. These were indistinguishable from body copy. */
 .error {
   margin: 10px 0;

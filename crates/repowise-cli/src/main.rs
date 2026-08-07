@@ -642,8 +642,9 @@ enum Command {
     /// Run an MCP server over stdio exposing the agent-facing tools
     /// (get_overview, search_codebase, get_context, get_risk,
     /// get_change_risk, get_symbol, get_why, get_answer, get_dead_code,
-    /// get_health, get_refactor_candidates, get_security_findings, and
-    /// the workspace tools). Every response carries a `_meta` block with
+    /// get_health, get_refactor_candidates, get_security_findings,
+    /// get_domains, and the workspace tools). Every response carries a
+    /// `_meta` block with
     /// timing and index-staleness. Requires a prior `repowise
     /// init`/`update`.
     Serve {

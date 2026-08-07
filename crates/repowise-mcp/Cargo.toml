@@ -10,6 +10,7 @@ repowise-graph = { path = "../repowise-graph" }
 repowise-health = { path = "../repowise-health" }
 repowise-refactor = { path = "../repowise-refactor" }
 repowise-security = { path = "../repowise-security" }
+repowise-domains = { path = "../repowise-domains" }
 repowise-external-deps = { path = "../repowise-external-deps" }
 repowise-docs = { path = "../repowise-docs" }
 repowise-git = { path = "../repowise-git" }

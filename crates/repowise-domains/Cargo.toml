@@ -1,0 +1,12 @@
+[package]
+name = "repowise-domains"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+repowise-core = { path = "../repowise-core" }
+serde.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

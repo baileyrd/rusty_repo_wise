@@ -30,12 +30,13 @@ convention from issues like #64 and #319). **Priority for this repo's
 near-term work is parity** — closing these before starting anything not
 tracked back to the upstream reference.
 
-**Status as of 2026-08-06:** of the 20 tracked gaps below, 2 remain open
-([#333](https://github.com/baileyrd/rusty_repo_wise/issues/333),
-[#335](https://github.com/baileyrd/rusty_repo_wise/issues/335)) — both
-partially closed, with the remainder needing a human decision.
-[#337](https://github.com/baileyrd/rusty_repo_wise/issues/337) is now
-fully closed. The other 18 are closed or closed-not-planned. Work shipped in the same period that
+**Status as of 2026-08-06:** every one of the 20 tracked gaps below is
+now closed or closed-not-planned. The last three to close were
+[#333](https://github.com/baileyrd/rusty_repo_wise/issues/333),
+[#335](https://github.com/baileyrd/rusty_repo_wise/issues/335) and
+[#337](https://github.com/baileyrd/rusty_repo_wise/issues/337). Several
+rows below remain *partially* closed against their issue's full scope —
+the issue text records what was left and why. Work shipped in the same period that
 is *not* parity work is listed separately below, so this file isn't
 mistaken for a full changelog.
 
@@ -125,8 +126,9 @@ what the port has gained.
 **This deviated from the priority stated above.** That line reads
 "closing these before starting anything not tracked back to the upstream
 reference", and three parity gaps (#333, #335, #337) stayed open
-throughout. #337 has since been closed; #333 and #335 remain open. Recorded rather than quietly absorbed, since the priority is
-either real or it should be rewritten.
+throughout. All three have since been closed. Recorded rather than
+quietly absorbed, since the priority is either real or it should be
+rewritten.
 
 Two corrections these changes forced, worth keeping visible because they
 were wrong in the issue text before they were right in the code:
@@ -146,9 +148,9 @@ were wrong in the issue text before they were right in the code:
 | # | Gap | Issue | Status |
 |---|-----|-------|--------|
 | 1 | Zed extension (retargeted from VS Code — Zed extensions are Rust/WASM, a native fit for this workspace rather than a second TypeScript toolchain) | [#332](https://github.com/baileyrd/rusty_repo_wise/issues/332) | partially closed via PR #376 — `zed-extension/` at repo root registers `repowise serve` as a Zed context server (MCP server integration), the one upstream VS Code capability that maps cleanly to direct reuse of the existing `repowise-mcp` server; resolves all three of the issue's own open questions (confirmed Zed's real extension API against its own docs — Languages/Debuggers/Themes/Snippets/MCP Servers, no gutter/hover/CodeLens surface; MCP registration only for this first slice; lives in this repo at root, matching `claude-plugin/`'s precedent); not published to Zed's extension registry yet, see the issue |
-| 2 | Claude Code / Codex / opencode agent plugins (hooks, skills, commands) | [#333](https://github.com/baileyrd/rusty_repo_wise/issues/333) | partially closed via PR #349 — `claude-plugin/` at repo root: bundles the MCP server, a `SessionStart` index-freshness hook, a `PreToolUse` Distill hook, and a skill; Claude Code only, Codex/opencode/PostToolUse/workspace-scoping left open, see the issue |
+| 2 | Claude Code / Codex / opencode agent plugins (hooks, skills, commands) | [#333](https://github.com/baileyrd/rusty_repo_wise/issues/333) | **closed** — all three hosts. Claude Code: `claude-plugin/` bundles the MCP server, a `SessionStart` hook, a `PreToolUse` Distill hook and a skill (PR #349), plus a `PostToolUse` blast-radius hook (#405) and `REPOWISE_WORKSPACE` so the plugin's static `.mcp.json` can reach a workspace at all — without it every `repo` parameter from #337 answered "requires a workspace" from inside the plugin (#407). Codex and opencode ship as committed project-level configs (`.codex/config.toml` + `.codex/hooks.json`, `opencode.json`), so cloning the repo is the whole install; Codex's hook contract proved identical to Claude Code's -- same event names, same `hookSpecificOutput` wrapper -- verified against Codex's own docs, so one set of adapters serves both, renamed `agent-hook` with `claude-hook` kept as an alias. Both hosts also read the `AGENTS.md` written by `repowise generate-agents-md` (#406). opencode gets no hooks: its plugin system is JavaScript, with nothing a Rust CLI can install. #404 also made the `SessionStart` hook honest: it claimed to be cheap enough to run synchronously and measured 3.9s, parsing an 8.4 MB index twice to answer a question needing 8 KB; a `status.json` sidecar took it to 8ms |
 | 3 | GitHub PR bot | [#334](https://github.com/baileyrd/rusty_repo_wise/issues/334) | partially closed via PR #375 — `.github/actions/pr-risk-comment`, a self-hosted composite GitHub Action (not a hosted App — resolves the issue's own hosting-scope question) wrapping the existing `repowise risk` command as-is and posting/updating a single PR comment; dogfooded on this repo's own PRs via `.github/workflows/pr-risk-comment.yml`; health-delta and decisions-touched (upstream's other two PR-bot signals) left open, see the issue |
-| 4 | Webhook- and polling-triggered auto-sync | [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335) | partially closed via PR #345 — `POST /api/webhook/github`/`/gitlab` added (both trigger the shared reindex job, `REPOWISE_WEBHOOK_SECRET`-gated); polling deliberately declined, see the issue |
+| 4 | Webhook- and polling-triggered auto-sync | [#335](https://github.com/baileyrd/rusty_repo_wise/issues/335) | **closed** — all five upstream mechanisms now exist. `POST /api/webhook/github`/`/gitlab` (PR #345, `REPOWISE_WEBHOOK_SECRET`-gated) plus `serve-dashboard --poll <SECONDS>` (PR #408), which compares local HEAD against the indexed commit and reuses the same reindex job. Polling had been declined for two reasons that did not hold: `watch`/the post-commit hook run where edits *happen*, not where the server runs, and the "persisted state it lacks" is `index.indexed_commit`, already driving the identical comparison on every MCP tool call. Building it exposed two pre-existing bugs — the commit stamp erased by every server-side reindex since #345, and a stale dependents sidecar disabling the `PostToolUse` hook |
 | 5 | Native multi-provider LLM support in `repowise-llm` | [#336](https://github.com/baileyrd/rusty_repo_wise/issues/336) | closed, not planned — `rusty_provider` is the accepted permanent answer, see the issue |
 | 6 | Federated workspace queries (`repo="all"`) | [#337](https://github.com/baileyrd/rusty_repo_wise/issues/337) | **closed** — every MCP tool now takes `repo` or is workspace-level by construction, and every repo-scoped dashboard endpoint honours `?repo=`. `"all"` federates where rows can carry a repo label; where the answer is a single subject or an un-labeled list, `repo` selects which repo and `"all"` is refused with a reason rather than silently answering from one. Landed across PRs #348, #391, #393, #394, #399 and this round |
 | 7 | Cross-repo import resolution beyond Rust | [#338](https://github.com/baileyrd/rusty_repo_wise/issues/338) | closed via PR #343 — now covers Rust/Python/Java/Kotlin/Scala/Go/C#/PHP |

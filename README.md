@@ -3163,6 +3163,35 @@ Three deliberate choices here:
 from; an index written before this existed loads fine and simply reports
 its commit as unknown until the next re-index.
 
+## Codex and opencode
+
+Issue #333's other two hosts. Both read a **project-level config file**
+committed in the repo, so cloning it is the whole install — there is no
+plugin directory to point at, unlike Claude Code's.
+
+- **Codex** (`.codex/config.toml`, `.codex/hooks.json`): registers the
+  MCP server, plus `SessionStart`, `PreToolUse` and `PostToolUse` hooks.
+  Codex's hook contract turned out to be **identical** to Claude Code's
+  — same event names, the same `hookSpecificOutput` wrapper, the same
+  `additionalContext` / `permissionDecision` / `updatedInput` fields —
+  verified against Codex's own hook documentation rather than assumed
+  from the resemblance, so the existing adapters serve both hosts
+  unchanged. They are reachable as `repowise agent-hook <event>`, the
+  host-neutral name; `claude-hook` remains an alias so already-installed
+  plugin manifests keep working.
+- **opencode** (`opencode.json`): registers the MCP server. opencode's
+  plugin system is JavaScript/TypeScript, so there is no hook
+  equivalent to install from a Rust CLI — the MCP tools and `AGENTS.md`
+  are what it gets.
+- **Both** read `AGENTS.md`, written by `repowise generate-agents-md`.
+
+Neither config hardcodes a path: `repowise serve` defaults to the
+working directory, which is the project root both hosts run in. For a
+multi-repo workspace, export `REPOWISE_WORKSPACE` before starting the
+host and every MCP tool's `repo` parameter becomes available — not
+baked into the committed config, since the path is per-machine and a
+wrong one makes `serve` refuse to start.
+
 ## Claude Code plugin
 
 Issue #333's first slice: upstream repowise ships `plugins/claude-code`

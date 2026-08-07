@@ -1,0 +1,27 @@
+# Codex project configuration for this repo (issue #333).
+#
+# Codex reads `<repo>/.codex/config.toml` for trusted projects, so
+# cloning this repo is enough -- there is nothing to install. The
+# Claude Code equivalent lives in `claude-plugin/`, and `AGENTS.md`
+# (written by `repowise generate-agents-md`) carries the static
+# codebase summary both hosts read.
+#
+# Requires `repowise` on PATH and a prior `repowise init`.
+
+# Every existing `repowise-mcp` tool: search_codebase, get_context,
+# get_risk, get_health, get_dead_code, and the rest. No new tools --
+# this is packaging, not new capability.
+#
+# No path argument: `repowise serve` defaults to the working directory,
+# which is the project root Codex runs in. That avoids depending on a
+# variable-expansion syntax Codex does not document for `args`.
+#
+# For a multi-repo workspace, export REPOWISE_WORKSPACE before starting
+# Codex; `serve` picks it up and every tool's `repo` parameter becomes
+# available. It is deliberately not hardcoded here -- the path is
+# per-machine, and a wrong one makes `serve` refuse to start.
+[mcp_servers.repowise]
+command = "repowise"
+args = ["serve"]
+# Indexing a cold repo can take longer than the 10s default.
+startup_timeout_sec = 60

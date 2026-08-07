@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "repowise agent-hook session-start",
+            "statusMessage": "Checking repowise index freshness"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "repowise agent-hook pre-tool-use",
+            "statusMessage": "Routing through repowise distill"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "repowise agent-hook post-tool-use",
+            "statusMessage": "Checking blast radius"
+          }
+        ]
+      }
+    ]
+  }
+}

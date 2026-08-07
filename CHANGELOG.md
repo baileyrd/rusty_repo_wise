@@ -5,6 +5,24 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `repowise domains`: group files by the vocabulary the repo names
+  itself with, so a concern spread across technical layers shows up as
+  one thing. Issue #412's *deterministic* first slice — no model is
+  asked, no name is invented, and a file is only ever labelled with a
+  term already in its own path, so the output cannot fabricate a domain
+  for a file. Measured on saleor, where the right answer is knowable
+  (its Django apps are its domains): grouping by top-level directory
+  gets 58%, and every one of its 1535 misses is the same miss —
+  `saleor/graphql/` is a 1550-file technical layer that reports itself
+  as the biggest "domain". This gets 64% and dissolves that
+  pseudo-domain, returning `order` as 489 files spanning
+  `saleor/order/`, `saleor/graphql/` and `saleor/tests/` at once.
+  Symbol-name evidence was tried and rejected on measurement: it cost
+  accuracy *and* produced 161 assignments to a term appearing nowhere in
+  the file's path. `--min-layers 2` is "what did the directory tree
+  split apart", the question the System map cannot answer. The
+  model-authored domain view #412 also describes remains open and
+  unbuilt (#412).
 - `repowise install <host>` registers `repowise serve` as an MCP server
   with a coding agent, in that agent's own project-level config format:
   Claude Code, Codex, Cursor, opencode, and VS Code + Copilot. Existing

@@ -608,6 +608,37 @@ enum Command {
         #[arg(long)]
         index: Option<PathBuf>,
     },
+    /// Group files by the vocabulary the repo names itself with, so a
+    /// concern spread across technical layers shows up as one thing
+    /// (issue #412's deterministic first slice). Not business-domain
+    /// extraction: it never invents a name and never calls a model --
+    /// every label is a word a human already wrote into a directory
+    /// name, and a file is only ever labelled with a term from its own
+    /// path. See `repowise-domains`' own module doc for what that is and
+    /// is not worth, measured.
+    Domains {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Max domains to show, largest first. 0 for all.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Only show domains reaching into at least this many top-level
+        /// directories -- `--min-layers 2` is "what did the directory
+        /// tree split apart", the thing the System map cannot show.
+        #[arg(long, default_value_t = 1)]
+        min_layers: usize,
+        /// List each domain's files rather than just its spread.
+        #[arg(long)]
+        files: bool,
+        /// Emit the whole map as JSON, unfiltered by `--limit`.
+        #[arg(long)]
+        json: bool,
+        /// Read a committed portable index (`export --format index`)
+        /// instead of `.repowise/index.json` (issue #378). Drift against
+        /// your checkout is always reported.
+        #[arg(long)]
+        index: Option<PathBuf>,
+    },
     /// Run an MCP server over stdio exposing the agent-facing tools
     /// (get_overview, search_codebase, get_context, get_risk,
     /// get_change_risk, get_symbol, get_why, get_answer, get_dead_code,
@@ -1024,6 +1055,14 @@ fn main() -> anyhow::Result<()> {
             min_severity,
             index,
         } => cmd_security(&path, min_severity.as_deref(), index.as_deref()),
+        Command::Domains {
+            path,
+            limit,
+            min_layers,
+            files,
+            json,
+            index,
+        } => cmd_domains(&path, limit, min_layers, files, json, index.as_deref()),
         Command::Serve { path, workspace } => cmd_serve(&path, workspace),
         Command::Generate { path } => cmd_generate(&path),
         Command::ServeDashboard {
@@ -3847,6 +3886,108 @@ fn cmd_tour(
             println!("  {:>2}. {:<14} {file}", step.position, step.role.label());
             println!("      {}", step.why());
         }
+    }
+    Ok(())
+}
+
+fn cmd_domains(
+    path: &Path,
+    limit: usize,
+    min_layers: usize,
+    list_files: bool,
+    json: bool,
+    index_file: Option<&Path>,
+) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+    let index = load_index(&root, index_file)?;
+    let map = repowise_domains::analyze(&index);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&map)?);
+        return Ok(());
+    }
+
+    if map.domains.is_empty() {
+        println!(
+            "No vocabulary domains under {}. Every candidate term either named \
+             fewer than 3 files, named nearly the whole repo, or is a word every \
+             sibling directory shares -- none of which separates anything.",
+            index.root.display()
+        );
+        return Ok(());
+    }
+
+    let shown: Vec<_> = map
+        .domains
+        .iter()
+        .filter(|d| d.layers() >= min_layers)
+        .take(if limit == 0 { usize::MAX } else { limit })
+        .collect();
+
+    println!(
+        "{} vocabulary domain(s) over {} file(s) in {} -- {} assigned, {} unassigned",
+        map.domains.len(),
+        map.total_files,
+        index.root.display(),
+        map.assigned(),
+        map.unassigned.len()
+    );
+    println!(
+        "  Grouped by the words this repo's own directory names use. Not business \
+         domains: no model was asked, and no file is labelled with a term absent \
+         from its own path."
+    );
+    if !map.shared_prefixes.is_empty() {
+        println!(
+            "  Ignored as a name every sibling shares: {}",
+            map.shared_prefixes.join(", ")
+        );
+    }
+    if !map.container_dirs.is_empty() {
+        println!(
+            "  Layers are named below {}/, which nearly every file sits under.",
+            map.container_dirs.join("/")
+        );
+    }
+
+    // A domain that reaches into a dozen directories has a dozen-entry
+    // spread, and past the first few the tail is single files.
+    const SPREAD_SHOWN: usize = 6;
+    for domain in &shown {
+        let mut spread = domain
+            .spread
+            .iter()
+            .take(SPREAD_SHOWN)
+            .map(|(dir, n)| format!("{dir}({n})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if domain.layers() > SPREAD_SHOWN {
+            spread.push_str(&format!(", +{} more", domain.layers() - SPREAD_SHOWN));
+        }
+        println!(
+            "\n  {:<20} {:>5} file(s) across {} dir(s)",
+            domain.name,
+            domain.files.len(),
+            domain.layers()
+        );
+        println!("      {spread}");
+        if list_files {
+            for file in &domain.files {
+                println!("      - {}", file.display());
+            }
+        }
+    }
+
+    let hidden = map.domains.len() - shown.len();
+    if hidden > 0 {
+        println!(
+            "\n  {hidden} more not shown (--limit 0 for all{}).",
+            if min_layers > 1 {
+                ", --min-layers 1 to drop the layer filter"
+            } else {
+                ""
+            }
+        );
     }
     Ok(())
 }

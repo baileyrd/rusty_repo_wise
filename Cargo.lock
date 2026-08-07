@@ -1319,6 +1319,7 @@ dependencies = [
  "repowise-core",
  "repowise-distill",
  "repowise-docs",
+ "repowise-domains",
  "repowise-external-deps",
  "repowise-git",
  "repowise-graph",
@@ -1368,6 +1369,15 @@ dependencies = [
  "repowise-core",
  "repowise-graph",
  "repowise-health",
+ "tempfile",
+]
+
+[[package]]
+name = "repowise-domains"
+version = "0.1.0"
+dependencies = [
+ "repowise-core",
+ "serde",
  "tempfile",
 ]
 

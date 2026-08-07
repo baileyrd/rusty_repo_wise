@@ -6,6 +6,71 @@ repo routing work through PRs and for one later change that bypassed it.
 
 ---
 
+## A deterministic domain view — `repowise domains` (partial #412) — PR #414
+**2026-08-07**
+
+- #412 asks whether a business-domain view belongs in a port whose core
+  is deterministic, and is `needs-human` because its first question is a
+  product decision. Its **second** question — "is there a
+  deterministic-enough proxy worth shipping first, or would a
+  half-answer be worse than none?" — is answerable without deciding the
+  first, so it was measured rather than argued.
+- **The test repo makes the answer checkable.** Saleor: 4301 files, an
+  e-commerce platform whose Django apps *are* its domains, so a file
+  under `saleor/<app>/` or `saleor/graphql/<app>/` has a knowable right
+  answer. Grouping by top-level directory places **58%** correctly;
+  cross-cutting path vocabulary places **64%**.
+- **The six points understate it, and the failure is systematic, not
+  scattered.** Every one of the directory baseline's 1535 misses is the
+  same miss: `saleor/graphql/` is a 1550-file technical layer — a third
+  of the repo — that reports itself as the biggest "domain". Vocabulary
+  grouping dissolves it, returning `order` as 489 files spanning
+  `saleor/order/`, `saleor/graphql/` and `saleor/tests/` at once. That
+  cross-layer view is the whole value, and it is what the System map,
+  Communities, Knowledge Graph and Conformance views structurally
+  cannot produce.
+- **Most of the 36% "wrong" is not wrong.** The largest disagreements
+  were `account`->`user`, `discount`->`voucher`,
+  `payment`->`transaction`, `giftcard`->`gift` — each a real sub-domain
+  of the expected answer, named by a directory the file actually sits
+  in. It groups at whatever granularity the repo names things at.
+- **Symbol names were tried as a second evidence source and rejected on
+  measurement.** They cost accuracy *and* produced **161 assignments to
+  a term appearing nowhere in the file's own path**
+  (`saleor/webhook/payloads.py` labelled `product`). Scoring paths only
+  is structurally incapable of that — the only terms it can score are
+  ones already in the path — so no file is ever labelled with a domain
+  it has no textual claim to. #412's own fourth question notes a wrong
+  domain label reads as authoritative in a way a wrong health score does
+  not; that property was worth more than a percentage point.
+- **Three thresholds are load-bearing, and a repo broke each one.**
+  At four siblings, the shared-prefix rule deleted saleor's
+  second-largest domain outright (`graphql/product/mutations/` has five
+  children, three containing `product`). Without a coverage guard the
+  same rule fires on any parent anywhere: medusa's dashboard route
+  directories — ten children named `order-something` — deleted `order`,
+  `product`, `inventory`, `region`, `store`, `price` and `tax` from a
+  12k-file monorepo's vocabulary, leaving `tsx` and `table` as its
+  largest "domains". And saleor keeps 96% of its files under one
+  `saleor/` directory, so "spans 1 top-level directory" was true of
+  every domain and useless.
+- **Verified against four repo shapes**: saleor (Python/Django), medusa
+  (TypeScript monorepo), spring-petclinic (Java — returns
+  `owner`/`vet`/`system`, each spanning `main`/`test`), and this repo
+  (returns the crate map, with `repowise` correctly dropped as the name
+  every sibling shares).
+- **Where it is weakest is stated, not papered over.** Medusa also
+  returns `icons`, a 509-file UI asset package, ranked above every real
+  domain. Nothing deterministic can tell those apart. Growing the
+  layer-word table until each new repo looks tidy would be fitting the
+  table to the sample, so the module doc says so instead.
+- **What this does not decide**: whether a model-authored domain view
+  belongs here at all, where it would persist and with what staleness
+  reporting, and whether it needs to be human-reviewable. #412 stays
+  open on those three.
+
+---
+
 ## Codex and opencode agent integration (closes #333) — PRs #404, #405, #406, #407, #409
 **2026-08-07**
 

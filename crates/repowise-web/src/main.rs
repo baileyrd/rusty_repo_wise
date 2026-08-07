@@ -489,6 +489,43 @@ struct DeadCode {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+struct DomainSpread {
+    directory: String,
+    files: usize,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Domain {
+    #[serde(default)]
+    repo: Option<String>,
+    name: String,
+    file_count: usize,
+    layers: usize,
+    spread: Vec<DomainSpread>,
+    /// Only ever populated for the domain the request named.
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct DomainRepo {
+    #[serde(default)]
+    repo: Option<String>,
+    total_files: usize,
+    assigned_files: usize,
+    unassigned_files: usize,
+    total_domains: usize,
+    shared_prefixes: Vec<String>,
+    container_dirs: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Domains {
+    domains: Vec<Domain>,
+    repos: Vec<DomainRepo>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
 struct RefactorCandidate {
     id: String,
     kind: String,
@@ -2124,6 +2161,7 @@ enum Route {
     Symbols,
     Graph,
     DeadCode,
+    Domains,
     RefactorCandidates,
     Security,
     Docs,
@@ -2164,6 +2202,7 @@ fn route_supports_all_repos(route: Route) -> bool {
         Route::Overview
             | Route::Health
             | Route::DeadCode
+            | Route::Domains
             | Route::RefactorCandidates
             | Route::Security
             | Route::Workspace
@@ -2193,6 +2232,7 @@ const ROUTES: &[(Route, &str, &str)] = &[
     (Route::Symbols, "symbols", "Symbols"),
     (Route::Graph, "graph", "Graph"),
     (Route::DeadCode, "dead-code", "Dead code"),
+    (Route::Domains, "domains", "Domains"),
     (
         Route::RefactorCandidates,
         "refactor-candidates",
@@ -3259,6 +3299,211 @@ fn DeadCodeSection(selected: RwSignal<Option<String>>) -> impl IntoView {
             }}
         </Suspense>
     }
+}
+
+/// Vocabulary domains (`/api/domains`): files grouped by the words this
+/// repo's own directory names use, so a concern the directory tree split
+/// across technical layers shows up as one row (issue #412).
+///
+/// The one control that matters is "cross-cutting only". Every other
+/// view here — System map, Map (communities), Knowledge Graph — groups
+/// by structure, and structure is exactly what has already separated
+/// `checkout/` from `graphql/checkout/`. Filtering to domains that reach
+/// into two or more directories is the question none of them can answer.
+///
+/// Clicking a domain asks the API for that one domain's file list rather
+/// than shipping every domain's paths up front, which on a large repo is
+/// most of the repo.
+#[component]
+fn DomainsSection(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let cross_cutting_only = RwSignal::new(false);
+    let opened = RwSignal::new(None::<String>);
+
+    let domains = LocalResource::new(move || {
+        let min_layers = if cross_cutting_only.get() { "2" } else { "1" };
+        async move {
+            fetch_json_with_query::<Domains>("/api/domains", &[("min_layers", min_layers)]).await
+        }
+    });
+    let files = LocalResource::new(move || {
+        let name = opened.get();
+        async move {
+            match name {
+                None => Ok(None),
+                Some(name) => fetch_json_with_query::<Domains>("/api/domains", &[("name", &name)])
+                    .await
+                    .map(Some),
+            }
+        }
+    });
+
+    view! {
+        <h2>"Domains"</h2>
+        <p class="note">
+            "Grouped by the words this repo's own directory names use. Not business \
+             domains: no model is asked, and no file is labelled with a term that \
+             isn't already in its own path."
+        </p>
+        <label>
+            <input
+                type="checkbox"
+                on:change=move |ev| cross_cutting_only.set(event_target_checked(&ev))
+            />
+            " Only domains spread across two or more directories"
+        </label>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                domains
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(d) if d.domains.is_empty() => view! {
+                            <p class="empty">
+                                "No domains to show. Either nothing in this repo's directory \
+                                 names separates one part from another, or the cross-cutting \
+                                 filter excluded everything -- the summary below still counts \
+                                 what was found."
+                            </p>
+                            {domain_repo_summaries(d.repos)}
+                        }
+                        .into_any(),
+                        Ok(d) => {
+                            // The summary counts the repo, the table
+                            // counts what survived the filter. Saying so
+                            // keeps a shorter table from reading as
+                            // "this repo has fewer domains than it does".
+                            let found: usize = d.repos.iter().map(|r| r.total_domains).sum();
+                            let hidden = found.saturating_sub(d.domains.len());
+                            view! {
+                            {domain_repo_summaries(d.repos)}
+                            {(hidden > 0).then(|| view! {
+                                <p class="note">
+                                    {format!(
+                                        "{hidden} not shown -- each sits in a single directory, \
+                                         so the directory tree already grouped it.",
+                                    )}
+                                </p>
+                            })}
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>"Domain"</th>
+                                        <th>"Files"</th>
+                                        <th>"Directories"</th>
+                                        <th>"Spread"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {d.domains.into_iter().map(|domain| {
+                                        let name = domain.name.clone();
+                                        let label = match &domain.repo {
+                                            Some(repo) => format!("{repo}: {}", domain.name),
+                                            None => domain.name.clone(),
+                                        };
+                                        let spread = domain
+                                            .spread
+                                            .iter()
+                                            .map(|s| format!("{}({})", s.directory, s.files))
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
+                                        view! {
+                                            <tr>
+                                                <td>
+                                                    <a href="#" on:click=move |ev| {
+                                                        ev.prevent_default();
+                                                        opened.set(Some(name.clone()));
+                                                    }>{label}</a>
+                                                </td>
+                                                <td>{domain.file_count}</td>
+                                                <td>{domain.layers}</td>
+                                                <td class="mono">{spread}</td>
+                                            </tr>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </tbody>
+                            </table>
+                            }
+                            .into_any()
+                        }
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+        <Suspense fallback=|| view! { <p>"Loading..."</p> }>
+            {move || {
+                files
+                    .get()
+                    .map(|result| match result.take() {
+                        Ok(None) => ().into_any(),
+                        Ok(Some(d)) => {
+                            let mut rows: Vec<(Option<String>, String)> = Vec::new();
+                            for domain in &d.domains {
+                                for file in &domain.files {
+                                    rows.push((domain.repo.clone(), file.clone()));
+                                }
+                            }
+                            let heading = match d.domains.first() {
+                                Some(domain) => {
+                                    format!("{} -- {} file(s)", domain.name, rows.len())
+                                }
+                                None => "No such domain".to_string(),
+                            };
+                            view! {
+                                <h3>{heading}</h3>
+                                <ul>
+                                    {rows.into_iter().map(|(repo, file)| view! {
+                                        <li>
+                                            {repo.map(|r| view! { <span class="badge">{r}</span> })}
+                                            {file_cell(file, selected)}
+                                        </li>
+                                    }).collect::<Vec<_>>()}
+                                </ul>
+                            }
+                            .into_any()
+                        }
+                        Err(e) => view! { <p class="error">{format!("Error: {e}")}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+/// The per-repo coverage line under the domain table.
+///
+/// Unassigned files are stated rather than hidden: a domain map that
+/// silently drops a third of the repo reads as complete when it isn't.
+fn domain_repo_summaries(repos: Vec<DomainRepo>) -> impl IntoView {
+    repos
+        .into_iter()
+        .map(|r| {
+            let scope = match &r.repo {
+                Some(repo) => format!("{repo}: "),
+                None => String::new(),
+            };
+            let mut notes = Vec::new();
+            if !r.shared_prefixes.is_empty() {
+                notes.push(format!(
+                    "ignored as a name every sibling shares: {}",
+                    r.shared_prefixes.join(", ")
+                ));
+            }
+            if !r.container_dirs.is_empty() {
+                notes.push(format!(
+                    "directories named below {}/, which nearly every file sits under",
+                    r.container_dirs.join("/")
+                ));
+            }
+            view! {
+                <p>
+                    {format!(
+                        "{scope}{} domain(s) over {} file(s) -- {} assigned, {} unassigned.",
+                        r.total_domains, r.total_files, r.assigned_files, r.unassigned_files,
+                    )}
+                    {(!notes.is_empty())
+                        .then(|| view! { <span class="note">{format!(" {}", notes.join("; "))}</span> })}
+                </p>
+            }
+        })
+        .collect::<Vec<_>>()
 }
 
 /// Deterministic refactor candidates (`/api/refactor-candidates`), with a
@@ -4933,6 +5178,7 @@ fn App() -> impl IntoView {
             Route::Symbols => view! { <SymbolsSection selected=selected /> }.into_any(),
             Route::Graph => view! { <GraphSection selected=selected /> }.into_any(),
             Route::DeadCode => view! { <DeadCodeSection selected=selected /> }.into_any(),
+            Route::Domains => view! { <DomainsSection selected=selected /> }.into_any(),
             Route::RefactorCandidates => {
                 view! { <RefactorCandidatesSection selected=selected /> }.into_any()
             }

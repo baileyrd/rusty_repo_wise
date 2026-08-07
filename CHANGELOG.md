@@ -5,6 +5,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Domains reaches the dashboard and MCP, not just the CLI: a Domains
+  view, `GET /api/domains`, and a `get_domains` MCP tool. All three
+  share one control that matters — "only domains spread across two or
+  more directories" (`?min_layers=2`), which is the question every other
+  view here structurally cannot answer, since System map, Map and
+  Knowledge Graph all group *by* the structure that split the domain up
+  in the first place. Clicking a domain asks for that one domain's file
+  list rather than shipping every domain's paths up front; on saleor
+  that difference is 3702 paths against 489. Federates with `?repo=`
+  like every other endpoint since #337, but keeps per-repo totals
+  separate rather than summing them: each repo's vocabulary is filtered
+  against its own file count, so one total would mix denominators. The
+  unassigned count is always stated — a domain map that silently drops a
+  third of the repo reads as complete when it isn't (#412).
 - `repowise domains`: group files by the vocabulary the repo names
   itself with, so a concern spread across technical layers shows up as
   one thing. Issue #412's *deterministic* first slice — no model is

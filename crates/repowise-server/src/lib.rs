@@ -14,7 +14,11 @@
 //! a visual graph view. Phase 4 added `/api/ownership` (per-file
 //! git-blame breakdown), an optional `?file=` filter on `/api/decisions`
 //! (decisions linked to one file, for a per-file decision tracker), and
-//! `/api/dead-code` (confidence-tiered dead-code candidates). Phase 5
+//! `/api/dead-code` (confidence-tiered dead-code candidates), later
+//! joined by `/api/domains` — files grouped by the vocabulary the repo
+//! names itself with, so a concern the directory tree split across
+//! technical layers comes back as one row (issue #412; see
+//! `repowise-domains` for what that is and is not worth). Phase 5
 //! added `POST /api/chat`, the last static-parity view: a chat endpoint
 //! over `repowise-llm`. `{"available": false}` when
 //! `REPOWISE_LLM_BASE_URL` isn't set, same opt-in convention every other
@@ -861,6 +865,68 @@ struct DeadCodeQuery {
     #[serde(default)]
     repo: Option<String>,
 }
+
+#[derive(Deserialize)]
+struct DomainsQuery {
+    /// Name one domain to get its file list back. Omit for summaries
+    /// only.
+    #[serde(default)]
+    name: Option<String>,
+    /// Only return domains reaching into at least this many directories.
+    #[serde(default = "one")]
+    min_layers: usize,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+fn one() -> usize {
+    1
+}
+
+#[derive(Serialize)]
+struct DomainSpreadDto {
+    directory: String,
+    files: usize,
+}
+
+#[derive(Serialize)]
+struct DomainDto {
+    /// Absent on an unscoped call, so the frontend's single-repo view
+    /// sees no change (issue #337's rule).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    name: String,
+    file_count: usize,
+    layers: usize,
+    spread: Vec<DomainSpreadDto>,
+    /// Populated only for the domain named in the query — every
+    /// domain's paths at once would be most of the repo.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DomainRepoDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    total_files: usize,
+    assigned_files: usize,
+    unassigned_files: usize,
+    total_domains: usize,
+    shared_prefixes: Vec<String>,
+    container_dirs: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DomainsDto {
+    domains: Vec<DomainDto>,
+    /// Per repo, never summed: each repo's vocabulary is derived from
+    /// its own file counts, so a merged total would mix denominators.
+    repos: Vec<DomainRepoDto>,
+}
+
+/// Matches the `get_domains` MCP tool's own default `limit`.
+const DOMAINS_LIMIT: usize = 20;
 
 #[derive(Serialize)]
 struct DeadCodeCandidateDto {
@@ -2636,6 +2702,77 @@ async fn get_coverage(
     }))
 }
 
+async fn get_domains(
+    State(state): State<AppState>,
+    Query(query): Query<DomainsQuery>,
+) -> Result<Json<DomainsDto>, ApiError> {
+    let targets = resolve_repo_targets(&state, query.repo.as_deref())?;
+
+    let mut domains: Vec<DomainDto> = Vec::new();
+    let mut repos: Vec<DomainRepoDto> = Vec::new();
+    for target in &targets {
+        let (index, _graph) = state.index_cache.get(&target.root)?;
+        let map = repowise_domains::analyze(&index);
+
+        repos.push(DomainRepoDto {
+            repo: target.repo.clone(),
+            total_files: map.total_files,
+            assigned_files: map.assigned(),
+            unassigned_files: map.unassigned.len(),
+            total_domains: map.domains.len(),
+            shared_prefixes: map.shared_prefixes.clone(),
+            container_dirs: map.container_dirs.clone(),
+        });
+
+        for domain in map.domains {
+            if domain.layers() < query.min_layers {
+                continue;
+            }
+            if query.name.as_deref().is_some_and(|n| n != domain.name) {
+                continue;
+            }
+            let wanted = query.name.as_deref() == Some(domain.name.as_str());
+            domains.push(DomainDto {
+                repo: target.repo.clone(),
+                name: domain.name.clone(),
+                file_count: domain.files.len(),
+                layers: domain.layers(),
+                spread: domain
+                    .spread
+                    .iter()
+                    .map(|(directory, files)| DomainSpreadDto {
+                        directory: directory.clone(),
+                        files: *files,
+                    })
+                    .collect(),
+                files: if wanted {
+                    domain
+                        .files
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+    }
+
+    domains.sort_by(|a, b| {
+        b.file_count
+            .cmp(&a.file_count)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    // A named request asked for one domain's files, so the cap on the
+    // domain list would only ever throw away the thing that was asked
+    // for.
+    if query.name.is_none() {
+        domains.truncate(DOMAINS_LIMIT);
+    }
+
+    Ok(Json(DomainsDto { domains, repos }))
+}
+
 async fn get_dead_code(
     State(state): State<AppState>,
     Query(query): Query<DeadCodeQuery>,
@@ -3694,6 +3831,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/files", get(get_files))
         .route("/api/contributors", get(get_contributors))
         .route("/api/coverage", get(get_coverage))
+        .route("/api/domains", get(get_domains))
         .route("/api/dead-code", get(get_dead_code))
         .route("/api/refactor-candidates", get(get_refactor_candidates))
         .route("/api/security", get(get_security))
@@ -4652,6 +4790,45 @@ mod tests {
             .map(|s| s["repo"].as_str().unwrap())
             .collect();
         assert_eq!(repos, vec!["repo-a", "repo-b"]);
+    }
+
+    /// `?repo=all` labels every domain and keeps the per-repo totals
+    /// apart. They are deliberately not summed: each repo's vocabulary
+    /// is filtered against its own file count, so one total would mix
+    /// denominators.
+    #[tokio::test]
+    async fn domains_federates_with_per_repo_totals_rather_than_one_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for name in ["repo-a", "repo-b"] {
+            let path = root.join(name);
+            index_split_domain_at(&path);
+        }
+        let ws = root.join("ws.toml");
+        std::fs::write(
+            &ws,
+            "[[repo]]\nname = \"repo-a\"\npath = \"repo-a\"\n\n\
+             [[repo]]\nname = \"repo-b\"\npath = \"repo-b\"\n",
+        )
+        .unwrap();
+
+        let (status, json) = get_ws(root.join("repo-a"), ws, "/api/domains?repo=all").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let labels: Vec<&str> = json["domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["repo"].as_str().unwrap())
+            .collect();
+        assert!(
+            labels.contains(&"repo-a") && labels.contains(&"repo-b"),
+            "{json}"
+        );
+        let repos = json["repos"].as_array().unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0]["total_files"], 9);
+        assert_eq!(repos[1]["total_files"], 9);
     }
 
     /// A named repo searches only that repo.
@@ -5749,6 +5926,99 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["found"], false);
         assert_eq!(json["id"], "ADR-9999");
+    }
+
+    /// A repo whose `checkout` code is split across a `graphql/` layer
+    /// and a `tests/` tree: the endpoint's whole reason to exist is that
+    /// it puts those back together.
+    fn index_split_domain_at(root: &Path) {
+        for path in [
+            "checkout/models.rs",
+            "checkout/actions.rs",
+            "checkout/complete.rs",
+            "graphql/checkout/mutations.rs",
+            "graphql/checkout/resolvers.rs",
+            "tests/checkout/complete_test.rs",
+            "shipping/rates.rs",
+            "shipping/label.rs",
+            "shipping/carrier.rs",
+        ] {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, "pub fn f() {}\n").unwrap();
+        }
+        index_dir_at(root);
+    }
+
+    #[tokio::test]
+    async fn domains_regroups_a_concern_the_directory_tree_split_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+
+        let (status, json) = get(root, "/api/domains").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let checkout = json["domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "checkout")
+            .unwrap_or_else(|| panic!("no checkout domain: {json}"));
+        assert_eq!(checkout["file_count"], 6);
+        assert_eq!(checkout["layers"], 3);
+        assert!(
+            checkout.get("files").is_none(),
+            "an unnamed request returns summaries only: {checkout}"
+        );
+        assert_eq!(json["repos"][0]["total_files"], 9);
+        assert!(
+            json["repos"][0].get("repo").is_none(),
+            "an unscoped call carries no repo label: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn domains_returns_a_file_list_only_for_the_named_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+
+        let (status, json) = get(root, "/api/domains?name=checkout").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let domains = json["domains"].as_array().unwrap();
+        assert_eq!(domains.len(), 1, "narrowed to the named domain: {json}");
+        let files: Vec<&str> = domains[0]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap())
+            .collect();
+        assert_eq!(files.len(), 6);
+        assert!(files.contains(&"graphql/checkout/mutations.rs"));
+        assert!(files.contains(&"tests/checkout/complete_test.rs"));
+    }
+
+    #[tokio::test]
+    async fn domains_min_layers_keeps_only_what_the_tree_split_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+
+        let (status, json) = get(root, "/api/domains?min_layers=2").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = json["domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["checkout"], "shipping sits in one directory");
+        // The repo summary still reports every domain, so the filter
+        // reads as a filter rather than as the repo having one domain.
+        assert_eq!(json["repos"][0]["total_domains"], 2);
     }
 
     #[tokio::test]

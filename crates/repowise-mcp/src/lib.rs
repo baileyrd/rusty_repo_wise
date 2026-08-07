@@ -7,8 +7,11 @@
 //! `get_dead_code`, `get_health`, `get_refactor_candidates`,
 //! `get_doc_coverage`, `get_coupling`, `get_external_deps`,
 //! `get_commits`, `get_security_findings`, plus
-//! `list_repos`, `get_architecture` and `get_blast_radius` (the last
-//! seven have no counterpart in the reference) — the ones
+//! `list_repos`, `get_architecture`, `get_blast_radius` and
+//! `get_domains` (the last eight have no counterpart in the reference,
+//! and `get_domains` is this port's deterministic answer to a view the
+//! reference builds with an LLM agent — see `repowise-domains`) — the
+//! ones
 //! whose backing data (the index, the resolved dependency graph, health
 //! findings, `repowise-git`'s hotspot/churn/bug-fix and diff-shape data,
 //! `repowise-adr`'s mined decisions, or raw source on disk) already
@@ -557,6 +560,49 @@ fn default_dead_code_limit() -> usize {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DomainsParams {
+    /// Name one domain to get its file list back. Omit to get every
+    /// domain's summary without any file lists.
+    #[serde(default)]
+    name: Option<String>,
+    /// Only return domains reaching into at least this many directories.
+    /// `2` is "what did the directory tree split apart" — the question
+    /// this view answers that `get_architecture` cannot. Defaults to 1
+    /// (everything).
+    #[serde(default = "default_min_layers")]
+    min_layers: usize,
+    /// Caps the domain list, and the file list when `name` is given.
+    /// Defaults to 20.
+    #[serde(default = "default_domains_limit")]
+    limit: usize,
+    /// Which repo(s) to scan (issue #337). Omit for this server's own
+    /// indexed root -- the unscoped default, whose results carry no
+    /// `repo` label. Name a configured workspace repo, or pass `"all"`
+    /// to federate. Anything other than omitted requires `--workspace`.
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+fn default_min_layers() -> usize {
+    1
+}
+
+fn default_domains_limit() -> usize {
+    20
+}
+
+impl Default for DomainsParams {
+    fn default() -> Self {
+        DomainsParams {
+            name: None,
+            min_layers: default_min_layers(),
+            limit: default_domains_limit(),
+            repo: None,
+        }
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct DeadCodeParams {
     /// Minimum confidence tier to include: `"low"`, `"medium"`, or
     /// `"high"` (case-insensitive). Defaults to `"low"` (everything).
@@ -1196,6 +1242,67 @@ struct ExternalDependencyOutput {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct ExternalDepsOutput {
     dependencies: Vec<ExternalDependencyOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct DomainSpreadOutput {
+    /// A directory this domain's files live under, named below any
+    /// repo-wide container (see `container_dirs`).
+    directory: String,
+    files: usize,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct DomainOutput {
+    /// Which repo this came from. Absent on an unscoped call, matching
+    /// every other federated tool here (issue #337).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    /// The vocabulary term itself — a word this repo's own directory
+    /// names use, never one invented here.
+    name: String,
+    file_count: usize,
+    /// How many directories this domain reaches into. `1` means the
+    /// directory tree already grouped it; `2` or more is the case this
+    /// view exists for.
+    layers: usize,
+    spread: Vec<DomainSpreadOutput>,
+    /// Populated only when the request named this domain, since a large
+    /// domain's file list runs to hundreds of paths and every domain's
+    /// at once would swamp the response.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    files: Vec<String>,
+    /// Set when `files` was truncated by `limit`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    files_truncated: bool,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct DomainRepoOutput {
+    /// Absent on an unscoped call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    total_files: usize,
+    assigned_files: usize,
+    /// Files no term claimed, or that two claimed equally. A tie is
+    /// reported rather than resolved by a coin flip.
+    unassigned_files: usize,
+    total_domains: usize,
+    /// Terms dropped because most sibling directories share them
+    /// (`repowise-core`, `repowise-graph`, ... -> `repowise`).
+    shared_prefixes: Vec<String>,
+    /// Leading path components skipped when naming a domain's spread
+    /// because nearly every file sits under them (`saleor/`).
+    container_dirs: Vec<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct DomainsOutput {
+    domains: Vec<DomainOutput>,
+    /// Per-repo totals. Kept separate rather than summed: each repo's
+    /// vocabulary is derived from its own file counts, so a merged total
+    /// would mix denominators.
+    repos: Vec<DomainRepoOutput>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -2639,6 +2746,108 @@ impl RepowiseServer {
     }
 
     #[tool(
+        name = "get_domains",
+        description = "Group files by the vocabulary the repo names ITSELF with, so a concern spread across technical layers comes back as one thing. This is NOT business-domain extraction and no model is involved: every label is a word already written into a directory name, and a file is only ever labelled with a term present in its own path, so it cannot fabricate a domain for a file. Complements `get_architecture`, which groups by import structure -- measured on a 4301-file e-commerce repo whose apps ARE its domains, directory grouping places 58% correctly and every one of its misses is the same miss (a 1550-file `graphql/` layer reporting itself as the biggest 'domain'); this places 64% and dissolves that layer, returning `order` as 489 files spanning the order, graphql and tests trees at once. `min_layers: 2` asks exactly that question. Omit `name` for every domain's summary; pass `name` to get one domain's file list. Caveat: what comes back is vocabulary, which on a UI-heavy repo includes things that are not business concerns at all (an `icons` asset package can outrank every real domain) -- ranking by 'which of these is a business domain' is the interpretive step this deliberately does not take (issue #412)."
+    )]
+    fn get_domains(
+        &self,
+        Parameters(DomainsParams {
+            name,
+            min_layers,
+            limit,
+            repo,
+        }): Parameters<DomainsParams>,
+    ) -> Result<Json<Envelope<DomainsOutput>>, ErrorData> {
+        let started = Instant::now();
+        let targets = self.resolve_search_targets(repo.as_deref())?;
+
+        let mut domains: Vec<DomainOutput> = Vec::new();
+        let mut repos: Vec<DomainRepoOutput> = Vec::new();
+        let mut meta_index = None;
+        let mut meta_cached = false;
+        for target in &targets {
+            let (index, _graph, cached) = self.load_at(&target.root)?;
+            let map = repowise_domains::analyze(&index);
+
+            repos.push(DomainRepoOutput {
+                repo: target.repo.clone(),
+                total_files: map.total_files,
+                assigned_files: map.assigned(),
+                unassigned_files: map.unassigned.len(),
+                total_domains: map.domains.len(),
+                shared_prefixes: map.shared_prefixes.clone(),
+                container_dirs: map.container_dirs.clone(),
+            });
+
+            for domain in map.domains {
+                if domain.layers() < min_layers {
+                    continue;
+                }
+                if name.as_deref().is_some_and(|n| n != domain.name) {
+                    continue;
+                }
+                let wanted = name.as_deref() == Some(domain.name.as_str());
+                let files: Vec<String> = if wanted {
+                    domain
+                        .files
+                        .iter()
+                        .take(limit)
+                        .map(|p| p.display().to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                domains.push(DomainOutput {
+                    repo: target.repo.clone(),
+                    name: domain.name.clone(),
+                    file_count: domain.files.len(),
+                    layers: domain.layers(),
+                    spread: domain
+                        .spread
+                        .iter()
+                        .map(|(directory, files)| DomainSpreadOutput {
+                            directory: directory.clone(),
+                            files: *files,
+                        })
+                        .collect(),
+                    files_truncated: wanted && domain.files.len() > limit,
+                    files,
+                });
+            }
+
+            if meta_index.is_none() {
+                meta_cached = cached;
+                meta_index = Some(index);
+            }
+        }
+
+        // Largest first across the whole federated answer, so a
+        // workspace-wide call leads with the biggest domains rather than
+        // with whichever repo happened to be resolved first.
+        domains.sort_by(|a, b| {
+            b.file_count
+                .cmp(&a.file_count)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        // A named request is already narrowed to one domain per repo, so
+        // the limit belongs to its file list rather than to this list.
+        if name.is_none() {
+            domains.truncate(limit);
+        }
+
+        let index = meta_index.ok_or_else(|| {
+            ErrorData::invalid_params("the configured workspace has no repos".to_string(), None)
+        })?;
+
+        Ok(self.indexed(
+            DomainsOutput { domains, repos },
+            &index,
+            started,
+            meta_cached,
+        ))
+    }
+
+    #[tool(
         name = "get_dead_code",
         description = "Confidence-tiered dead-code candidates: functions/methods with zero resolved in-repo callers, tiered `low`/`medium`/`high` by how much two cheap risk factors (an ambiguous same-named symbol elsewhere, or an unresolved import that might have targeted this file) undercut that signal — see repowise_health::find_dead_code for the exact logic. `min_confidence` filters to that tier and above; `safe_only` narrows to `high` only, the closest this tool gets to the reference's 'safe to delete' designation. Even `high` confidence is a claim about this port's own static call graph, NOT a runtime-safety guarantee: reflection, dynamic dispatch, and entry points are invisible to it. `limit` caps the returned list (default 50); `total_matching` in the response reports how many matched before truncation."
     )]
@@ -3223,6 +3432,178 @@ mod tests {
         }
         s.push_str("    0\n}\n");
         s
+    }
+
+    /// A repo whose `checkout` code is split across a `graphql/` layer
+    /// and a `tests/` tree -- the shape `get_architecture` reports as
+    /// three separate things and this tool puts back together.
+    fn index_split_domain_at(root: &Path) {
+        for path in [
+            "checkout/models.rs",
+            "checkout/actions.rs",
+            "checkout/complete.rs",
+            "graphql/checkout/mutations.rs",
+            "graphql/checkout/resolvers.rs",
+            "tests/checkout/complete_test.rs",
+            "shipping/rates.rs",
+            "shipping/label.rs",
+            "shipping/carrier.rs",
+        ] {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, "pub fn f() {}\n").unwrap();
+        }
+        build_and_save_index(root);
+    }
+
+    #[test]
+    fn get_domains_regroups_a_concern_the_directory_tree_split_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+        let server = RepowiseServer::new(root, None);
+
+        let Json(Envelope { data, .. }) = server
+            .get_domains(Parameters(DomainsParams::default()))
+            .expect("domains");
+
+        let checkout = data
+            .domains
+            .iter()
+            .find(|d| d.name == "checkout")
+            .expect("checkout domain");
+        assert_eq!(checkout.file_count, 6);
+        assert_eq!(checkout.layers, 3);
+        assert!(
+            checkout.files.is_empty(),
+            "an unnamed request returns summaries only"
+        );
+        assert_eq!(data.repos.len(), 1);
+        assert_eq!(data.repos[0].total_files, 9);
+        assert!(
+            data.repos[0].repo.is_none(),
+            "an unscoped call carries no repo label"
+        );
+    }
+
+    #[test]
+    fn get_domains_returns_a_file_list_only_for_the_named_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+        let server = RepowiseServer::new(root, None);
+
+        let Json(Envelope { data, .. }) = server
+            .get_domains(Parameters(DomainsParams {
+                name: Some("checkout".to_string()),
+                ..Default::default()
+            }))
+            .expect("domains");
+
+        assert_eq!(data.domains.len(), 1);
+        assert_eq!(data.domains[0].files.len(), 6);
+        assert!(data.domains[0]
+            .files
+            .contains(&"graphql/checkout/mutations.rs".to_string()));
+        assert!(!data.domains[0].files_truncated);
+    }
+
+    /// `limit` caps a named domain's file list, and says so rather than
+    /// letting a short list read as the whole thing.
+    #[test]
+    fn get_domains_marks_a_truncated_file_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+        let server = RepowiseServer::new(root, None);
+
+        let Json(Envelope { data, .. }) = server
+            .get_domains(Parameters(DomainsParams {
+                name: Some("checkout".to_string()),
+                limit: 2,
+                ..Default::default()
+            }))
+            .expect("domains");
+
+        assert_eq!(data.domains[0].files.len(), 2);
+        assert!(data.domains[0].files_truncated);
+        assert_eq!(
+            data.domains[0].file_count, 6,
+            "the true count survives truncation"
+        );
+    }
+
+    #[test]
+    fn get_domains_min_layers_keeps_only_what_the_tree_split_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+        let server = RepowiseServer::new(root, None);
+
+        let Json(Envelope { data, .. }) = server
+            .get_domains(Parameters(DomainsParams {
+                min_layers: 2,
+                ..Default::default()
+            }))
+            .expect("domains");
+
+        let names: Vec<&str> = data.domains.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["checkout"], "shipping sits in one directory");
+        assert_eq!(
+            data.repos[0].total_domains, 2,
+            "the summary still reports every domain, so the filter reads as a filter"
+        );
+    }
+
+    #[test]
+    fn get_domains_federates_with_per_repo_totals_rather_than_one_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repos: Vec<repowise_workspace::ResolvedWorkspaceRepo> = ["repo-a", "repo-b"]
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                index_split_domain_at(&path);
+                repowise_workspace::ResolvedWorkspaceRepo {
+                    name: name.to_string(),
+                    path,
+                    index: None,
+                }
+            })
+            .collect();
+        let own = repos[0].path.clone();
+        let server = RepowiseServer::new(own, Some(repos));
+
+        let Json(Envelope { data, .. }) = server
+            .get_domains(Parameters(DomainsParams {
+                repo: Some("all".to_string()),
+                ..Default::default()
+            }))
+            .expect("federated domains");
+
+        assert_eq!(data.repos.len(), 2);
+        assert!(data.repos.iter().all(|r| r.total_files == 9));
+        assert!(
+            data.domains.iter().all(|d| d.repo.is_some()),
+            "every federated domain names its repo"
+        );
+    }
+
+    #[test]
+    fn get_domains_with_a_repo_but_no_workspace_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        index_split_domain_at(&root);
+        let server = RepowiseServer::new(root, None);
+
+        let result = server.get_domains(Parameters(DomainsParams {
+            repo: Some("repo-a".to_string()),
+            ..Default::default()
+        }));
+        let Err(err) = result else {
+            panic!("repo without a workspace must be refused");
+        };
+        assert!(format!("{err:?}").contains("workspace"), "{err:?}");
     }
 
     #[test]

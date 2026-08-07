@@ -1,3 +1,4 @@
+mod agent_install;
 mod agent_md;
 mod doctor;
 mod export;
@@ -153,6 +154,24 @@ enum Command {
         /// Print the generated block to stdout and write nothing.
         #[arg(long)]
         stdout: bool,
+    },
+    /// Register `repowise serve` as an MCP server with a coding agent,
+    /// in that agent's own project-level config format (issue #411).
+    ///
+    /// Every supported host consumes the same stdio MCP server, so this
+    /// writes a config file rather than adding capability. Existing
+    /// configs are **merged**: other MCP servers already registered are
+    /// preserved, and only the `repowise` entry is written.
+    ///
+    /// Project-level only -- nothing outside the target repo is
+    /// touched. A user-level install is deliberately not a default; see
+    /// issue #411.
+    Install {
+        /// Which agent host: `claude-code`, `codex`, `cursor`,
+        /// `opencode`, or `vscode`. Omit to report what is registered.
+        host: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// Search the index by symbol name (default), file path, or both --
     /// case-insensitive substring match -- or by meaning with `--mode
@@ -915,6 +934,7 @@ fn main() -> anyhow::Result<()> {
             agent_md::AGENTS_OUTPUT,
             "generate-agents-md",
         ),
+        Command::Install { host, path } => cmd_install(host.as_deref(), &path),
         Command::Search {
             query,
             path,
@@ -1844,6 +1864,34 @@ fn cmd_distill(command: &[String]) -> anyhow::Result<()> {
 /// command they name inside the block -- the managed-marker rules,
 /// content, and refusal behaviour are deliberately identical, so a repo
 /// keeping both files can't have them drift.
+/// Backs `repowise install` (issue #411).
+///
+/// With no host, reports what is registered rather than guessing which
+/// agent the caller meant -- installing into the wrong host's config
+/// would be a silent no-op from the user's point of view.
+fn cmd_install(host: Option<&str>, path: &Path) -> anyhow::Result<()> {
+    let root = path.canonicalize()?;
+
+    let Some(host) = host else {
+        print!("{}", agent_install::status(&root));
+        return Ok(());
+    };
+
+    let Some(host) = agent_install::Host::parse(host) else {
+        let known: Vec<&str> = agent_install::Host::ALL.iter().map(|h| h.slug()).collect();
+        anyhow::bail!("unknown host {host:?} -- known hosts: {}", known.join(", "));
+    };
+
+    let (outcome, report) = agent_install::install(&root, host)?;
+    println!("{report}");
+    if outcome == agent_install::Outcome::ManualStepNeeded {
+        // Not an error: nothing failed, and the config is valid -- it
+        // simply needs a hand-edit this tool declines to make.
+        println!("\nNothing was written.");
+    }
+    Ok(())
+}
+
 fn cmd_generate_agent_md(
     path: &Path,
     output: Option<&Path>,

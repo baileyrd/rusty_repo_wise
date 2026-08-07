@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "repowise": {
+      "args": [
+        "serve"
+      ],
+      "command": "repowise"
+    }
+  }
+}

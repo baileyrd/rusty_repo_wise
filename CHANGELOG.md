@@ -5,6 +5,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `repowise install <host>` registers `repowise serve` as an MCP server
+  with a coding agent, in that agent's own project-level config format:
+  Claude Code, Codex, Cursor, opencode, and VS Code + Copilot. Existing
+  configs are merged rather than replaced, a file that doesn't parse is
+  refused rather than overwritten, and an existing Codex `config.toml`
+  is never rewritten (TOML round-trips drop comments) — the block to add
+  is printed instead. Project-level only; nothing outside the target
+  repo is written. `.cursor/mcp.json` and `.vscode/mcp.json` are now
+  committed here too (#411).
 - Codex and opencode integration (#333): `.codex/config.toml` +
   `.codex/hooks.json` and `opencode.json`, both committed project-level
   configs, so cloning the repo is the whole install. Codex's hook

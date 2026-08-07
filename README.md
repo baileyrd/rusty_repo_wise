@@ -3163,6 +3163,55 @@ Three deliberate choices here:
 from; an index written before this existed loads fine and simply reports
 its commit as unknown until the next re-index.
 
+## `repowise install <host>`
+
+Issue #411's first slice. Every supported agent host consumes the same
+thing — `repowise serve` over stdio — so pointing one at a codebase is a
+config file, not new capability. `repowise install` writes it.
+
+```
+$ repowise install
+Agent host MCP registration:
+  claude-code  .mcp.json                    not configured
+  codex        .codex/config.toml           registered
+  cursor       .cursor/mcp.json             registered
+  opencode     opencode.json                registered
+  vscode       .vscode/mcp.json             registered
+
+$ repowise install cursor
+created .cursor/mcp.json
+```
+
+**This matters mostly for other repos.** The configs committed at this
+repo's root only help people working on `rusty_repo_wise` itself;
+`install` is how you point an agent at your own codebase.
+
+The three schemas genuinely differ, and each was checked against that
+host's own documentation rather than copied from the others — VS Code
+nests under `servers` and requires `"type": "stdio"`, Cursor and Claude
+Code use `mcpServers` with no type, opencode uses `mcp` with
+`"type": "local"` and a single `command` *array*.
+
+- **Existing configs are merged, never replaced.** Other MCP servers
+  already registered are preserved; only the `repowise` entry is
+  written. Clobbering someone's server list to add one entry would be a
+  worse failure than not installing.
+- **A file that doesn't parse is refused, not overwritten** — replacing
+  something unreadable would silently discard whatever was meant to be
+  there.
+- **An existing Codex `config.toml` is never rewritten.** It's TOML, and
+  a parser round-trip drops comments and reorders keys. Detection parses
+  read-only; the block to add is printed instead.
+- **Project-level only.** Nothing outside the target repo is written. A
+  user-level install (`~/.cursor/mcp.json`) would be the first time this
+  tool wrote outside the directory it was pointed at, and that's an open
+  question on #411 rather than a default.
+
+Claude Code is deliberately **not** registered in this repo:
+`claude-plugin/` already provides it, and adding a root `.mcp.json` too
+would start two repowise servers. `install claude-code` exists for repos
+that want the MCP server without a plugin directory.
+
 ## Codex and opencode
 
 Issue #333's other two hosts. Both read a **project-level config file**

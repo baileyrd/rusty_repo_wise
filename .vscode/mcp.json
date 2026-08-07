@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "repowise": {
+      "args": [
+        "serve"
+      ],
+      "command": "repowise",
+      "type": "stdio"
+    }
+  }
+}

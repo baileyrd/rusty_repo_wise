@@ -38,5 +38,11 @@ repowise-workspace = { path = "../repowise-workspace" }
 anyhow.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde_json.workspace = true
+# Already resolved at this exact version in Cargo.lock (repowise-health,
+# repowise-server and repowise-external-deps all depend on it), so this
+# adds no new crate version to the tree -- the same precedent
+# repowise-server's own `ring` dependency records. Used read-only, to
+# detect whether a Codex `config.toml` already registers this server.
+toml = "0.8"
 clap.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
